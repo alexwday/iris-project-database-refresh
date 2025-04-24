@@ -131,20 +131,20 @@ def analyze_document_with_di(di_client, local_file_path, output_format=DocumentC
     try:
         # Read the file content first
         with open(local_file_path, "rb") as f:
-            document_bytes = f.read()
+            document_bytes = f.read() # Read bytes only once
 
-        # Pass model_id and document bytes positionally, others as kwargs
+        # Try passing bytes directly as the second argument, as allowed by the SDK signature.
         poller = di_client.begin_analyze_document(
-            "prebuilt-layout",  # model_id (positional)
-            document_bytes,     # document content / body (positional)
+            "prebuilt-layout",       # model_id (positional)
+            document_bytes,          # analyze_request (positional, as bytes)
             output_content_format=output_format # kwargs
-            # content_type is inferred from bytes, no longer needed explicitly here
         )
         result = poller.result()
         print(f"   DI analysis successful.")
         return result
     except Exception as e:
-        print(f"   [ERROR] Document Intelligence analysis failed for {local_file_path}: {e}")
+        # Print the specific error type for better debugging
+        print(f"   [ERROR] Document Intelligence analysis failed for {local_file_path}: {type(e).__name__} - {e}")
         return None
 
 def split_pdf(local_pdf_path, chunk_size, temp_dir):
