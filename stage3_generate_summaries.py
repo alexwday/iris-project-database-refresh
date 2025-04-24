@@ -269,12 +269,13 @@ def call_gpt_summarizer(api_client, markdown_content):
 
         # Note: The openai client might need explicit SSL context/CA bundle handling
         # depending on its version and underlying HTTP library (e.g., httpx).
-        # If REQUESTS_CA_BUNDLE doesn't work automatically for openai,
+        # If REQUESTS_CA_BUNDLE/SSL_CERT_FILE doesn't work automatically for openai,
         # you might need to configure the client like this:
         # import httpx
-        # ssl_context = httpx.create_ssl_context(verify=os.environ.get('REQUESTS_CA_BUNDLE'))
+        # cert_path = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')
+        # ssl_context = httpx.create_ssl_context(verify=cert_path)
         # client = OpenAI(..., http_client=httpx.Client(verify=ssl_context))
-        # For now, assume REQUESTS_CA_BUNDLE might be sufficient or openai uses requests internally.
+        # For now, assume env vars might be sufficient or openai uses requests internally.
 
         response = api_client.chat.completions.create(
             model=GPT_CONFIG['model_name'],
@@ -330,7 +331,8 @@ def call_gpt_summarizer(api_client, markdown_content):
 
 if __name__ == "__main__":
     temp_cert_file_path = None # Store path instead of file object
-    original_ssl_env = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
+    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
+    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
 
     print("\n" + "="*60)
     print(f"--- Running Stage 3: Generate Document Summaries ---")
@@ -364,7 +366,7 @@ if __name__ == "__main__":
     try:
         # --- Download and Set Custom CA Bundle ---
         print("[3] Setting up Custom CA Bundle...")
-        try: # Inner try for CA bundle download specifically
+        try: # Inner try/except for CA bundle download/setup
             if smbclient.path.exists(ca_bundle_smb_path):
                 # Create a temporary file to store the certificate
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".cer") as temp_cert_file:
@@ -373,19 +375,25 @@ if __name__ == "__main__":
                         temp_cert_file.write(nas_f.read())
                     temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
 
-                # Set the environment variable for requests library
-                os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
-                print(f"   Set REQUESTS_CA_BUNDLE environment variable to: {temp_cert_file_path}")
+                # Set the environment variables
+                if temp_cert_file_path: # Ensure path was obtained
+                    os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
+                    os.environ['SSL_CERT_FILE'] = temp_cert_file_path
+                    print(f"   Set REQUESTS_CA_BUNDLE environment variable to: {temp_cert_file_path}")
+                    print(f"   Set SSL_CERT_FILE environment variable to: {temp_cert_file_path}")
             else:
                 print(f"   [WARNING] CA Bundle file not found at {ca_bundle_smb_path}. Proceeding without custom CA bundle.")
         except smbclient.SambaClientError as e:
-            print(f"   [ERROR] SMB Error downloading CA bundle '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
+            print(f"   [ERROR] SMB Error during CA bundle handling '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
         except Exception as e:
-            print(f"   [ERROR] Unexpected error downloading/setting CA bundle '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
-            # Cleanup potentially created temp file if error occurred after creation but before setting env var
+            print(f"   [ERROR] Unexpected error during CA bundle handling '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
+            # Cleanup potentially created temp file if error occurred after creation
             if temp_cert_file_path and os.path.exists(temp_cert_file_path):
-                os.remove(temp_cert_file_path)
-                temp_cert_file_path = None
+                try:
+                    os.remove(temp_cert_file_path)
+                    print(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
+                    temp_cert_file_path = None
+                except OSError: pass # Ignore cleanup error
         print("-" * 60)
 
         # --- Load Stage 1 Metadata ---
@@ -552,18 +560,31 @@ if __name__ == "__main__":
                 os.remove(temp_cert_file_path)
                 print(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
             except OSError as e:
-                print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
+                 print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
 
-        # Restore original environment variable if it existed
-        if original_ssl_env is None:
+        # Restore original environment variables
+        # Restore REQUESTS_CA_BUNDLE
+        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+        if original_requests_ca_bundle is None:
             # If it didn't exist originally, remove it if we set it
-            if 'REQUESTS_CA_BUNDLE' in os.environ and os.environ['REQUESTS_CA_BUNDLE'] == temp_cert_file_path:
+            if current_requests_bundle == temp_cert_file_path:
                  print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
                  del os.environ['REQUESTS_CA_BUNDLE']
         else:
-            # If it existed originally, restore its value
-            if os.environ.get('REQUESTS_CA_BUNDLE') != original_ssl_env:
+            # If it existed originally, restore its value if it changed
+            if current_requests_bundle != original_requests_ca_bundle:
                  print(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
-                 os.environ['REQUESTS_CA_BUNDLE'] = original_ssl_env
-            # else: # Optional: If it's already the original value, no need to restore
-                 # print("   REQUESTS_CA_BUNDLE already has its original value.")
+                 os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
+
+        # Restore SSL_CERT_FILE
+        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
+        if original_ssl_cert_file is None:
+            # If it didn't exist originally, remove it if we set it
+            if current_ssl_cert == temp_cert_file_path:
+                 print("   Unsetting SSL_CERT_FILE environment variable.")
+                 del os.environ['SSL_CERT_FILE']
+        else:
+            # If it existed originally, restore its value if it changed
+            if current_ssl_cert != original_ssl_cert_file:
+                 print(f"   Restoring original SSL_CERT_FILE environment variable.")
+                 os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
