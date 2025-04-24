@@ -116,8 +116,8 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
     Returns:
         list[dict] | None: A list of dictionaries, where each dictionary represents
                            a file and contains 'file_name', 'file_path', 'file_size',
-                           and 'date_last_modified' keys. Returns None if an error
-                           occurs during listing or connection.
+                           'date_last_modified', and 'date_created' keys.
+                           Returns None if an error occurs during listing or connection.
     """
     files_list = []
     smb_base_path = f"//{nas_ip}/{share_name}/{base_folder_path}"
@@ -158,6 +158,22 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                     # Convert modification time to timezone-aware UTC datetime
                     last_modified_dt = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
 
+                    # Attempt to get creation time (st_birthtime), fallback to modification time
+                    creation_timestamp = None
+                    if hasattr(stat_info, 'st_birthtime') and stat_info.st_birthtime:
+                        try:
+                            creation_timestamp = stat_info.st_birthtime
+                            print(f"      Found birthtime: {creation_timestamp}") # Debug print
+                        except Exception as e:
+                             print(f"      [WARNING] Error accessing st_birthtime for {filename}: {e}. Falling back to mtime.")
+                             creation_timestamp = stat_info.st_mtime # Fallback
+                    else:
+                        # print(f"      No st_birthtime found for {filename}. Falling back to mtime.") # Optional verbosity
+                        creation_timestamp = stat_info.st_mtime # Fallback if attribute doesn't exist
+
+                    created_dt = datetime.fromtimestamp(creation_timestamp, tz=timezone.utc)
+
+
                     # Calculate the file path relative to the share root
                     if full_smb_path.startswith(share_prefix):
                         full_path_from_share = full_smb_path[len(share_prefix):]
@@ -171,7 +187,8 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                         'file_name': filename,
                         'file_path': full_path_from_share, # Store path relative to share root
                         'file_size': stat_info.st_size,
-                        'date_last_modified': last_modified_dt
+                        'date_last_modified': last_modified_dt,
+                        'date_created': created_dt # Add the determined creation date
                     })
                 except smbclient.SambaClientError as stat_err:
                      print(f"      [WARNING] SMB Error getting stats for file '{full_smb_path}': {stat_err}. Skipping file.")
@@ -361,7 +378,8 @@ if __name__ == "__main__":
     print(f"   NAS files found: {len(nas_df)}")
 
     # Initialize comparison result DataFrames
-    files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
+    # Add date_created to files_to_process
+    files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
     # Add document_source, document_type, document_name to files_to_delete
     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Files to delete from DB
 
@@ -373,7 +391,8 @@ if __name__ == "__main__":
         # files_to_delete remains empty as we only delete based on NAS updates here
     elif db_df.empty:
         print("   Result: DB catalog is empty. All NAS files are considered 'new'.")
-        files_to_process = nas_df[['file_name', 'file_path', 'file_size', 'date_last_modified']].copy()
+        # Include date_created when selecting columns
+        files_to_process = nas_df[['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']].copy()
         files_to_process['reason'] = 'new'
         # files_to_delete remains empty
     else:
@@ -406,11 +425,14 @@ if __name__ == "__main__":
         # --- Identify New Files ---
         # Files present only on NAS ('left_only' in the merge)
         new_files_mask = comparison_df['_merge'] == 'left_only'
-        new_files = comparison_df.loc[new_files_mask, ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas']].copy()
+        # Include date_created_nas when selecting columns
+        new_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created_nas']
+        new_files = comparison_df.loc[new_files_mask, new_files_cols].copy()
         new_files.rename(columns={
             'file_path_nas': 'file_path',
             'file_size_nas': 'file_size',
-            'date_last_modified_nas': 'date_last_modified'
+            'date_last_modified_nas': 'date_last_modified',
+            'date_created_nas': 'date_created' # Rename date_created
         }, inplace=True)
         new_files['reason'] = 'new'
         print(f"      Identified {len(new_files)} new files (present on NAS, not in DB).")
@@ -428,33 +450,35 @@ if __name__ == "__main__":
              updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'] > both_files['date_last_modified_db'])
 
              # Get NAS details for files identified as updated
-             updated_files_nas = both_files.loc[updated_mask, ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas']].copy()
+             # Include date_created_nas when selecting columns
+             updated_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created_nas']
+             updated_files_nas = both_files.loc[updated_mask, updated_files_cols].copy()
              updated_files_nas.rename(columns={
                  'file_path_nas': 'file_path',
                  'file_size_nas': 'file_size',
-                 'date_last_modified_nas': 'date_last_modified'
+                 'date_last_modified_nas': 'date_last_modified',
+                 'date_created_nas': 'date_created' # Rename date_created
              }, inplace=True)
              updated_files_nas['reason'] = 'updated'
              print(f"      Identified {len(updated_files_nas)} updated files (newer on NAS than in DB).")
 
              # Get DB details for files that need to be deleted because they were updated
-             # Include document_source, document_type, document_name from the DB side (_db suffix)
-             db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source_db', 'document_type_db', 'document_name_db']
+             # Select the original column names from the DB side of the merge
+             # (document_source, document_type, document_name don't get suffixes as they only exist in db_df)
+             db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source', 'document_type', 'document_name']
              # Ensure all required columns exist before selecting
              existing_db_cols = [col for col in db_cols_to_keep if col in both_files.columns]
+             if len(existing_db_cols) != len(db_cols_to_keep):
+                  missing_cols = set(db_cols_to_keep) - set(existing_db_cols)
+                  print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for deletion list. Check merge logic.")
              files_to_delete = both_files.loc[updated_mask, existing_db_cols].copy()
-             # Rename columns to match the target structure
-             files_to_delete.rename(columns={
-                 'file_path_db': 'file_path',
-                 'document_source_db': 'document_source',
-                 'document_type_db': 'document_type',
-                 'document_name_db': 'document_name'
-             }, inplace=True)
+             # Rename only the column that definitely has a suffix
+             files_to_delete.rename(columns={'file_path_db': 'file_path'}, inplace=True)
              print(f"      Identified {len(files_to_delete)} DB records to delete (corresponding to updated files).")
         else:
              print("      [WARNING] 'date_last_modified' columns missing in merged data for update check. Skipping update detection.")
-             updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
              # Update the empty DataFrame definition here as well
+             updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
              files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
 
 
@@ -489,9 +513,12 @@ if __name__ == "__main__":
 
     # Save the list of DB records to be deleted (corresponding to updated files)
     print(f"   Saving 'files to delete' list to: '{os.path.basename(delete_output_smb_file)}'...")
+
     # Ensure 'id' column is integer type for JSON compatibility if it exists and has data
     if 'id' in files_to_delete.columns and not files_to_delete['id'].isnull().all():
          files_to_delete['id'] = files_to_delete['id'].astype('Int64') # Use nullable integer type
+
+    # Convert the DataFrame to JSON
     delete_json_string = files_to_delete.to_json(orient='records', indent=4)
     if not write_json_to_nas(delete_output_smb_file, delete_json_string):
         print("   [CRITICAL ERROR] Failed to write 'files to delete' JSON to NAS. Exiting.")

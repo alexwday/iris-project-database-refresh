@@ -540,7 +540,8 @@ if __name__ == "__main__":
                     "document_name": doc_name,
                     "document_description": description,
                     "document_usage": usage,
-                    "date_created": datetime.now(timezone.utc).isoformat(),
+                    # Use date_created from Stage 1 metadata (original creation or fallback to modified)
+                    "date_created": original_metadata.get('date_created'),
                     "date_last_modified": original_metadata.get('date_last_modified'),
                     "file_name": original_metadata.get('file_name'), # Redundant but matches original structure
                     "file_type": os.path.splitext(original_metadata.get('file_name', ''))[1],
