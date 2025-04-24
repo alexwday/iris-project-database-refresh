@@ -334,6 +334,7 @@ if __name__ == "__main__":
     temp_cert_file_path = None # Store path instead of file object
     original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
     original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
+    encoding = None # Initialize encoding to None
 
     print("\n" + "="*60)
     print(f"--- Running Stage 3: Generate Document Summaries ---")
@@ -363,22 +364,10 @@ if __name__ == "__main__":
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     print("-" * 60)
 
-    # --- Initialize Tiktoken Encoding ---
-    # Using cl100k_base as it's common for gpt-4, gpt-3.5-turbo, text-embedding-ada-002
-    # Adjust if your model uses a different encoding.
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")
-        print("[3] Tiktoken encoding 'cl100k_base' initialized.")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize tiktoken encoding: {e}. Token counts will not be available.")
-        encoding = None # Set encoding to None if initialization fails
-    print("-" * 60)
-
-
     # --- Main Processing Block with Cleanup ---
     try:
         # --- Download and Set Custom CA Bundle ---
-        print("[4] Setting up Custom CA Bundle...") # Step number adjusted
+        print("[3] Setting up Custom CA Bundle...")
         try: # Inner try/except for CA bundle download/setup
             if smbclient.path.exists(ca_bundle_smb_path):
                 # Create a temporary file to store the certificate
@@ -407,8 +396,22 @@ if __name__ == "__main__":
                     print(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
                     temp_cert_file_path = None
                 except OSError: pass # Ignore cleanup error
+        print("-" * 60)
+
+        # --- Initialize Tiktoken Encoding (AFTER setting potential custom CA) ---
+        print("[4] Initializing Tiktoken Encoding...")
+        # Using cl100k_base as it's common for gpt-4, gpt-3.5-turbo, text-embedding-ada-002
+        # Adjust if your model uses a different encoding.
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+            print("   Tiktoken encoding 'cl100k_base' initialized successfully.")
+        except Exception as e:
+            print(f"   [ERROR] Failed to initialize tiktoken encoding: {e}. Token counts will not be available.")
+            # encoding remains None
+        print("-" * 60)
+
         # --- Load Stage 1 Metadata ---
-        print(f"[5] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...") # Step number adjusted
+        print(f"[5] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...")
         stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
         if stage1_metadata_list is None:
             print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
@@ -425,8 +428,10 @@ if __name__ == "__main__":
             else:
                 print(f"   [WARNING] Skipping metadata item due to missing 'file_name': {item}")
         print(f"   Loaded metadata for {len(metadata_lookup)} files.")
+        print("-" * 60)
+
         # --- Load Existing Stage 3 Results (Checkpointing) ---
-        print(f"[6] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...") # Step number adjusted
+        print(f"[6] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...")
         catalog_entries = read_json_from_nas(stage3_output_smb_path)
         if catalog_entries is None:
             print("[CRITICAL ERROR] Failed to load or initialize existing Stage 3 results. Exiting.")
@@ -438,8 +443,10 @@ if __name__ == "__main__":
         processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
         print(f"   Found {len(catalog_entries)} existing catalog entries.")
         print(f"   Identified {len(processed_md_files)} already processed Markdown files.")
+        print("-" * 60)
+
         # --- Find Markdown Files from Stage 2 ---
-        print(f"[7] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...") # Step number adjusted
+        print(f"[7] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...")
         md_files_to_process = find_md_files(stage2_md_dir_smb_path)
         if not md_files_to_process:
             print("   No Markdown files found to process.")
@@ -448,8 +455,10 @@ if __name__ == "__main__":
             print("="*60 + "\n")
             # No sys.exit(0) here, allow finally block to run
         else:
+            print("-" * 60)
+
             # --- Process Each Markdown File ---
-            print(f"[8] Processing {len(md_files_to_process)} Markdown files...") # Step number adjusted
+            print(f"[8] Processing {len(md_files_to_process)} Markdown files...")
             new_entries_count = 0
             skipped_count = 0
             error_count = 0
@@ -592,7 +601,9 @@ if __name__ == "__main__":
             # If it didn't exist originally, remove it if we set it
             if current_requests_bundle == temp_cert_file_path:
                  print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
-                 del os.environ['REQUESTS_CA_BUNDLE']
+                 # Check if key exists before deleting
+                 if 'REQUESTS_CA_BUNDLE' in os.environ:
+                     del os.environ['REQUESTS_CA_BUNDLE']
         else:
             # If it existed originally, restore its value if it changed
             if current_requests_bundle != original_requests_ca_bundle:
@@ -605,7 +616,9 @@ if __name__ == "__main__":
             # If it didn't exist originally, remove it if we set it
             if current_ssl_cert == temp_cert_file_path:
                  print("   Unsetting SSL_CERT_FILE environment variable.")
-                 del os.environ['SSL_CERT_FILE']
+                 # Check if key exists before deleting
+                 if 'SSL_CERT_FILE' in os.environ:
+                     del os.environ['SSL_CERT_FILE']
         else:
             # If it existed originally, restore its value if it changed
             if current_ssl_cert != original_ssl_cert_file:
