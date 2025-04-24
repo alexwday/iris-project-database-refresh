@@ -335,7 +335,16 @@ if __name__ == "__main__":
                             analyze_result = analyze_document_with_di(di_client, chunk_path)
                             if analyze_result and analyze_result.content:
                                 combined_markdown += analyze_result.content + "\n\n" # Add separator between chunks
-                                results_json_list.append(analyze_result.to_dict())
+                                # Manually create dictionary from AnalyzeResult
+                                result_dict = {'content': analyze_result.content}
+                                if hasattr(analyze_result, 'pages'):
+                                    result_dict['pages'] = [page.__dict__ for page in analyze_result.pages] # Basic page info
+                                if hasattr(analyze_result, 'tables') and analyze_result.tables:
+                                    result_dict['tables_count'] = len(analyze_result.tables)
+                                if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
+                                    result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
+                                # Add other relevant attributes if needed
+                                results_json_list.append(result_dict)
                                 print(f"      Chunk {chunk_index + 1} processed successfully.")
                             else:
                                 print(f"      [ERROR] Failed to process chunk {chunk_index + 1} for {file_name}.")
@@ -352,7 +361,16 @@ if __name__ == "__main__":
                     analyze_result = analyze_document_with_di(di_client, local_file_path)
                     if analyze_result and analyze_result.content:
                         combined_markdown = analyze_result.content
-                        results_json_list.append(analyze_result.to_dict())
+                        # Manually create dictionary from AnalyzeResult
+                        result_dict = {'content': analyze_result.content}
+                        if hasattr(analyze_result, 'pages'):
+                             result_dict['pages'] = [page.__dict__ for page in analyze_result.pages] # Basic page info
+                        if hasattr(analyze_result, 'tables') and analyze_result.tables:
+                            result_dict['tables_count'] = len(analyze_result.tables)
+                        if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
+                            result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
+                        # Add other relevant attributes if needed
+                        results_json_list.append(result_dict)
                     else:
                         print(f"   [ERROR] Failed to process document {file_name}.")
                         file_has_error = True
