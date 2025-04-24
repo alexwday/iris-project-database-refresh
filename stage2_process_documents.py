@@ -129,13 +129,17 @@ def analyze_document_with_di(di_client, local_file_path, output_format=DocumentC
     """Analyzes a local document using Azure Document Intelligence layout model."""
     print(f"   Analyzing local file with DI: {local_file_path}")
     try:
+        # Read the file content first
         with open(local_file_path, "rb") as f:
-            poller = di_client.begin_analyze_document(
-                "prebuilt-layout",
-                analyze_request=f, # Sending file stream directly
-                content_type="application/octet-stream", # Specify content type
-                output_content_format=output_format # Use the corrected format variable
-            )
+            document_bytes = f.read()
+
+        # Pass model_id and document bytes positionally, others as kwargs
+        poller = di_client.begin_analyze_document(
+            "prebuilt-layout",  # model_id (positional)
+            document_bytes,     # document content / body (positional)
+            output_content_format=output_format # kwargs
+            # content_type is inferred from bytes, no longer needed explicitly here
+        )
         result = poller.result()
         print(f"   DI analysis successful.")
         return result
