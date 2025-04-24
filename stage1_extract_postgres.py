@@ -66,20 +66,32 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
              return None # Indicate error
 
         for dirpath, dirnames, filenames in smbclient.walk(smb_base_path):
-            relative_dirpath = os.path.relpath(dirpath, smb_base_path).replace('\\', '/') # Normalize path separators
+            # Calculate relative path from the base folder path provided in config
+            relative_dirpath = os.path.relpath(dirpath, smb_base_path)
+            # Normalize slashes and handle root case
+            relative_dirpath = relative_dirpath.replace('\\', '/').strip('/')
             if relative_dirpath == '.':
-                 relative_dirpath = '' # Root of the specified path
+                 relative_dirpath = '' # Ensure root is empty string, not '.'
 
             for filename in filenames:
+                # --- Skip temporary/system files ---
+                if filename == '.DS_Store' or filename.startswith('~$'):
+                    print(f"Skipping temporary/system file: {filename}")
+                    continue 
+                # --- End Skip ---
+
                 full_smb_path = os.path.join(dirpath, filename).replace('\\', '/')
                 try:
                     stat_info = smbclient.stat(full_smb_path)
                     # Convert timestamp to timezone-aware UTC datetime
                     last_modified_dt = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
                     
+                    # Construct the relative file path carefully
+                    relative_file_path = os.path.join(relative_dirpath, filename).replace('\\', '/')
+                    
                     files_list.append({
                         'file_name': filename,
-                        'file_path': os.path.join(relative_dirpath, filename).replace('\\', '/'), # Relative path within share folder
+                        'file_path': relative_file_path.strip('/'), # Store normalized relative path
                         'file_size': stat_info.st_size,
                         'date_last_modified': last_modified_dt # Store as datetime object
                     })
@@ -209,11 +221,27 @@ if __name__ == "__main__":
         files_to_process['reason'] = 'new'
         files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path'])
     else:
-        # Ensure consistent dtypes for comparison keys if necessary
-        nas_df['file_path'] = nas_df['file_path'].astype(str)
-        db_df['file_path'] = db_df['file_path'].astype(str)
+        # --- Normalize file paths before merging ---
+        print("Normalizing file paths for comparison...")
+        if 'file_path' in nas_df.columns:
+            nas_df['file_path'] = nas_df['file_path'].astype(str).str.strip().str.strip('/')
+        else:
+             print("Warning: 'file_path' column missing in NAS DataFrame.")
+             nas_df['file_path'] = pd.Series(dtype='str') # Add empty column if missing
 
-        # Merge the two dataframes based on file_path (assuming this is the unique identifier)
+        if 'file_path' in db_df.columns:
+            db_df['file_path'] = db_df['file_path'].astype(str).str.strip().str.strip('/')
+        else:
+            print("Warning: 'file_path' column missing in DB DataFrame.")
+            db_df['file_path'] = pd.Series(dtype='str') # Add empty column if missing
+            
+        # --- End Normalization ---
+
+        # Print sample paths for debugging (optional, can be removed later)
+        print("Sample NAS paths:", nas_df['file_path'].head().tolist())
+        print("Sample DB paths:", db_df['file_path'].head().tolist())
+
+        # Merge the two dataframes based on the normalized file_path
         comparison_df = pd.merge(
             nas_df, 
             db_df, 
