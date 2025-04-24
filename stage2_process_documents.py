@@ -335,10 +335,19 @@ if __name__ == "__main__":
                             analyze_result = analyze_document_with_di(di_client, chunk_path)
                             if analyze_result and analyze_result.content:
                                 combined_markdown += analyze_result.content + "\n\n" # Add separator between chunks
-                                # Manually create dictionary from AnalyzeResult
-                                result_dict = {'content': analyze_result.content}
+                                # Manually create dictionary from AnalyzeResult, mirroring example structure
+                                result_dict = {'content': analyze_result.content, 'pages': []}
                                 if hasattr(analyze_result, 'pages'):
-                                    result_dict['pages'] = [page.__dict__ for page in analyze_result.pages] # Basic page info
+                                    for page in analyze_result.pages:
+                                        page_data = {
+                                            'page_number': page.page_number,
+                                            'width': page.width if hasattr(page, 'width') else None,
+                                            'height': page.height if hasattr(page, 'height') else None,
+                                            'unit': page.unit if hasattr(page, 'unit') else None,
+                                            'angle': page.angle if hasattr(page, 'angle') else None
+                                            # Add other page attributes if needed
+                                        }
+                                        result_dict['pages'].append(page_data)
                                 if hasattr(analyze_result, 'tables') and analyze_result.tables:
                                     result_dict['tables_count'] = len(analyze_result.tables)
                                 if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
@@ -361,10 +370,19 @@ if __name__ == "__main__":
                     analyze_result = analyze_document_with_di(di_client, local_file_path)
                     if analyze_result and analyze_result.content:
                         combined_markdown = analyze_result.content
-                        # Manually create dictionary from AnalyzeResult
-                        result_dict = {'content': analyze_result.content}
+                        # Manually create dictionary from AnalyzeResult, mirroring example structure
+                        result_dict = {'content': analyze_result.content, 'pages': []}
                         if hasattr(analyze_result, 'pages'):
-                             result_dict['pages'] = [page.__dict__ for page in analyze_result.pages] # Basic page info
+                            for page in analyze_result.pages:
+                                page_data = {
+                                    'page_number': page.page_number,
+                                    'width': page.width if hasattr(page, 'width') else None,
+                                    'height': page.height if hasattr(page, 'height') else None,
+                                    'unit': page.unit if hasattr(page, 'unit') else None,
+                                    'angle': page.angle if hasattr(page, 'angle') else None
+                                    # Add other page attributes if needed
+                                }
+                                result_dict['pages'].append(page_data)
                         if hasattr(analyze_result, 'tables') and analyze_result.tables:
                             result_dict['tables_count'] = len(analyze_result.tables)
                         if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
@@ -389,13 +407,15 @@ if __name__ == "__main__":
                         # Save JSON for each chunk
                         for chunk_index, result_json in enumerate(results_json_list):
                             chunk_json_smb_path = os.path.join(file_output_subfolder_smb, f"{file_name_base}_chunk_{chunk_index + 1}.json").replace('\\', '/')
-                            json_bytes = json.dumps(result_json, indent=4).encode('utf-8')
+                            # Add default handler for non-serializable objects, like in the example
+                            json_bytes = json.dumps(result_json, indent=4, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o)).encode('utf-8')
                             if not write_to_nas(chunk_json_smb_path, json_bytes):
                                 print(f"   [ERROR] Failed to write JSON chunk {chunk_index + 1} for {file_name} to NAS.")
                                 # Don't necessarily mark file_has_error, maybe just log warning?
                     else:
                         # Save single JSON for non-split files
-                        json_bytes = json.dumps(results_json_list[0], indent=4).encode('utf-8')
+                        # Add default handler for non-serializable objects, like in the example
+                        json_bytes = json.dumps(results_json_list[0], indent=4, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o)).encode('utf-8')
                         if not write_to_nas(output_json_smb_path, json_bytes):
                             print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
                             # Don't necessarily mark file_has_error, maybe just log warning?
