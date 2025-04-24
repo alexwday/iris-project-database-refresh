@@ -45,10 +45,11 @@ def write_json_to_nas(smb_path, data_string):
         return False
 
 def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
-    """Lists files recursively from an SMB share."""
+    """Lists files recursively from an SMB share, returning full path from share root.""" # Updated docstring
     files_list = []
     smb_base_path = f"//{nas_ip}/{share_name}/{base_folder_path}"
-    
+    share_prefix = f"//{nas_ip}/{share_name}/" # Define the prefix to remove
+
     try:
         smbclient.ClientConfig(username=username, password=password)
         print(f"Attempting to connect to NAS: {smb_base_path}")
@@ -59,13 +60,10 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
     try:
         if not smbclient.path.exists(smb_base_path):
              print(f"Error: Base NAS path does not exist: {smb_base_path}")
-             return None 
+             return None
 
         for dirpath, dirnames, filenames in smbclient.walk(smb_base_path):
-            relative_dirpath = os.path.relpath(dirpath, smb_base_path)
-            relative_dirpath = relative_dirpath.replace('\\', '/').strip('/')
-            if relative_dirpath == '.':
-                 relative_dirpath = '' 
+            # No longer need relative_dirpath calculation
 
             for filename in filenames:
                 if filename == '.DS_Store' or filename.startswith('~$'):
@@ -76,13 +74,20 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                 try:
                     stat_info = smbclient.stat(full_smb_path)
                     last_modified_dt = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
-                    relative_file_path = os.path.join(relative_dirpath, filename).replace('\\', '/')
-                    
+
+                    # Calculate the full path relative to the share root
+                    if full_smb_path.startswith(share_prefix):
+                        full_path_from_share = full_smb_path[len(share_prefix):]
+                    else:
+                        # Handle potential edge case where path doesn't start as expected
+                        print(f"Warning: Unexpected SMB path format: {full_smb_path}")
+                        full_path_from_share = full_smb_path # Or handle differently? Keep it for now.
+
                     files_list.append({
                         'file_name': filename,
-                        'file_path': relative_file_path.strip('/'), 
+                        'file_path': full_path_from_share, # Store the full path from share
                         'file_size': stat_info.st_size,
-                        'date_last_modified': last_modified_dt 
+                        'date_last_modified': last_modified_dt
                     })
                 except Exception as e:
                     print(f"Warning: Could not stat file '{full_smb_path}': {e}")
