@@ -299,10 +299,10 @@ if __name__ == "__main__":
             if catalog_data:
                 try:
                     with conn.cursor() as cur:
-                        insert_query = f"""
-                            INSERT INTO {DB_CATALOG_TABLE} ({", ".join(catalog_cols)})
-                            VALUES %s;
-                        """
+                        # Construct query using .format() instead of f-string
+                        insert_query_template = "INSERT INTO {} ({}) VALUES %s;"
+                        insert_query = insert_query_template.format(DB_CATALOG_TABLE, ", ".join(catalog_cols))
+
                         psycopg2.extras.execute_values(
                             cur, insert_query, catalog_data, template=None, page_size=100
                         )
@@ -346,10 +346,10 @@ if __name__ == "__main__":
             if content_data:
                 try:
                     with conn.cursor() as cur:
-                        insert_query = f"""
-                            INSERT INTO {DB_CONTENT_TABLE} ({", ".join(content_cols)})
-                            VALUES %s;
-                        """
+                        # Construct query using .format() instead of f-string
+                        insert_query_template = "INSERT INTO {} ({}) VALUES %s;"
+                        insert_query = insert_query_template.format(DB_CONTENT_TABLE, ", ".join(content_cols))
+
                         psycopg2.extras.execute_values(
                             cur, insert_query, content_data, template=None, page_size=100
                         )
