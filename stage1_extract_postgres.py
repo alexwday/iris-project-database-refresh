@@ -22,12 +22,28 @@ NAS_PARAMS = {
     "user": "your_nas_user",      # Replace with NAS username
     "password": "your_nas_password" # Replace with NAS password
 }
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # Replace with the output folder path on the share
+
 # Processing Configuration
 DOCUMENT_SOURCE = 'internal_esg' # Define the document source to process
 DB_TABLE_NAME = 'apg_catalog'    # Query the catalog table
-BASE_OUTPUT_DIR = 'database_refresh'
+# BASE_OUTPUT_DIR is no longer needed for local storage
 
 # --- Helper Functions ---
+def write_json_to_nas(smb_path, data_string):
+    """Writes a string (JSON) to a file path on the NAS using smbclient."""
+    try:
+        with smbclient.open_file(smb_path, mode='w', encoding='utf-8') as f:
+            f.write(data_string)
+        print(f"Successfully wrote to NAS path: {smb_path}")
+        return True
+    except smbclient.SambaClientError as e:
+        print(f"SMB Error writing to '{smb_path}': {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error writing to NAS '{smb_path}': {e}")
+        return False
+
 def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
     """Lists files recursively from an SMB share."""
     files_list = []
@@ -81,24 +97,36 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
+
+    # Construct NAS output paths
+    nas_base_output_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}"
+    nas_output_dir_smb_path = os.path.join(nas_base_output_smb_path, DOCUMENT_SOURCE).replace('\\', '/')
     
-    # Define output paths
-    output_dir = os.path.join(BASE_OUTPUT_DIR, DOCUMENT_SOURCE)
-    db_output_file = os.path.join(output_dir, '1A_catalog_in_postgres.json')
-    nas_output_file = os.path.join(output_dir, '1B_files_in_nas.json')
-    process_output_file = os.path.join(output_dir, '1C_nas_files_to_process.json')
-    delete_output_file = os.path.join(output_dir, '1D_postgres_files_to_delete.json')
+    db_output_smb_file = os.path.join(nas_output_dir_smb_path, '1A_catalog_in_postgres.json').replace('\\', '/')
+    nas_output_smb_file = os.path.join(nas_output_dir_smb_path, '1B_files_in_nas.json').replace('\\', '/')
+    process_output_smb_file = os.path.join(nas_output_dir_smb_path, '1C_nas_files_to_process.json').replace('\\', '/')
+    delete_output_smb_file = os.path.join(nas_output_dir_smb_path, '1D_postgres_files_to_delete.json').replace('\\', '/')
 
     print(f"--- Running Stage 1: Extract & Compare ---")
     print(f"Source: {DOCUMENT_SOURCE}, DB Table: {DB_TABLE_NAME}")
-    print(f"Output Directory: {output_dir}")
+    print(f"NAS Output Directory: {nas_output_dir_smb_path}")
 
-    # Ensure output directory exists
+    # Ensure NAS output directory exists using smbclient
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        print(f"Ensured output directory exists: '{output_dir}'")
-    except OSError as e:
-        print(f"Error creating directory '{output_dir}': {e}")
+        # Register session for operations like makedirs if not done globally
+        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+        
+        if not smbclient.path.exists(nas_output_dir_smb_path):
+            smbclient.makedirs(nas_output_dir_smb_path, exist_ok=True) 
+            print(f"Created NAS output directory: '{nas_output_dir_smb_path}'")
+        else:
+            print(f"NAS output directory already exists: '{nas_output_dir_smb_path}'")
+            
+    except smbclient.SambaClientError as e:
+        print(f"SMB Error creating directory '{nas_output_dir_smb_path}': {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error creating NAS directory '{nas_output_dir_smb_path}': {e}")
         sys.exit(1)
 
     conn = None
@@ -125,9 +153,10 @@ if __name__ == "__main__":
              db_df['date_last_modified'] = pd.to_datetime(db_df['date_last_modified']).dt.tz_convert('UTC')
         print(f"Query successful. Found {len(db_df)} records in DB catalog.")
 
-        print(f"Saving DB catalog data to '{db_output_file}'...")
-        db_df.to_json(db_output_file, orient='records', indent=4, date_format='iso')
-        print(f"DB data successfully saved.")
+        print(f"Saving DB catalog data to NAS: '{db_output_smb_file}'...")
+        db_json_string = db_df.to_json(orient='records', indent=4, date_format='iso')
+        if not write_json_to_nas(db_output_smb_file, db_json_string):
+             sys.exit(1) # Exit if write failed
 
     except psycopg2.Error as db_err:
         print(f"Database error: {db_err}")
@@ -159,9 +188,10 @@ if __name__ == "__main__":
     if 'date_last_modified' in nas_df.columns:
         nas_df['date_last_modified'] = pd.to_datetime(nas_df['date_last_modified']).dt.tz_convert('UTC')
 
-    print(f"Saving NAS file list data to '{nas_output_file}'...")
-    nas_df.to_json(nas_output_file, orient='records', indent=4, date_format='iso')
-    print(f"NAS data successfully saved.")
+    print(f"Saving NAS file list data to NAS: '{nas_output_smb_file}'...")
+    nas_json_string = nas_df.to_json(orient='records', indent=4, date_format='iso')
+    if not write_json_to_nas(nas_output_smb_file, nas_json_string):
+        sys.exit(1) # Exit if write failed
 
     # 3. Compare DB Catalog and NAS File List
     print("Comparing database catalog and NAS file list...")
@@ -219,16 +249,18 @@ if __name__ == "__main__":
 
     print(f"Comparison complete: {len(files_to_process)} NAS files to process, {len(files_to_delete)} existing DB records to delete.")
 
-    # 4. Save Comparison Results
-    print(f"Saving files to process list to '{process_output_file}'...")
-    files_to_process.to_json(process_output_file, orient='records', indent=4, date_format='iso')
-    print(f"Files to process list saved.")
+    # 4. Save Comparison Results to NAS
+    print(f"Saving files to process list to NAS: '{process_output_smb_file}'...")
+    process_json_string = files_to_process.to_json(orient='records', indent=4, date_format='iso')
+    if not write_json_to_nas(process_output_smb_file, process_json_string):
+        sys.exit(1)
 
-    print(f"Saving files to delete list to '{delete_output_file}'...")
+    print(f"Saving files to delete list to NAS: '{delete_output_smb_file}'...")
     # Convert 'id' to int if it's float due to merge/concat NaNs, handle potential errors
     if 'id' in files_to_delete.columns:
          files_to_delete['id'] = files_to_delete['id'].astype('Int64') # Use nullable integer type
-    files_to_delete.to_json(delete_output_file, orient='records', indent=4)
-    print(f"Files to delete list saved.")
+    delete_json_string = files_to_delete.to_json(orient='records', indent=4)
+    if not write_json_to_nas(delete_output_smb_file, delete_json_string):
+        sys.exit(1)
             
     print(f"--- Stage 1 Completed ---")
