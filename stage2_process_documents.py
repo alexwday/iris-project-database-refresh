@@ -25,7 +25,7 @@ import smbclient
 from pypdf import PdfReader, PdfWriter # For PDF handling
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, ContentFormat
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat # Corrected import
 
 # ==============================================================================
 # --- Configuration ---
@@ -125,16 +125,16 @@ def download_from_nas(smb_path, local_temp_dir):
         print(f"   [ERROR] Unexpected error downloading from NAS '{smb_path}': {e}")
         return None
 
-def analyze_document_with_di(di_client, local_file_path, output_format=ContentFormat.MARKDOWN):
+def analyze_document_with_di(di_client, local_file_path, output_format=DocumentContentFormat.MARKDOWN): # Corrected usage
     """Analyzes a local document using Azure Document Intelligence layout model."""
     print(f"   Analyzing local file with DI: {local_file_path}")
     try:
         with open(local_file_path, "rb") as f:
             poller = di_client.begin_analyze_document(
                 "prebuilt-layout",
-                analyze_request=f,
-                content_type="application/octet-stream",
-                output_content_format=output_format
+                analyze_request=f, # Sending file stream directly
+                content_type="application/octet-stream", # Specify content type
+                output_content_format=output_format # Use the corrected format variable
             )
         result = poller.result()
         print(f"   DI analysis successful.")
