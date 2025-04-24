@@ -22,12 +22,11 @@ NAS_PARAMS = {
     "user": "your_nas_user",      # Replace with NAS username
     "password": "your_nas_password" # Replace with NAS password
 }
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # Replace with the output folder path on the share
+NAS_BASE_OUTPUT_PATH = "path/to/your/base_output_folder" # Base path on the share for outputs
 
 # Processing Configuration
 DOCUMENT_SOURCE = 'internal_esg' # Define the document source to process
 DB_TABLE_NAME = 'apg_catalog'    # Query the catalog table
-# BASE_OUTPUT_DIR is no longer needed for local storage
 
 # --- Helper Functions ---
 def write_json_to_nas(smb_path, data_string):
@@ -49,51 +48,40 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
     files_list = []
     smb_base_path = f"//{nas_ip}/{share_name}/{base_folder_path}"
     
-    # Register session for authentication
     try:
         smbclient.ClientConfig(username=username, password=password)
         print(f"Attempting to connect to NAS: {smb_base_path}")
     except Exception as e:
         print(f"Error setting SMB client config: {e}")
-        # Fallback or specific handling might be needed depending on smbclient version/behavior
-        # For simplicity, we proceed, assuming anonymous might work or auth happens later
-        pass # Or try smbclient.register_session(nas_ip, username=username, password=password) if needed
+        pass 
 
     try:
-        # Check if base path exists
         if not smbclient.path.exists(smb_base_path):
              print(f"Error: Base NAS path does not exist: {smb_base_path}")
-             return None # Indicate error
+             return None 
 
         for dirpath, dirnames, filenames in smbclient.walk(smb_base_path):
-            # Calculate relative path from the base folder path provided in config
             relative_dirpath = os.path.relpath(dirpath, smb_base_path)
-            # Normalize slashes and handle root case
             relative_dirpath = relative_dirpath.replace('\\', '/').strip('/')
             if relative_dirpath == '.':
-                 relative_dirpath = '' # Ensure root is empty string, not '.'
+                 relative_dirpath = '' 
 
             for filename in filenames:
-                # --- Skip temporary/system files ---
                 if filename == '.DS_Store' or filename.startswith('~$'):
                     print(f"Skipping temporary/system file: {filename}")
                     continue 
-                # --- End Skip ---
 
                 full_smb_path = os.path.join(dirpath, filename).replace('\\', '/')
                 try:
                     stat_info = smbclient.stat(full_smb_path)
-                    # Convert timestamp to timezone-aware UTC datetime
                     last_modified_dt = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
-                    
-                    # Construct the relative file path carefully
                     relative_file_path = os.path.join(relative_dirpath, filename).replace('\\', '/')
                     
                     files_list.append({
                         'file_name': filename,
-                        'file_path': relative_file_path.strip('/'), # Store normalized relative path
+                        'file_path': relative_file_path.strip('/'), 
                         'file_size': stat_info.st_size,
-                        'date_last_modified': last_modified_dt # Store as datetime object
+                        'date_last_modified': last_modified_dt 
                     })
                 except Exception as e:
                     print(f"Warning: Could not stat file '{full_smb_path}': {e}")
@@ -101,18 +89,18 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
         return files_list
     except smbclient.SambaClientError as e:
         print(f"SMB Error listing files from '{smb_base_path}': {e}")
-        return None # Indicate error
+        return None 
     except Exception as e:
         print(f"Unexpected error listing NAS files: {e}")
-        return None # Indicate error
+        return None 
 
 
 # --- Main Execution Logic ---
 if __name__ == "__main__":
 
-    # Construct NAS output paths
-    nas_base_output_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}"
-    nas_output_dir_smb_path = os.path.join(nas_base_output_smb_path, DOCUMENT_SOURCE).replace('\\', '/')
+    # Construct NAS output paths using the base path and document source
+    nas_base_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_BASE_OUTPUT_PATH}" # Use new variable name
+    nas_output_dir_smb_path = os.path.join(nas_base_smb_path, DOCUMENT_SOURCE).replace('\\', '/') # Final output dir uses DOCUMENT_SOURCE
     
     db_output_smb_file = os.path.join(nas_output_dir_smb_path, '1A_catalog_in_postgres.json').replace('\\', '/')
     nas_output_smb_file = os.path.join(nas_output_dir_smb_path, '1B_files_in_nas.json').replace('\\', '/')
@@ -125,15 +113,12 @@ if __name__ == "__main__":
 
     # Ensure NAS output directory exists using smbclient
     try:
-        # Register session for operations like makedirs if not done globally
         smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        
         if not smbclient.path.exists(nas_output_dir_smb_path):
             smbclient.makedirs(nas_output_dir_smb_path, exist_ok=True) 
             print(f"Created NAS output directory: '{nas_output_dir_smb_path}'")
         else:
             print(f"NAS output directory already exists: '{nas_output_dir_smb_path}'")
-            
     except smbclient.SambaClientError as e:
         print(f"SMB Error creating directory '{nas_output_dir_smb_path}': {e}")
         sys.exit(1)
@@ -151,7 +136,6 @@ if __name__ == "__main__":
         conn = psycopg2.connect(**DB_PARAMS)
         print("Connection successful.")
 
-        # Select relevant columns for comparison
         query = f"""
             SELECT id, file_name, file_path, date_last_modified, file_size 
             FROM {DB_TABLE_NAME} 
@@ -160,15 +144,12 @@ if __name__ == "__main__":
         print(f"Executing query on {DB_TABLE_NAME}...")
         
         db_df = pd.read_sql_query(query, conn, params=(DOCUMENT_SOURCE,))
-        # Convert timestamp from DB to timezone-aware UTC
         if 'date_last_modified' in db_df.columns and not db_df['date_last_modified'].isnull().all():
             db_df['date_last_modified'] = pd.to_datetime(db_df['date_last_modified'])
-            # Check if timezone-naive, if so, localize to UTC (adjust if DB stores in local time)
             if db_df['date_last_modified'].dt.tz is None:
                 print("Localizing naive DB timestamps to UTC...")
                 db_df['date_last_modified'] = db_df['date_last_modified'].dt.tz_localize('UTC')
             else:
-                # If already timezone-aware, convert to UTC for consistency
                 print("Converting timezone-aware DB timestamps to UTC...")
                 db_df['date_last_modified'] = db_df['date_last_modified'].dt.tz_convert('UTC')
         print(f"Query successful. Found {len(db_df)} records in DB catalog.")
@@ -176,7 +157,7 @@ if __name__ == "__main__":
         print(f"Saving DB catalog data to NAS: '{db_output_smb_file}'...")
         db_json_string = db_df.to_json(orient='records', indent=4, date_format='iso')
         if not write_json_to_nas(db_output_smb_file, db_json_string):
-             sys.exit(1) # Exit if write failed
+             sys.exit(1) 
 
     except psycopg2.Error as db_err:
         print(f"Database error: {db_err}")
@@ -204,21 +185,20 @@ if __name__ == "__main__":
         sys.exit(1)
         
     nas_df = pd.DataFrame(nas_files_list)
-    # Ensure date_last_modified is timezone-aware UTC
     if 'date_last_modified' in nas_df.columns:
         nas_df['date_last_modified'] = pd.to_datetime(nas_df['date_last_modified']).dt.tz_convert('UTC')
 
     print(f"Saving NAS file list data to NAS: '{nas_output_smb_file}'...")
     nas_json_string = nas_df.to_json(orient='records', indent=4, date_format='iso')
     if not write_json_to_nas(nas_output_smb_file, nas_json_string):
-        sys.exit(1) # Exit if write failed
+        sys.exit(1) 
 
     # 3. Compare DB Catalog and NAS File List
-    print("Comparing database catalog and NAS file list...")
+    print("Comparing database catalog and NAS file list using 'file_name'...")
     if db_df.empty and nas_df.empty:
         print("Both DB catalog and NAS list are empty. No comparison needed.")
         files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
-        files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path']) # Keep schema consistent
+        files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path']) 
     elif nas_df.empty:
         print("NAS list is empty. No files to process.")
         files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
@@ -229,59 +209,51 @@ if __name__ == "__main__":
         files_to_process['reason'] = 'new'
         files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path'])
     else:
-        # --- Normalize file paths before merging ---
-        print("Normalizing file paths for comparison...")
-        if 'file_path' in nas_df.columns:
-            nas_df['file_path'] = nas_df['file_path'].astype(str).str.strip().str.strip('/')
-        else:
-             print("Warning: 'file_path' column missing in NAS DataFrame.")
-             nas_df['file_path'] = pd.Series(dtype='str') # Add empty column if missing
-
-        if 'file_path' in db_df.columns:
-            db_df['file_path'] = db_df['file_path'].astype(str).str.strip().str.strip('/')
-        else:
-            print("Warning: 'file_path' column missing in DB DataFrame.")
-            db_df['file_path'] = pd.Series(dtype='str') # Add empty column if missing
+        # Ensure file_name columns exist and are strings for merging
+        if 'file_name' not in nas_df.columns:
+            print("Error: 'file_name' column missing in NAS DataFrame.")
+            sys.exit(1)
+        if 'file_name' not in db_df.columns:
+            print("Error: 'file_name' column missing in DB DataFrame.")
+            sys.exit(1)
             
-        # --- End Normalization ---
+        nas_df['file_name'] = nas_df['file_name'].astype(str)
+        db_df['file_name'] = db_df['file_name'].astype(str)
+        
+        # Using exact filename for merging
+        merge_on_key = 'file_name' 
 
-        # Print sample paths for debugging (optional, can be removed later)
-        print("Sample NAS paths:", nas_df['file_path'].head().tolist())
-        print("Sample DB paths:", db_df['file_path'].head().tolist())
-
-        # Merge the two dataframes based on the normalized file_path
+        print(f"Performing merge operation on key: '{merge_on_key}'...")
+        # Merge the two dataframes based on the filename
         comparison_df = pd.merge(
-            nas_df, 
-            db_df, 
-            on='file_path', 
-            how='outer', 
+            nas_df,
+            db_df,
+            on=merge_on_key, 
+            how='outer',
             suffixes=('_nas', '_db'),
-            indicator=True # Adds a column indicating merge source (_merge: left_only, right_only, both)
+            indicator=True 
         )
 
         # Identify new files (only on NAS)
-        new_files = comparison_df[comparison_df['_merge'] == 'left_only'][['file_name_nas', 'file_path', 'file_size_nas', 'date_last_modified_nas']].copy()
-        new_files.rename(columns={'file_name_nas': 'file_name', 'file_size_nas': 'file_size', 'date_last_modified_nas': 'date_last_modified'}, inplace=True)
+        new_files = comparison_df[comparison_df['_merge'] == 'left_only'][['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas']].copy()
+        new_files.rename(columns={'file_path_nas': 'file_path', 'file_size_nas': 'file_size', 'date_last_modified_nas': 'date_last_modified'}, inplace=True)
         new_files['reason'] = 'new'
 
         # Identify files present in both, check for updates
         both_files = comparison_df[comparison_df['_merge'] == 'both'].copy()
-        # Compare dates (handle potential NaT values if columns missing/empty)
         updated_mask = both_files['date_last_modified_nas'] > both_files['date_last_modified_db']
-        updated_files_nas = both_files.loc[updated_mask, ['file_name_nas', 'file_path', 'file_size_nas', 'date_last_modified_nas']].copy()
-        updated_files_nas.rename(columns={'file_name_nas': 'file_name', 'file_size_nas': 'file_size', 'date_last_modified_nas': 'date_last_modified'}, inplace=True)
+        
+        # Get NAS details for updated files
+        updated_files_nas = both_files.loc[updated_mask, ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas']].copy()
+        updated_files_nas.rename(columns={'file_path_nas': 'file_path', 'file_size_nas': 'file_size', 'date_last_modified_nas': 'date_last_modified'}, inplace=True)
         updated_files_nas['reason'] = 'updated'
         
         # Identify files to delete from DB (those that were updated)
-        files_to_delete = both_files.loc[updated_mask, ['id', 'file_name_db', 'file_path']].copy()
-        files_to_delete.rename(columns={'file_name_db': 'file_name'}, inplace=True)
+        files_to_delete = both_files.loc[updated_mask, ['id', 'file_name', 'file_path_db']].copy()
+        files_to_delete.rename(columns={'file_path_db': 'file_path'}, inplace=True)
 
         # Combine new and updated files for processing
         files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
-
-        # Optional: Identify files only in DB (potentially deleted from NAS - depends on desired logic)
-        # deleted_from_nas = comparison_df[comparison_df['_merge'] == 'right_only']
-        # print(f"Found {len(deleted_from_nas)} files in DB but not on NAS (potential deletions).")
 
     print(f"Comparison complete: {len(files_to_process)} NAS files to process, {len(files_to_delete)} existing DB records to delete.")
 
@@ -292,9 +264,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"Saving files to delete list to NAS: '{delete_output_smb_file}'...")
-    # Convert 'id' to int if it's float due to merge/concat NaNs, handle potential errors
     if 'id' in files_to_delete.columns:
-         files_to_delete['id'] = files_to_delete['id'].astype('Int64') # Use nullable integer type
+         files_to_delete['id'] = files_to_delete['id'].astype('Int64') 
     delete_json_string = files_to_delete.to_json(orient='records', indent=4)
     if not write_json_to_nas(delete_output_smb_file, delete_json_string):
         sys.exit(1)
