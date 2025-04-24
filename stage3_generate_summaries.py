@@ -557,7 +557,8 @@ if __name__ == "__main__":
                     "document_name": doc_name,
                     "section_id": 0, # As requested
                     "section_name": doc_base_name, # Use base name without extension
-                    "content": markdown_content, # Use the full markdown content read from the file
+                    "section_summary": usage, # Add the AI-generated usage summary here
+                    "content": markdown_content, # Use the full markdown content read from the file (renamed from section_content in schema)
                     "date_created": datetime.now(timezone.utc).isoformat() # Add creation date
                 }
 
