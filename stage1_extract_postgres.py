@@ -18,14 +18,15 @@ DB_PARAMS = {
 NAS_PARAMS = {
     "ip": "your_nas_ip",          # Replace with NAS IP address
     "share": "your_share_name",   # Replace with NAS share name
-    "path": "path/to/your/folder", # Replace with the specific folder path on the share
+    # "path" is removed, will be constructed dynamically
     "user": "your_nas_user",      # Replace with NAS username
     "password": "your_nas_password" # Replace with NAS password
 }
-NAS_BASE_OUTPUT_PATH = "path/to/your/base_output_folder" # Base path on the share for outputs
+NAS_BASE_INPUT_PATH = "path/to/your/base_input_folder" # Base path on the share containing document source folders
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # Base path on the share for outputs
 
 # Processing Configuration
-DOCUMENT_SOURCE = 'internal_esg' # Define the document source to process
+DOCUMENT_SOURCE = 'internal_esg' # Define the document source to process (used for DB query and path construction)
 DB_TABLE_NAME = 'apg_catalog'    # Query the catalog table
 
 # --- Helper Functions ---
@@ -99,8 +100,8 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
 if __name__ == "__main__":
 
     # Construct NAS output paths using the base path and document source
-    nas_base_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_BASE_OUTPUT_PATH}" # Use new variable name
-    nas_output_dir_smb_path = os.path.join(nas_base_smb_path, DOCUMENT_SOURCE).replace('\\', '/') # Final output dir uses DOCUMENT_SOURCE
+    nas_base_output_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}" # Reverted variable name
+    nas_output_dir_smb_path = os.path.join(nas_base_output_smb_path, DOCUMENT_SOURCE).replace('\\', '/') # Final output dir uses DOCUMENT_SOURCE
     
     db_output_smb_file = os.path.join(nas_output_dir_smb_path, '1A_catalog_in_postgres.json').replace('\\', '/')
     nas_output_smb_file = os.path.join(nas_output_dir_smb_path, '1B_files_in_nas.json').replace('\\', '/')
@@ -171,12 +172,14 @@ if __name__ == "__main__":
             print("Database connection closed.")
 
     # 2. Get File List from NAS
-    print("Listing files from NAS...")
+    # Construct the dynamic input path
+    nas_input_path = os.path.join(NAS_BASE_INPUT_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    print(f"Listing files from NAS source path: //{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{nas_input_path}")
     nas_files_list = get_nas_files(
-        NAS_PARAMS["ip"], 
-        NAS_PARAMS["share"], 
-        NAS_PARAMS["path"], 
-        NAS_PARAMS["user"], 
+        NAS_PARAMS["ip"],
+        NAS_PARAMS["share"],
+        nas_input_path, # Use dynamically constructed path
+        NAS_PARAMS["user"],
         NAS_PARAMS["password"]
     )
 
