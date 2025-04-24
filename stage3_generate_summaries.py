@@ -529,6 +529,7 @@ if __name__ == "__main__":
 
                 # Extract key fields (ensure they exist in metadata)
                 doc_name = original_metadata.get('file_name', md_filename) # Fallback to md_filename if needed
+                doc_base_name = os.path.splitext(doc_name)[0] # Get filename without extension
                 doc_source = DOCUMENT_SOURCE # Use configured source
                 doc_type = DOCUMENT_TYPE   # Use configured type
 
@@ -555,8 +556,8 @@ if __name__ == "__main__":
                     "document_type": doc_type,
                     "document_name": doc_name,
                     "section_id": 0, # As requested
-                    "section_name": doc_name, # As requested
-                    "content": usage, # Use the detailed usage summary as content
+                    "section_name": doc_base_name, # Use base name without extension
+                    "content": markdown_content, # Use the full markdown content read from the file
                     "date_created": datetime.now(timezone.utc).isoformat() # Add creation date
                 }
 
