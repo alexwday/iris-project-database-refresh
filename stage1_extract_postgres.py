@@ -161,8 +161,16 @@ if __name__ == "__main__":
         
         db_df = pd.read_sql_query(query, conn, params=(DOCUMENT_SOURCE,))
         # Convert timestamp from DB to timezone-aware UTC
-        if 'date_last_modified' in db_df.columns:
-             db_df['date_last_modified'] = pd.to_datetime(db_df['date_last_modified']).dt.tz_convert('UTC')
+        if 'date_last_modified' in db_df.columns and not db_df['date_last_modified'].isnull().all():
+            db_df['date_last_modified'] = pd.to_datetime(db_df['date_last_modified'])
+            # Check if timezone-naive, if so, localize to UTC (adjust if DB stores in local time)
+            if db_df['date_last_modified'].dt.tz is None:
+                print("Localizing naive DB timestamps to UTC...")
+                db_df['date_last_modified'] = db_df['date_last_modified'].dt.tz_localize('UTC')
+            else:
+                # If already timezone-aware, convert to UTC for consistency
+                print("Converting timezone-aware DB timestamps to UTC...")
+                db_df['date_last_modified'] = db_df['date_last_modified'].dt.tz_convert('UTC')
         print(f"Query successful. Found {len(db_df)} records in DB catalog.")
 
         print(f"Saving DB catalog data to NAS: '{db_output_smb_file}'...")
