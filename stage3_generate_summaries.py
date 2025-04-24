@@ -22,6 +22,7 @@ import time
 import requests # For OAuth token request
 import smbclient
 import pandas as pd
+import tempfile # Added for temporary certificate file
 from datetime import datetime, timezone
 from openai import OpenAI # Assuming standard openai library v1.x+
 
@@ -91,6 +92,7 @@ GPT_TOOL_DEFINITION = {
 STAGE1_METADATA_FILENAME = '1C_nas_files_to_process.json'
 STAGE2_OUTPUT_SUBFOLDER = '2A_processed_files'
 STAGE3_OUTPUT_FILENAME = '3A_catalog_entries.json'
+CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename
 
 # ==============================================================================
 # --- Helper Functions ---
@@ -235,6 +237,7 @@ def get_oauth_token():
         payload['scope'] = OAUTH_CONFIG['scope']
 
     try:
+        # Note: requests library automatically uses REQUESTS_CA_BUNDLE if set
         response = requests.post(token_url, data=payload)
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
         token_data = response.json()
@@ -263,6 +266,15 @@ def call_gpt_summarizer(api_client, markdown_content):
             {"role": "system", "content": "You are an expert assistant skilled at summarizing technical documents. Analyze the provided document content and use the 'record_document_summary' tool to provide a brief description and a detailed usage summary."},
             {"role": "user", "content": f"Please summarize the following document content:\n\n---\n\n{markdown_content}\n\n---"}
         ]
+
+        # Note: The openai client might need explicit SSL context/CA bundle handling
+        # depending on its version and underlying HTTP library (e.g., httpx).
+        # If REQUESTS_CA_BUNDLE doesn't work automatically for openai,
+        # you might need to configure the client like this:
+        # import httpx
+        # ssl_context = httpx.create_ssl_context(verify=os.environ.get('REQUESTS_CA_BUNDLE'))
+        # client = OpenAI(..., http_client=httpx.Client(verify=ssl_context))
+        # For now, assume REQUESTS_CA_BUNDLE might be sufficient or openai uses requests internally.
 
         response = api_client.chat.completions.create(
             model=GPT_CONFIG['model_name'],
@@ -317,6 +329,9 @@ def call_gpt_summarizer(api_client, markdown_content):
 # ==============================================================================
 
 if __name__ == "__main__":
+    temp_cert_file_path = None # Store path instead of file object
+    original_ssl_env = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
+
     print("\n" + "="*60)
     print(f"--- Running Stage 3: Generate Document Summaries ---")
     print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
@@ -326,203 +341,229 @@ if __name__ == "__main__":
     # --- Initialize SMB Client ---
     print("[1] Initializing SMB Client...")
     if not initialize_smb_client():
-        sys.exit(1)
+        sys.exit(1) # Exit if SMB client fails
     print("-" * 60)
 
     # --- Define Paths ---
     print("[2] Defining NAS Paths...")
-    # Base directory for the specific document source
     source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
     source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
-    # Stage 1 metadata file path
     stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
-    # Stage 2 markdown files directory path
     stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
-    # Stage 3 output catalog file path
     stage3_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_OUTPUT_FILENAME).replace('\\', '/')
+    ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
 
     print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
     print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
     print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
     print(f"   Stage 3 Output File (SMB): {stage3_output_smb_path}")
+    print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     print("-" * 60)
 
-    # --- Load Stage 1 Metadata ---
-    print(f"[3] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...")
-    stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
-    if stage1_metadata_list is None:
-        print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
-        sys.exit(1)
-    if not isinstance(stage1_metadata_list, list):
-        print(f"[CRITICAL ERROR] Stage 1 metadata is not a list. Found type: {type(stage1_metadata_list)}. Exiting.")
-        sys.exit(1)
+    # --- Main Processing Block with Cleanup ---
+    try:
+        # --- Download and Set Custom CA Bundle ---
+        print("[3] Setting up Custom CA Bundle...")
+        try: # Inner try for CA bundle download specifically
+            if smbclient.path.exists(ca_bundle_smb_path):
+                # Create a temporary file to store the certificate
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".cer") as temp_cert_file:
+                    print(f"   Downloading to temporary file: {temp_cert_file.name}")
+                    with smbclient.open_file(ca_bundle_smb_path, mode='rb') as nas_f:
+                        temp_cert_file.write(nas_f.read())
+                    temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
 
-    # Convert list to dict keyed by base filename for easier lookup
-    # Assumes 'file_name' exists and is unique enough for this purpose
-    metadata_lookup = {}
-    for item in stage1_metadata_list:
-        if 'file_name' in item:
-            base_name = os.path.splitext(item['file_name'])[0]
-            metadata_lookup[base_name] = item
-        else:
-            print(f"   [WARNING] Skipping metadata item due to missing 'file_name': {item}")
-    print(f"   Loaded metadata for {len(metadata_lookup)} files.")
-    print("-" * 60)
-
-    # --- Load Existing Stage 3 Results (Checkpointing) ---
-    print(f"[4] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...")
-    catalog_entries = read_json_from_nas(stage3_output_smb_path)
-    if catalog_entries is None:
-        print("[CRITICAL ERROR] Failed to load or initialize existing Stage 3 results. Exiting.")
-        sys.exit(1)
-    if not isinstance(catalog_entries, list):
-        print(f"[CRITICAL ERROR] Existing Stage 3 results file is not a list. Found type: {type(catalog_entries)}. Exiting.")
-        sys.exit(1)
-
-    processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
-    print(f"   Found {len(catalog_entries)} existing catalog entries.")
-    print(f"   Identified {len(processed_md_files)} already processed Markdown files.")
-    print("-" * 60)
-
-    # --- Find Markdown Files from Stage 2 ---
-    print(f"[5] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...")
-    md_files_to_process = find_md_files(stage2_md_dir_smb_path)
-    if not md_files_to_process:
-        print("   No Markdown files found to process.")
-        # Decide if this is an error or just completion
-        print("\n" + "="*60)
-        print(f"--- Stage 3 Completed (No new Markdown files found) ---")
-        print("="*60 + "\n")
-        sys.exit(0)
-    print("-" * 60)
-
-    # --- Process Each Markdown File ---
-    print(f"[6] Processing {len(md_files_to_process)} Markdown files...")
-    new_entries_count = 0
-    skipped_count = 0
-    error_count = 0
-    current_token = None
-    token_expiry_time = time.time() # Initialize to ensure first token fetch
-
-    for i, md_smb_path in enumerate(md_files_to_process):
-        start_time = time.time()
-        print(f"\n--- Processing file {i+1}/{len(md_files_to_process)} ---")
-        print(f"   MD File Path (SMB): {md_smb_path}")
-
-        # Check if already processed
-        if md_smb_path in processed_md_files:
-            print("   File already processed (found in existing results). Skipping.")
-            skipped_count += 1
-            continue
-
-        # --- Get OAuth Token (Refresh if needed) ---
-        # Simple time-based check (e.g., refresh every 50 mins, assuming 1hr expiry)
-        # A more robust solution would check token expiry from the OAuth response if available.
-        if time.time() >= token_expiry_time:
-            print("   OAuth token expired or not yet fetched. Requesting new token...")
-            current_token = get_oauth_token()
-            if not current_token:
-                print("   [ERROR] Failed to obtain OAuth token. Skipping file.")
-                error_count += 1
-                continue # Skip to next file if auth fails
-            # Set expiry time (e.g., 50 minutes from now)
-            token_expiry_time = time.time() + (50 * 60)
-        # else: # Optional verbosity
-            # print("   Using existing OAuth token.")
-
-        # --- Initialize OpenAI Client ---
-        # It's generally safe to re-initialize the client with the same token
-        try:
-            # Adjust parameters based on your specific OpenAI library usage (e.g., AzureOpenAI)
-            client = OpenAI(
-                base_url=GPT_CONFIG['base_url'],
-                api_key=current_token, # Pass the token as the API key
-                # If using Azure OpenAI, you might need these instead/as well:
-                # azure_endpoint=GPT_CONFIG['base_url'],
-                # api_version=GPT_CONFIG['api_version'],
-                # azure_ad_token=current_token
-            )
-            # print("   OpenAI client initialized.") # Reduce verbosity
+                # Set the environment variable for requests library
+                os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
+                print(f"   Set REQUESTS_CA_BUNDLE environment variable to: {temp_cert_file_path}")
+            else:
+                print(f"   [WARNING] CA Bundle file not found at {ca_bundle_smb_path}. Proceeding without custom CA bundle.")
+        except smbclient.SambaClientError as e:
+            print(f"   [ERROR] SMB Error downloading CA bundle '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
         except Exception as e:
-            print(f"   [ERROR] Failed to initialize OpenAI client: {e}. Skipping file.")
-            error_count += 1
-            continue
+            print(f"   [ERROR] Unexpected error downloading/setting CA bundle '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
+            # Cleanup potentially created temp file if error occurred after creation but before setting env var
+            if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+                os.remove(temp_cert_file_path)
+                temp_cert_file_path = None
+        print("-" * 60)
 
-        # --- Read Markdown Content ---
-        markdown_content = read_text_from_nas(md_smb_path)
-        if not markdown_content:
-            print(f"   [ERROR] Failed to read Markdown content from {md_smb_path}. Skipping file.")
-            error_count += 1
-            continue
+        # --- Load Stage 1 Metadata ---
+        print(f"[4] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...")
+        stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
+        if stage1_metadata_list is None:
+            print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
+            sys.exit(1)
+        if not isinstance(stage1_metadata_list, list):
+            print(f"[CRITICAL ERROR] Stage 1 metadata is not a list. Found type: {type(stage1_metadata_list)}. Exiting.")
+            sys.exit(1)
 
-        # --- Call GPT Summarizer ---
-        description, usage = call_gpt_summarizer(client, markdown_content)
-        if not description or not usage:
-            print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path}. Skipping file.")
-            error_count += 1
-            continue # Skip if summarization fails
+        metadata_lookup = {}
+        for item in stage1_metadata_list:
+            if 'file_name' in item:
+                base_name = os.path.splitext(item['file_name'])[0]
+                metadata_lookup[base_name] = item
+            else:
+                print(f"   [WARNING] Skipping metadata item due to missing 'file_name': {item}")
+        print(f"   Loaded metadata for {len(metadata_lookup)} files.")
+        print("-" * 60)
 
-        # --- Gather Metadata ---
-        md_filename = os.path.basename(md_smb_path)
-        original_base_name = os.path.splitext(md_filename)[0]
-        # Handle potential chunk suffixes (e.g., _chunk_1) if Stage 2 added them
-        if '_chunk_' in original_base_name:
-             original_base_name = original_base_name.split('_chunk_')[0]
+        # --- Load Existing Stage 3 Results (Checkpointing) ---
+        print(f"[5] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...")
+        catalog_entries = read_json_from_nas(stage3_output_smb_path)
+        if catalog_entries is None:
+            print("[CRITICAL ERROR] Failed to load or initialize existing Stage 3 results. Exiting.")
+            sys.exit(1)
+        if not isinstance(catalog_entries, list):
+            print(f"[CRITICAL ERROR] Existing Stage 3 results file is not a list. Found type: {type(catalog_entries)}. Exiting.")
+            sys.exit(1)
 
-        original_metadata = metadata_lookup.get(original_base_name)
-        if not original_metadata:
-            print(f"   [WARNING] Could not find original metadata for base name '{original_base_name}' derived from {md_filename}. Skipping file.")
-            # This might indicate an issue with filename matching or Stage 1 data.
-            error_count += 1
-            continue
+        processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
+        print(f"   Found {len(catalog_entries)} existing catalog entries.")
+        print(f"   Identified {len(processed_md_files)} already processed Markdown files.")
+        print("-" * 60)
 
-        # Construct the catalog entry
-        entry = {
-            "document_source": DOCUMENT_SOURCE,
-            "document_type": DOCUMENT_TYPE,
-            "document_name": original_metadata.get('file_name', md_filename), # Use original name
-            "document_description": description,
-            "document_usage": usage,
-            "date_created": datetime.now(timezone.utc).isoformat(), # Timestamp of this processing step
-            "date_last_modified": original_metadata.get('date_last_modified'), # From Stage 1
-            "file_name": original_metadata.get('file_name'), # Original filename
-            "file_type": os.path.splitext(original_metadata.get('file_name', ''))[1], # Original extension
-            "file_size": original_metadata.get('file_size'), # Original size
-            "file_path": original_metadata.get('file_path'), # Original relative path from share root
-            "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_metadata.get('file_path', '')}", # Full SMB link to original
-            "processed_md_path": md_smb_path # Add path to the MD file for checkpointing
-        }
-
-        # --- Append and Save Results (Checkpoint) ---
-        catalog_entries.append(entry)
-        print(f"   Appending new entry for: {entry['file_name']}")
-        if write_json_to_nas(stage3_output_smb_path, catalog_entries):
-            print(f"   Successfully saved updated results to NAS ({len(catalog_entries)} total entries).")
-            new_entries_count += 1
-            processed_md_files.add(md_smb_path) # Update processed set in memory
+        # --- Find Markdown Files from Stage 2 ---
+        print(f"[6] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...")
+        md_files_to_process = find_md_files(stage2_md_dir_smb_path)
+        if not md_files_to_process:
+            print("   No Markdown files found to process.")
+            print("\n" + "="*60)
+            print(f"--- Stage 3 Completed (No new Markdown files found) ---")
+            print("="*60 + "\n")
+            # No sys.exit(0) here, allow finally block to run
         else:
-            print(f"   [CRITICAL ERROR] Failed to save updated results to NAS after processing {md_filename}. Stopping.")
-            # Remove the last added entry since save failed? Or leave inconsistent? Decide strategy.
-            # For now, we stop to prevent further potential data loss/inconsistency.
-            error_count += 1 # Count this as an error
-            sys.exit(1) # Exit on critical save failure
+            print("-" * 60)
 
-        end_time = time.time()
-        print(f"--- Finished file {i+1} (Success) ---")
-        print(f"--- Time taken: {end_time - start_time:.2f} seconds ---")
+            # --- Process Each Markdown File ---
+            print(f"[7] Processing {len(md_files_to_process)} Markdown files...")
+            new_entries_count = 0
+            skipped_count = 0
+            error_count = 0
+            current_token = None
+            token_expiry_time = time.time() # Initialize to ensure first token fetch
 
+            for i, md_smb_path in enumerate(md_files_to_process):
+                start_time = time.time()
+                print(f"\n--- Processing file {i+1}/{len(md_files_to_process)} ---")
+                print(f"   MD File Path (SMB): {md_smb_path}")
 
-    # --- Final Summary ---
-    print("\n" + "="*60)
-    print(f"--- Stage 3 Processing Summary ---")
-    print(f"   Total Markdown files found: {len(md_files_to_process)}")
-    print(f"   Files skipped (already processed): {skipped_count}")
-    print(f"   New catalog entries added: {new_entries_count}")
-    print(f"   Errors encountered: {error_count}")
-    print(f"   Total entries in '{STAGE3_OUTPUT_FILENAME}': {len(catalog_entries)}")
-    print("="*60 + "\n")
+                if md_smb_path in processed_md_files:
+                    print("   File already processed (found in existing results). Skipping.")
+                    skipped_count += 1
+                    continue
 
-    if error_count > 0:
-        print(f"[WARNING] {error_count} files encountered errors during processing. Check logs above.")
+                if time.time() >= token_expiry_time:
+                    print("   OAuth token expired or not yet fetched. Requesting new token...")
+                    current_token = get_oauth_token()
+                    if not current_token:
+                        print("   [ERROR] Failed to obtain OAuth token. Skipping file.")
+                        error_count += 1
+                        continue
+                    token_expiry_time = time.time() + (50 * 60)
 
-    print(f"--- Stage 3 Completed ---")
+                try:
+                    client = OpenAI(
+                        base_url=GPT_CONFIG['base_url'],
+                        api_key=current_token,
+                    )
+                except Exception as e:
+                    print(f"   [ERROR] Failed to initialize OpenAI client: {e}. Skipping file.")
+                    error_count += 1
+                    continue
+
+                markdown_content = read_text_from_nas(md_smb_path)
+                if not markdown_content:
+                    print(f"   [ERROR] Failed to read Markdown content from {md_smb_path}. Skipping file.")
+                    error_count += 1
+                    continue
+
+                description, usage = call_gpt_summarizer(client, markdown_content)
+                if not description or not usage:
+                    print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path}. Skipping file.")
+                    error_count += 1
+                    continue
+
+                md_filename = os.path.basename(md_smb_path)
+                original_base_name = os.path.splitext(md_filename)[0]
+                if '_chunk_' in original_base_name:
+                     original_base_name = original_base_name.split('_chunk_')[0]
+
+                original_metadata = metadata_lookup.get(original_base_name)
+                if not original_metadata:
+                    print(f"   [WARNING] Could not find original metadata for base name '{original_base_name}' derived from {md_filename}. Skipping file.")
+                    error_count += 1
+                    continue
+
+                entry = {
+                    "document_source": DOCUMENT_SOURCE,
+                    "document_type": DOCUMENT_TYPE,
+                    "document_name": original_metadata.get('file_name', md_filename),
+                    "document_description": description,
+                    "document_usage": usage,
+                    "date_created": datetime.now(timezone.utc).isoformat(),
+                    "date_last_modified": original_metadata.get('date_last_modified'),
+                    "file_name": original_metadata.get('file_name'),
+                    "file_type": os.path.splitext(original_metadata.get('file_name', ''))[1],
+                    "file_size": original_metadata.get('file_size'),
+                    "file_path": original_metadata.get('file_path'),
+                    "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_metadata.get('file_path', '')}",
+                    "processed_md_path": md_smb_path
+                }
+
+                catalog_entries.append(entry)
+                print(f"   Appending new entry for: {entry['file_name']}")
+                if write_json_to_nas(stage3_output_smb_path, catalog_entries):
+                    print(f"   Successfully saved updated results to NAS ({len(catalog_entries)} total entries).")
+                    new_entries_count += 1
+                    processed_md_files.add(md_smb_path)
+                else:
+                    print(f"   [CRITICAL ERROR] Failed to save updated results to NAS after processing {md_filename}. Stopping.")
+                    error_count += 1
+                    # Optionally remove the last added entry before exiting
+                    # catalog_entries.pop()
+                    sys.exit(1) # Exit on critical save failure
+
+                end_time = time.time()
+                print(f"--- Finished file {i+1} (Success) ---")
+                print(f"--- Time taken: {end_time - start_time:.2f} seconds ---")
+
+            # --- Final Summary ---
+            print("\n" + "="*60)
+            print(f"--- Stage 3 Processing Summary ---")
+            print(f"   Total Markdown files found: {len(md_files_to_process)}")
+            print(f"   Files skipped (already processed): {skipped_count}")
+            print(f"   New catalog entries added: {new_entries_count}")
+            print(f"   Errors encountered: {error_count}")
+            print(f"   Total entries in '{STAGE3_OUTPUT_FILENAME}': {len(catalog_entries)}")
+            print("="*60 + "\n")
+
+            if error_count > 0:
+                print(f"[WARNING] {error_count} files encountered errors during processing. Check logs above.")
+
+        print(f"--- Stage 3 Completed ---")
+
+    # --- Cleanup (Executes regardless of success/failure in the try block) ---
+    finally:
+        print("\n--- Cleaning up ---")
+        # Clean up the temporary certificate file
+        if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+            try:
+                os.remove(temp_cert_file_path)
+                print(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
+            except OSError as e:
+                print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
+
+        # Restore original environment variable if it existed
+        if original_ssl_env is None:
+            # If it didn't exist originally, remove it if we set it
+            if 'REQUESTS_CA_BUNDLE' in os.environ and os.environ['REQUESTS_CA_BUNDLE'] == temp_cert_file_path:
+                 print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
+                 del os.environ['REQUESTS_CA_BUNDLE']
+        else:
+            # If it existed originally, restore its value
+            if os.environ.get('REQUESTS_CA_BUNDLE') != original_ssl_env:
+                 print(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
+                 os.environ['REQUESTS_CA_BUNDLE'] = original_ssl_env
+            # else: # Optional: If it's already the original value, no need to restore
+                 # print("   REQUESTS_CA_BUNDLE already has its original value.")
