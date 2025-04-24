@@ -259,7 +259,8 @@ if __name__ == "__main__":
 
         # SQL query to select relevant columns for the specified document source
         query = f"""
-            SELECT id, file_name, file_path, date_last_modified, file_size
+            SELECT id, file_name, file_path, date_last_modified, file_size,
+                   document_source, document_type, document_name
             FROM {DB_TABLE_NAME}
             WHERE document_source = %s;
         """
@@ -361,7 +362,8 @@ if __name__ == "__main__":
 
     # Initialize comparison result DataFrames
     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
-    files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path']) # Files to delete from DB
+    # Add document_source, document_type, document_name to files_to_delete
+    files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Files to delete from DB
 
     # Handle edge cases: both empty, NAS empty, DB empty
     if db_df.empty and nas_df.empty:
@@ -436,13 +438,24 @@ if __name__ == "__main__":
              print(f"      Identified {len(updated_files_nas)} updated files (newer on NAS than in DB).")
 
              # Get DB details for files that need to be deleted because they were updated
-             files_to_delete = both_files.loc[updated_mask, ['id', 'file_name', 'file_path_db']].copy()
-             files_to_delete.rename(columns={'file_path_db': 'file_path'}, inplace=True)
+             # Include document_source, document_type, document_name from the DB side (_db suffix)
+             db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source_db', 'document_type_db', 'document_name_db']
+             # Ensure all required columns exist before selecting
+             existing_db_cols = [col for col in db_cols_to_keep if col in both_files.columns]
+             files_to_delete = both_files.loc[updated_mask, existing_db_cols].copy()
+             # Rename columns to match the target structure
+             files_to_delete.rename(columns={
+                 'file_path_db': 'file_path',
+                 'document_source_db': 'document_source',
+                 'document_type_db': 'document_type',
+                 'document_name_db': 'document_name'
+             }, inplace=True)
              print(f"      Identified {len(files_to_delete)} DB records to delete (corresponding to updated files).")
         else:
              print("      [WARNING] 'date_last_modified' columns missing in merged data for update check. Skipping update detection.")
              updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'reason'])
-             files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path'])
+             # Update the empty DataFrame definition here as well
+             files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
 
 
         # --- Combine New and Updated Files for Processing ---

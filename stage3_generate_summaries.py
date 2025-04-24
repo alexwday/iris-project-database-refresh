@@ -91,7 +91,8 @@ GPT_TOOL_DEFINITION = {
 # --- Input/Output Filenames ---
 STAGE1_METADATA_FILENAME = '1C_nas_files_to_process.json'
 STAGE2_OUTPUT_SUBFOLDER = '2A_processed_files'
-STAGE3_OUTPUT_FILENAME = '3A_catalog_entries.json'
+STAGE3_CATALOG_OUTPUT_FILENAME = '3A_catalog_entries.json' # Renamed for clarity
+STAGE3_CONTENT_OUTPUT_FILENAME = '3B_content_entries.json' # New output file
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename
 
 # ==============================================================================
@@ -130,12 +131,19 @@ def read_json_from_nas(smb_path):
     print(f"   Attempting to read JSON from NAS path: {smb_path}")
     try:
         if not smbclient.path.exists(smb_path):
-            print(f"   JSON file not found at: {smb_path}. Returning empty list/dict.")
-            # Return empty list for results file, empty dict for metadata? Adjust as needed.
-            if STAGE3_OUTPUT_FILENAME in smb_path:
+            print(f"   JSON file not found at: {smb_path}. Returning empty list.")
+            # Return empty list for results files (catalog or content)
+            # Check against both possible output filenames
+            if STAGE3_CATALOG_OUTPUT_FILENAME in smb_path or STAGE3_CONTENT_OUTPUT_FILENAME in smb_path:
                 return [] # Assume results file
+            # Handle metadata file case (though it should usually exist)
+            elif STAGE1_METADATA_FILENAME in smb_path:
+                 print(f"   [WARNING] Metadata file {STAGE1_METADATA_FILENAME} not found. Returning empty list.")
+                 return [] # Return list as metadata is expected to be a list of dicts
             else:
-                return {} # Assume metadata or other config
+                 # Fallback for unexpected files, maybe return None or raise error?
+                 print(f"   [WARNING] Unrecognized file type for not found handling: {smb_path}. Returning empty list.")
+                 return []
 
         with smbclient.open_file(smb_path, mode='r', encoding='utf-8') as f:
             data = json.load(f)
@@ -352,13 +360,15 @@ if __name__ == "__main__":
     source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
     stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
     stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
-    stage3_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_OUTPUT_FILENAME).replace('\\', '/')
+    stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Updated path
+    stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # New path
     ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
 
     print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
     print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
     print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
-    print(f"   Stage 3 Output File (SMB): {stage3_output_smb_path}")
+    print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
+    print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     print("-" * 60)
 
@@ -415,18 +425,32 @@ if __name__ == "__main__":
         print("-" * 60)
 
         # --- Load Existing Stage 3 Results (Checkpointing) ---
-        print(f"[6] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...")
-        catalog_entries = read_json_from_nas(stage3_output_smb_path)
+        print(f"[6] Loading existing Stage 3 results...")
+        # Load Catalog Entries
+        print(f"   Loading catalog entries from: {os.path.basename(stage3_catalog_output_smb_path)}...")
+        catalog_entries = read_json_from_nas(stage3_catalog_output_smb_path)
         if catalog_entries is None:
-            print("[CRITICAL ERROR] Failed to load or initialize existing Stage 3 results. Exiting.")
+            print("[CRITICAL ERROR] Failed to load or initialize existing catalog entries. Exiting.")
             sys.exit(1)
         if not isinstance(catalog_entries, list):
-            print(f"[CRITICAL ERROR] Existing Stage 3 results file is not a list. Found type: {type(catalog_entries)}. Exiting.")
+            print(f"[CRITICAL ERROR] Existing catalog entries file is not a list. Found type: {type(catalog_entries)}. Exiting.")
             sys.exit(1)
-
-        processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
         print(f"   Found {len(catalog_entries)} existing catalog entries.")
-        print(f"   Identified {len(processed_md_files)} already processed Markdown files.")
+
+        # Load Content Entries
+        print(f"   Loading content entries from: {os.path.basename(stage3_content_output_smb_path)}...")
+        content_entries = read_json_from_nas(stage3_content_output_smb_path)
+        if content_entries is None:
+            print("[CRITICAL ERROR] Failed to load or initialize existing content entries. Exiting.")
+            sys.exit(1)
+        if not isinstance(content_entries, list):
+            print(f"[CRITICAL ERROR] Existing content entries file is not a list. Found type: {type(content_entries)}. Exiting.")
+            sys.exit(1)
+        print(f"   Found {len(content_entries)} existing content entries.")
+
+        # Determine processed files based on catalog entries (assuming catalog is the primary indicator)
+        processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
+        print(f"   Identified {len(processed_md_files)} already processed Markdown files (based on catalog).")
         print("-" * 60)
 
         # --- Find Markdown Files from Stage 2 ---
@@ -490,9 +514,10 @@ if __name__ == "__main__":
                     error_count += 1
                     continue # Skip if summarization fails
 
-
+                # --- Prepare Data for Output ---
                 md_filename = os.path.basename(md_smb_path)
                 original_base_name = os.path.splitext(md_filename)[0]
+                # Handle potential chunk suffixes added in Stage 2
                 if '_chunk_' in original_base_name:
                      original_base_name = original_base_name.split('_chunk_')[0]
 
@@ -502,33 +527,64 @@ if __name__ == "__main__":
                     error_count += 1
                     continue
 
-                entry = {
-                    "document_source": DOCUMENT_SOURCE,
-                    "document_type": DOCUMENT_TYPE,
-                    "document_name": original_metadata.get('file_name', md_filename),
+                # Extract key fields (ensure they exist in metadata)
+                doc_name = original_metadata.get('file_name', md_filename) # Fallback to md_filename if needed
+                doc_source = DOCUMENT_SOURCE # Use configured source
+                doc_type = DOCUMENT_TYPE   # Use configured type
+
+                # Create Catalog Entry
+                catalog_entry = {
+                    "document_source": doc_source,
+                    "document_type": doc_type,
+                    "document_name": doc_name,
                     "document_description": description,
                     "document_usage": usage,
                     "date_created": datetime.now(timezone.utc).isoformat(),
                     "date_last_modified": original_metadata.get('date_last_modified'),
-                    "file_name": original_metadata.get('file_name'),
+                    "file_name": original_metadata.get('file_name'), # Redundant but matches original structure
                     "file_type": os.path.splitext(original_metadata.get('file_name', ''))[1],
                     "file_size": original_metadata.get('file_size'),
                     "file_path": original_metadata.get('file_path'),
                     "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_metadata.get('file_path', '')}",
-                    "processed_md_path": md_smb_path
+                    "processed_md_path": md_smb_path # For checkpointing
                 }
 
-                catalog_entries.append(entry)
-                print(f"   Appending new entry for: {entry['file_name']}")
-                if write_json_to_nas(stage3_output_smb_path, catalog_entries):
-                    print(f"   Successfully saved updated results to NAS ({len(catalog_entries)} total entries).")
+                # Create Content Entry
+                content_entry = {
+                    "document_source": doc_source,
+                    "document_type": doc_type,
+                    "document_name": doc_name,
+                    "section_id": 0, # As requested
+                    "section_name": doc_name, # As requested
+                    "content": usage, # Use the detailed usage summary as content
+                    "date_created": datetime.now(timezone.utc).isoformat() # Add creation date
+                }
+
+                # --- Append and Save Both Entries (Atomic-like operation for checkpointing) ---
+                print(f"   Appending new catalog entry for: {doc_name}")
+                catalog_entries.append(catalog_entry)
+                print(f"   Appending new content entry for: {doc_name}")
+                content_entries.append(content_entry)
+
+                # Save Catalog Entries
+                catalog_save_success = write_json_to_nas(stage3_catalog_output_smb_path, catalog_entries)
+                # Save Content Entries
+                content_save_success = write_json_to_nas(stage3_content_output_smb_path, content_entries)
+
+                if catalog_save_success and content_save_success:
+                    print(f"   Successfully saved updated catalog ({len(catalog_entries)}) and content ({len(content_entries)}) entries to NAS.")
                     new_entries_count += 1
-                    processed_md_files.add(md_smb_path)
+                    processed_md_files.add(md_smb_path) # Mark as processed only if both saved
                 else:
-                    print(f"   [CRITICAL ERROR] Failed to save updated results to NAS after processing {md_filename}. Stopping.")
+                    print(f"   [CRITICAL ERROR] Failed to save one or both output files to NAS after processing {md_filename}. Stopping.")
                     error_count += 1
-                    # Optionally remove the last added entry before exiting
-                    # catalog_entries.pop()
+                    # Rollback the appends for consistency before exiting
+                    catalog_entries.pop()
+                    content_entries.pop()
+                    print(f"   Rolled back entries for {doc_name}.")
+                    # Attempt to save the rolled-back state (optional, might fail again)
+                    # write_json_to_nas(stage3_catalog_output_smb_path, catalog_entries)
+                    # write_json_to_nas(stage3_content_output_smb_path, content_entries)
                     sys.exit(1) # Exit on critical save failure
 
                 end_time = time.time()
@@ -540,9 +596,10 @@ if __name__ == "__main__":
             print(f"--- Stage 3 Processing Summary ---")
             print(f"   Total Markdown files found: {len(md_files_to_process)}")
             print(f"   Files skipped (already processed): {skipped_count}")
-            print(f"   New catalog entries added: {new_entries_count}")
+            print(f"   New entry pairs (catalog/content) added: {new_entries_count}")
             print(f"   Errors encountered: {error_count}")
-            print(f"   Total entries in '{STAGE3_OUTPUT_FILENAME}': {len(catalog_entries)}")
+            print(f"   Total entries in '{STAGE3_CATALOG_OUTPUT_FILENAME}': {len(catalog_entries)}")
+            print(f"   Total entries in '{STAGE3_CONTENT_OUTPUT_FILENAME}': {len(content_entries)}")
             print("="*60 + "\n")
 
             if error_count > 0:
