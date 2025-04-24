@@ -25,6 +25,7 @@ import pandas as pd
 import tempfile # Added for temporary certificate file
 from datetime import datetime, timezone
 from openai import OpenAI # Assuming standard openai library v1.x+
+import tiktoken # Added for token counting
 
 # ==============================================================================
 # --- Configuration ---
@@ -362,10 +363,22 @@ if __name__ == "__main__":
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     print("-" * 60)
 
+    # --- Initialize Tiktoken Encoding ---
+    # Using cl100k_base as it's common for gpt-4, gpt-3.5-turbo, text-embedding-ada-002
+    # Adjust if your model uses a different encoding.
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        print("[3] Tiktoken encoding 'cl100k_base' initialized.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize tiktoken encoding: {e}. Token counts will not be available.")
+        encoding = None # Set encoding to None if initialization fails
+    print("-" * 60)
+
+
     # --- Main Processing Block with Cleanup ---
     try:
         # --- Download and Set Custom CA Bundle ---
-        print("[3] Setting up Custom CA Bundle...")
+        print("[4] Setting up Custom CA Bundle...") # Step number adjusted
         try: # Inner try/except for CA bundle download/setup
             if smbclient.path.exists(ca_bundle_smb_path):
                 # Create a temporary file to store the certificate
@@ -394,10 +407,8 @@ if __name__ == "__main__":
                     print(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
                     temp_cert_file_path = None
                 except OSError: pass # Ignore cleanup error
-        print("-" * 60)
-
         # --- Load Stage 1 Metadata ---
-        print(f"[4] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...")
+        print(f"[5] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...") # Step number adjusted
         stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
         if stage1_metadata_list is None:
             print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
@@ -414,10 +425,8 @@ if __name__ == "__main__":
             else:
                 print(f"   [WARNING] Skipping metadata item due to missing 'file_name': {item}")
         print(f"   Loaded metadata for {len(metadata_lookup)} files.")
-        print("-" * 60)
-
         # --- Load Existing Stage 3 Results (Checkpointing) ---
-        print(f"[5] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...")
+        print(f"[6] Loading existing Stage 3 results from: {os.path.basename(stage3_output_smb_path)}...") # Step number adjusted
         catalog_entries = read_json_from_nas(stage3_output_smb_path)
         if catalog_entries is None:
             print("[CRITICAL ERROR] Failed to load or initialize existing Stage 3 results. Exiting.")
@@ -429,10 +438,8 @@ if __name__ == "__main__":
         processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
         print(f"   Found {len(catalog_entries)} existing catalog entries.")
         print(f"   Identified {len(processed_md_files)} already processed Markdown files.")
-        print("-" * 60)
-
         # --- Find Markdown Files from Stage 2 ---
-        print(f"[6] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...")
+        print(f"[7] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...") # Step number adjusted
         md_files_to_process = find_md_files(stage2_md_dir_smb_path)
         if not md_files_to_process:
             print("   No Markdown files found to process.")
@@ -441,10 +448,8 @@ if __name__ == "__main__":
             print("="*60 + "\n")
             # No sys.exit(0) here, allow finally block to run
         else:
-            print("-" * 60)
-
             # --- Process Each Markdown File ---
-            print(f"[7] Processing {len(md_files_to_process)} Markdown files...")
+            print(f"[8] Processing {len(md_files_to_process)} Markdown files...") # Step number adjusted
             new_entries_count = 0
             skipped_count = 0
             error_count = 0
@@ -481,16 +486,31 @@ if __name__ == "__main__":
                     continue
 
                 markdown_content = read_text_from_nas(md_smb_path)
+                md_content_tokens = 0 # Initialize token count
                 if not markdown_content:
                     print(f"   [ERROR] Failed to read Markdown content from {md_smb_path}. Skipping file.")
                     error_count += 1
                     continue
+                elif encoding: # Calculate tokens if encoding is available and content was read
+                    try:
+                        md_content_tokens = len(encoding.encode(markdown_content))
+                    except Exception as e:
+                        print(f"   [WARNING] Failed to calculate token count for markdown content: {e}")
 
                 description, usage = call_gpt_summarizer(client, markdown_content)
+                desc_tokens = 0
+                usage_tokens = 0
                 if not description or not usage:
                     print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path}. Skipping file.")
                     error_count += 1
-                    continue
+                    continue # Skip if summarization fails
+                elif encoding: # Calculate summary tokens if encoding is available and summaries were generated
+                    try:
+                        desc_tokens = len(encoding.encode(description))
+                        usage_tokens = len(encoding.encode(usage))
+                    except Exception as e:
+                        print(f"   [WARNING] Failed to calculate token count for summaries: {e}")
+
 
                 md_filename = os.path.basename(md_smb_path)
                 original_base_name = os.path.splitext(md_filename)[0]
@@ -533,6 +553,9 @@ if __name__ == "__main__":
                     sys.exit(1) # Exit on critical save failure
 
                 end_time = time.time()
+                # Print token counts before finishing message
+                if encoding:
+                    print(f"   Token Counts: Content={md_content_tokens}, Description={desc_tokens}, Usage={usage_tokens}")
                 print(f"--- Finished file {i+1} (Success) ---")
                 print(f"--- Time taken: {end_time - start_time:.2f} seconds ---")
 
