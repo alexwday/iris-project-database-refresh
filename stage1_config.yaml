@@ -1,0 +1,6 @@
+Database:
+  host: localhost
+  port: 5432 # Standard PostgreSQL port
+  dbname: maven-finance
+  user: your_username # Replace with your DB username
+  password: your_password # Replace with your DB password
