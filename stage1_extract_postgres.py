@@ -598,6 +598,41 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print("-" * 60)
+
+    # --- Create Skip Flag if No Files to Process ---
+    print("[7] Checking if subsequent stages should be skipped...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    skip_flag_smb_path = os.path.join(nas_output_dir_smb_path, skip_flag_file_name).replace('\\', '/')
+
+    if files_to_process.empty:
+        print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
+        # Create an empty file as a flag
+        try:
+            # Ensure credentials are set for smbclient
+            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+            with smbclient.open_file(skip_flag_smb_path, mode='w', encoding='utf-8') as f:
+                f.write('') # Write empty content
+            print(f"   Successfully created skip flag file: {skip_flag_smb_path}")
+        except smbclient.SambaClientError as e:
+            print(f"   [WARNING] SMB Error creating skip flag file '{skip_flag_smb_path}': {e}")
+            # Warn but continue; subsequent stages might still check the JSON content as a fallback.
+        except Exception as e:
+            print(f"   [WARNING] Unexpected error creating skip flag file '{skip_flag_smb_path}': {e}")
+    else:
+        print(f"   Files found for processing ({len(files_to_process)}). Skip flag will not be created.")
+        # Ensure the flag file doesn't exist from a previous run
+        try:
+            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+            if smbclient.path.exists(skip_flag_smb_path):
+                print(f"   Removing existing skip flag file (if any): {skip_flag_smb_path}")
+                smbclient.remove(skip_flag_smb_path)
+        except smbclient.SambaClientError as e:
+            # Log as info, as file might not exist, which is fine.
+            print(f"   [INFO] Could not remove potentially existing skip flag file (may not exist or permissions issue): {e}")
+        except Exception as e:
+            print(f"   [INFO] Error checking/removing existing skip flag file: {e}")
+
+    print("-" * 60)
     print("\n" + "="*60)
     print(f"--- Stage 1 Completed Successfully ---")
     print("--- Output JSON files generated on NAS ---")

@@ -372,10 +372,36 @@ if __name__ == "__main__":
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     print("-" * 60)
 
+    # --- Check for Skip Flag from Stage 1 ---
+    print("[3] Checking for skip flag from Stage 1...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    # Flag file is in the base output dir for the source (same level as 1C*.json)
+    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    try:
+        # Ensure SMB client is configured (should be from step [1])
+        if smbclient.path.exists(skip_flag_smb_path):
+            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+            print("\n" + "="*60)
+            print(f"--- Stage 3 Skipped (No files to process from Stage 1) ---")
+            print("="*60 + "\n")
+            sys.exit(0) # Exit successfully as this is expected behavior
+        else:
+            print(f"   Skip flag file not found. Proceeding with Stage 3.")
+    except smbclient.SambaClientError as e:
+        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 3, but there might be an issue accessing NAS.")
+        # Continue execution, assuming no skip if flag check fails
+    except Exception as e:
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 3.")
+        # Continue execution
+    print("-" * 60)
+
     # --- Main Processing Block with Cleanup ---
     try:
         # --- Download and Set Custom CA Bundle ---
-        print("[3] Setting up Custom CA Bundle...")
+        print("[4] Setting up Custom CA Bundle...") # Renumbered step
         try: # Inner try/except for CA bundle download/setup
             if smbclient.path.exists(ca_bundle_smb_path):
                 # Create a temporary file to store the certificate

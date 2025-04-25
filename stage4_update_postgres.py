@@ -159,8 +159,34 @@ if __name__ == "__main__":
     print(f"   Content Entries List (SMB): {content_list_smb_path}")
     print("-" * 60)
 
+    # --- Check for Skip Flag from Stage 1 ---
+    print("[3] Checking for skip flag from Stage 1...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    # Flag file is in the base output dir for the source (same level as 1D*.json, 3A*.json etc.)
+    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    try:
+        # Ensure SMB client is configured (should be from step [1])
+        if smbclient.path.exists(skip_flag_smb_path):
+            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+            print("\n" + "="*60)
+            print(f"--- Stage 4 Skipped (No files to process from Stage 1) ---")
+            print("="*60 + "\n")
+            sys.exit(0) # Exit successfully as this is expected behavior
+        else:
+            print(f"   Skip flag file not found. Proceeding with Stage 4.")
+    except smbclient.SambaClientError as e:
+        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 4, but there might be an issue accessing NAS.")
+        # Continue execution, assuming no skip if flag check fails
+    except Exception as e:
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 4.")
+        # Continue execution
+    print("-" * 60)
+
     # --- Read Input Files from NAS ---
-    print("[3] Reading Input JSON Files from NAS...")
+    print("[4] Reading Input JSON Files from NAS...") # Renumbered step
     files_to_delete = read_json_from_nas(delete_list_smb_path)
     catalog_entries = read_json_from_nas(catalog_list_smb_path)
     content_entries = read_json_from_nas(content_list_smb_path)
