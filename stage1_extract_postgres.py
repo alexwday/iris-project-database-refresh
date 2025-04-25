@@ -452,8 +452,8 @@ if __name__ == "__main__":
         if 'date_last_modified_nas' in both_files.columns and 'date_last_modified_db' in both_files.columns:
              # Handle potential NaT values before comparison
              valid_dates_mask = both_files['date_last_modified_nas'].notna() & both_files['date_last_modified_db'].notna()
-             # Compare timestamps truncated to the second to avoid microsecond issues
-             updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'].dt.floor('S') > both_files['date_last_modified_db'].dt.floor('S'))
+             # Compare timestamps truncated to the minute
+             updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'].dt.floor('min') > both_files['date_last_modified_db'].dt.floor('min'))
 
              # Get NAS details for files identified as updated
              # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
@@ -504,22 +504,31 @@ if __name__ == "__main__":
             nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
             db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
 
-            status = "Unknown" # Default status
-            if merge_status == 'left_only':
+            # Determine status based on merge indicator and timestamp comparison
+            merge_status_val = str(getattr(row, '_merge', 'N/A')) # Ensure it's a string
+
+            if merge_status_val == 'left_only':
                 status = "New"
-            elif merge_status == 'right_only':
+            elif merge_status_val == 'right_only':
                 status = "Deleted/Moved (DB only)"
-            elif merge_status == 'both':
-                # Directly re-evaluate the update condition for 'both' rows within the loop
+            elif merge_status_val == 'both':
+                # Re-check timestamps directly for 'both' rows, comparing down to the minute
                 if pd.notna(nas_time) and pd.notna(db_time):
-                    if nas_time.floor('S') > db_time.floor('S'):
+                    nas_time_minute = nas_time.floor('min')
+                    db_time_minute = db_time.floor('min')
+                    if nas_time_minute > db_time_minute:
                         status = "Updated"
-                    else:
-                        status = "Unchanged" # Timestamps match or NAS is older (treated as unchanged)
+                    elif nas_time_minute == db_time_minute:
+                        status = "Unchanged"
+                    else: # nas_time_minute < db_time_minute (DB is newer? Should be rare)
+                        status = "Unchanged (DB Newer/Same)" # Treat DB newer as unchanged for processing
                 else:
-                    # Handle cases where one date might be NaT even if merge is 'both'
-                    # This indicates an issue, but we'll classify as Unchanged for logging.
-                    status = "Unchanged (Date Error?)"
+                    # Handle missing dates if merge status is 'both'
+                    status = "Error (Missing Date in 'both')"
+            else:
+                 # Fallback for any unexpected merge status
+                 status = f"Error (Unexpected Merge: {merge_status_val})"
+
 
             print(f"      - File: {file_name}")
             print(f"        NAS Time: {nas_time_str}")
