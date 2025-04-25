@@ -64,26 +64,85 @@ GPT_CONFIG = {
     "api_version": "2024-02-01" # Example Azure API version, adjust if needed
 }
 
-# --- Tool Definition for GPT ---
-# This defines the function/tool the GPT model should call to return summaries.
+# --- New System Prompt Template ---
+# Using CO-STAR framework and XML tags, embedded directly
+SYSTEM_PROMPT_TEMPLATE = """<CONTEXT>
+<PROJECT_CONTEXT>
+This project processes diverse documents (extracted from sources like '{document_source}') to create structured catalog entries for a database. These entries contain 'usage' and 'description' fields intended for an agentic RAG (Retrieval-Augmented Generation) system. The 'usage' field allows the AI agent to assess document relevance for retrieval, while the 'description' field provides a concise summary for human users browsing the catalog.
+</PROJECT_CONTEXT>
+</CONTEXT>
+
+You are an expert technical writer specializing in analyzing documents and generating structured summaries optimized for both AI agent retrieval and human understanding.
+
+<OBJECTIVE>
+Your goal is to generate two distinct fields based *only* on the provided <DOCUMENT_CONTENT>:
+1.  `usage`: A comprehensive, structured summary intended primarily for an AI agent. It must detail the document's core purpose, key topics, main arguments, important entities (people, places, organizations, concepts), relationships between entities, potential applications or use cases discussed, and any specific terminology, standards, or identifiers mentioned. This detail is crucial for enabling an AI agent to accurately assess the document's relevance to a query based *only* on this `usage` field in the catalog. The level of detail should align with the specified `detail_level`.
+2.  `description`: A concise (1-2 sentence) human-readable summary suitable for displaying to end-users browsing the catalog. This should capture the absolute essence of the document.
+</OBJECTIVE>
+
+<STYLE>
+Analytical, factual, objective, structured, and informative. Use clear and precise language. For the 'usage' field, consider using bullet points or structured text where appropriate to enhance readability for the AI agent, especially at higher detail levels.
+</STYLE>
+
+<TONE>
+Neutral and professional.
+</TONE>
+
+<AUDIENCE>
+- Primary: An AI retrieval agent (consuming the `usage` field).
+- Secondary: End-users browsing a document catalog (reading the `description` field).
+</AUDIENCE>
+
+<TASK>
+Analyze the provided document content and generate the `usage` and `description` fields according to the specifications.
+
+<DOCUMENT_CONTENT>
+{markdown_content}
+</DOCUMENT_CONTENT>
+
+<INSTRUCTIONS>
+1.  Carefully read and analyze the entire <DOCUMENT_CONTENT>.
+2.  Generate the `usage` string according to the <OBJECTIVE>, focusing on extracting information that aids agentic retrieval. Adapt the length and detail level based on the provided `detail_level`: '{detail_level}'.
+    - 'concise': Provide a brief overview of key topics and purpose.
+    - 'standard': Offer a balanced summary of topics, entities, and use cases.
+    - 'detailed': Require an exhaustive analysis covering all aspects mentioned in the <OBJECTIVE> for `usage`.
+3.  Generate the `description` string as a concise 1-2 sentence summary for humans, capturing the document's core essence. This field's length should *not* change based on `detail_level`.
+4.  **CRITICAL:** Base both fields *exclusively* on information present within the <DOCUMENT_CONTENT>. Do not infer, add external knowledge, or hallucinate information not explicitly stated in the text.
+5.  Format your response strictly as specified in <RESPONSE_FORMAT>. Do not include any preamble, conversational text, or explanations outside the required JSON structure.
+</INSTRUCTIONS>
+</TASK>
+
+<RESPONSE_FORMAT>
+You MUST call the `generate_catalog_fields` tool. Provide the generated `usage` and `description` strings as arguments within a JSON object.
+
+Example JSON for the tool call arguments:
+{{
+  "usage": "Comprehensive, structured summary based on the document content and detail level...",
+  "description": "Concise 1-2 sentence summary."
+}}
+</RESPONSE_FORMAT>
+"""
+
+# --- Tool Definition for GPT (Updated) ---
+# Renamed tool and updated descriptions/keys
 GPT_TOOL_DEFINITION = {
     "type": "function",
     "function": {
-        "name": "record_document_summary",
-        "description": "Records the extracted description and usage summary of a document.",
+        "name": "generate_catalog_fields", # Renamed tool
+        "description": "Generates the detailed 'usage' summary (for AI retrieval) and the concise 'description' summary (for humans) based on document content.",
         "parameters": {
             "type": "object",
             "properties": {
-                "document_description": {
+                "usage": { # Renamed key
                     "type": "string",
-                    "description": "A very brief (1-2 sentence) description of the document's content and purpose."
+                    "description": "A comprehensive, structured summary detailing the document's purpose, topics, entities, relationships, and use cases, optimized for AI agent retrieval assessment. Detail level varies."
                 },
-                "document_usage": {
+                "description": { # Renamed key
                     "type": "string",
-                    "description": "A concise, formatted summary explaining how the document can be used or what insights it provides, suitable for cataloging and LLM ingestion."
+                    "description": "A very concise (1-2 sentence) human-readable summary of the document's essence for catalog display."
                 }
             },
-            "required": ["document_description", "document_usage"]
+            "required": ["usage", "description"] # Updated required keys
         }
     }
 }
@@ -266,13 +325,32 @@ def get_oauth_token():
         print(f"   [ERROR] Unexpected error during OAuth token request: {e}")
         return None
 
-def call_gpt_summarizer(api_client, markdown_content):
-    """Calls the custom GPT model to generate summaries using tool calling."""
-    print("   Calling GPT model for summarization...")
+def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', document_source='unknown'):
+    """
+    Calls the custom GPT model to generate summaries using tool calling.
+
+    Args:
+        api_client: The initialized OpenAI client.
+        markdown_content: The text content of the document to summarize.
+        detail_level (str): The desired level of detail ('concise', 'standard', 'detailed').
+        document_source (str): The source identifier for context in the prompt.
+
+    Returns:
+        tuple: (description, usage) strings, or (None, None) on failure.
+    """
+    print(f"   Calling GPT model for summarization (Detail Level: {detail_level})...")
     try:
+        # Format the system prompt with dynamic content
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            markdown_content=markdown_content,
+            detail_level=detail_level,
+            document_source=document_source # Pass document source for context
+        )
+
         messages = [
-            {"role": "system", "content": "You are an expert assistant skilled at summarizing technical documents. Analyze the provided document content and use the 'record_document_summary' tool to provide a brief description and a detailed usage summary."},
-            {"role": "user", "content": f"Please summarize the following document content:\n\n---\n\n{markdown_content}\n\n---"}
+            # System prompt now contains all instructions, context, and content
+            {"role": "system", "content": system_prompt}
+            # No separate user message needed as content is embedded in system prompt
         ]
 
         # Note: The openai client might need explicit SSL context/CA bundle handling
@@ -289,8 +367,9 @@ def call_gpt_summarizer(api_client, markdown_content):
             model=GPT_CONFIG['model_name'],
             messages=messages,
             tools=[GPT_TOOL_DEFINITION],
-            tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}} # Force tool use
+            tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}} # Force tool use with updated name
             # Add other parameters like temperature, max_tokens if needed
+            # Consider adjusting max_tokens based on detail_level if necessary
         )
 
         # --- Process Response ---
@@ -300,17 +379,21 @@ def call_gpt_summarizer(api_client, markdown_content):
         if tool_calls:
             # Expecting only one tool call in this setup
             tool_call = tool_calls[0]
+            # Check against the updated tool name
             if tool_call.function.name == GPT_TOOL_DEFINITION['function']['name']:
                 try:
                     arguments = json.loads(tool_call.function.arguments)
-                    description = arguments.get('document_description')
-                    usage = arguments.get('document_usage')
+                    # Extract using updated keys
+                    usage = arguments.get('usage')
+                    description = arguments.get('description')
 
-                    if description and usage:
+                    if description is not None and usage is not None: # Check for presence, even if empty string is valid
                         print("   GPT successfully returned summaries via tool call.")
+                        # Return in the order: description, usage
                         return description, usage
                     else:
-                        print(f"   [ERROR] GPT tool call arguments missing 'document_description' or 'document_usage'. Arguments: {arguments}")
+                        # Use updated keys in error message
+                        print(f"   [ERROR] GPT tool call arguments missing 'usage' or 'description'. Arguments: {arguments}")
                         return None, None
                 except json.JSONDecodeError as e:
                     print(f"   [ERROR] Failed to parse GPT tool call arguments JSON: {e}. Arguments: {tool_call.function.arguments}")
@@ -319,6 +402,7 @@ def call_gpt_summarizer(api_client, markdown_content):
                     print(f"   [ERROR] Unexpected error processing GPT tool call arguments: {e}")
                     return None, None
             else:
+                # Use updated tool name in error message
                 print(f"   [ERROR] GPT called unexpected tool: {tool_call.function.name}")
                 return None, None
         else:
@@ -521,9 +605,14 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     error_count += 1
                     continue
 
-                description, usage = call_gpt_summarizer(client, markdown_content)
-                if not description or not usage:
-                    print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path}. Skipping file.")
+                # --- Call GPT Summarizer (with detail level and source) ---
+                # TODO: Make detail_level configurable if needed, e.g., based on DOCUMENT_SOURCE
+                current_detail_level = 'standard'
+                description, usage = call_gpt_summarizer(client, markdown_content, current_detail_level, DOCUMENT_SOURCE)
+
+                # Check if None was returned (indicates an error in call_gpt_summarizer)
+                if description is None or usage is None:
+                    print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path} (check logs from call_gpt_summarizer). Skipping file.")
                     error_count += 1
                     continue # Skip if summarization fails
 
@@ -551,8 +640,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "document_source": doc_source,
                     "document_type": doc_type,
                     "document_name": doc_name,
-                    "document_description": description,
-                    "document_usage": usage,
+                    "document_description": description, # Use the returned description
+                    "document_usage": usage, # Use the returned usage
                     # Use date_created from Stage 1 metadata (original creation or fallback to modified)
                     "date_created": original_metadata.get('date_created'),
                     "date_last_modified": original_metadata.get('date_last_modified'),
@@ -571,8 +660,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "document_name": doc_name,
                     "section_id": 0, # As requested
                     "section_name": doc_base_name, # Use base name without extension
-                    "section_summary": usage, # Add the AI-generated usage summary here
-                    "content": markdown_content, # Use the full markdown content read from the file (renamed from section_content in schema)
+                    "section_summary": usage, # Use the AI-generated usage summary here
+                    "content": markdown_content, # Use the full markdown content read from the file
                     "date_created": datetime.now(timezone.utc).isoformat() # Add creation date
                 }
 
