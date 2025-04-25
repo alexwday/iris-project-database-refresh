@@ -32,20 +32,20 @@ from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, Documen
 # ==============================================================================
 
 # --- Azure Document Intelligence Configuration ---
-# IMPORTANT: Replace with your actual endpoint and key, or load from env/config
+# Azure service connection parameters
 AZURE_DI_ENDPOINT = "YOUR_DI_ENDPOINT"
 AZURE_DI_KEY = "YOUR_DI_KEY"
 
 # --- NAS Configuration (Should match Stage 1 or be loaded) ---
-# IMPORTANT: Replace placeholder values if not loaded from a shared config.
+# Network attached storage connection parameters
 NAS_PARAMS = {
-    "ip": "your_nas_ip",          # Replace with NAS IP address
-    "share": "your_share_name",   # Replace with NAS share name
-    "user": "your_nas_user",      # Replace with NAS username
-    "password": "your_nas_password" # Replace with NAS password
+    "ip": "your_nas_ip",
+    "share": "your_share_name",
+    "user": "your_nas_user",
+    "password": "your_nas_password"
 }
-# Base path on the NAS share where Stage 1 output files were stored.
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # From Stage 1
+# Base path on the NAS share where Stage 1 output files were stored
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration (Should match Stage 1) ---
 # Define the specific document source processed in Stage 1.
@@ -92,7 +92,7 @@ def write_to_nas(smb_path, content_bytes):
         # Ensure the directory exists first (redundant if create_nas_directory called before, but safe)
         dir_path = os.path.dirname(smb_path)
         if not create_nas_directory(dir_path):
-             return False # Failed to create directory
+            return False # Failed to create directory
 
         with smbclient.open_file(smb_path, mode='wb') as f: # Write in binary mode
             f.write(content_bytes)
@@ -356,15 +356,25 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                         # Save JSON for each chunk
                         for chunk_index, result_json in enumerate(results_json_list):
                             chunk_json_smb_path = os.path.join(file_output_subfolder_smb, f"{file_name_base}_chunk_{chunk_index + 1}.json").replace('\\', '/')
-                            # Add default handler for non-serializable objects, like in the example
-                            json_bytes = json.dumps(result_json, indent=4, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o)).encode('utf-8')
+                            # Add handler for non-serializable objects
+                            def json_serializer(obj):
+                                if hasattr(obj, '__dict__'):
+                                    return obj.__dict__
+                                return str(obj)
+                            
+                            json_bytes = json.dumps(result_json, indent=4, default=json_serializer).encode('utf-8')
                             if not write_to_nas(chunk_json_smb_path, json_bytes):
                                 print(f"   [ERROR] Failed to write JSON chunk {chunk_index + 1} for {file_name} to NAS.")
                                 # Don't necessarily mark file_has_error, maybe just log warning?
                     else:
                         # Save single JSON for non-split files
-                        # Add default handler for non-serializable objects, like in the example
-                        json_bytes = json.dumps(results_json_list[0], indent=4, default=lambda o: o.__dict__ if hasattr(o, '__dict__') else str(o)).encode('utf-8')
+                        # Add handler for non-serializable objects
+                        def json_serializer(obj):
+                            if hasattr(obj, '__dict__'):
+                                return obj.__dict__
+                            return str(obj)
+                        
+                        json_bytes = json.dumps(results_json_list[0], indent=4, default=json_serializer).encode('utf-8')
                         if not write_to_nas(output_json_smb_path, json_bytes):
                             print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
                             # Don't necessarily mark file_has_error, maybe just log warning?

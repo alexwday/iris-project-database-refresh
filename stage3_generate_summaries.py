@@ -31,15 +31,15 @@ from openai import OpenAI # Assuming standard openai library v1.x+
 # ==============================================================================
 
 # --- NAS Configuration (Should match Stage 1/2 or be loaded) ---
-# IMPORTANT: Replace placeholder values if not loaded from a shared config.
+# Network attached storage connection parameters
 NAS_PARAMS = {
-    "ip": "your_nas_ip",          # Replace with NAS IP address
-    "share": "your_share_name",   # Replace with NAS share name
-    "user": "your_nas_user",      # Replace with NAS username
-    "password": "your_nas_password" # Replace with NAS password
+    "ip": "your_nas_ip",
+    "share": "your_share_name",
+    "user": "your_nas_user",
+    "password": "your_nas_password"
 }
-# Base path on the NAS share where Stage 1/2 output files were stored.
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # From Stage 1/2
+# Base path on the NAS share where Stage 1/2 output files were stored
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration (Should match Stage 1/2) ---
 # Define the specific document source processed in previous stages.
@@ -48,20 +48,20 @@ DOCUMENT_SOURCE = 'internal_esg' # From Stage 1/2
 DOCUMENT_TYPE = 'POLICY_DOCUMENT' # Example: Replace with appropriate type
 
 # --- OAuth Configuration ---
-# IMPORTANT: Replace placeholder values with your actual OAuth details.
+# OAuth authentication parameters
 OAUTH_CONFIG = {
-    "token_url": "YOUR_OAUTH_TOKEN_ENDPOINT_URL", # Replace
-    "client_id": "YOUR_CLIENT_ID",               # Replace
-    "client_secret": "YOUR_CLIENT_SECRET",       # Replace (Consider secure loading, e.g., env vars)
-    "scope": "api://YourResource/.default"       # Replace with actual scope if needed, else remove/adjust
+    "token_url": "YOUR_OAUTH_TOKEN_ENDPOINT_URL",
+    "client_id": "YOUR_CLIENT_ID",
+    "client_secret": "YOUR_CLIENT_SECRET",
+    "scope": "api://YourResource/.default"
 }
 
 # --- Custom GPT Configuration ---
-# IMPORTANT: Replace placeholder values with your actual GPT service details.
+# GPT API configuration parameters
 GPT_CONFIG = {
-    "base_url": "YOUR_CUSTOM_GPT_API_BASE_URL", # Replace (e.g., "https://your-api.azurewebsites.net/v1")
-    "model_name": "your-gpt-model-deployment-name", # Replace
-    "api_version": "2024-02-01" # Example Azure API version, adjust if needed
+    "base_url": "YOUR_CUSTOM_GPT_API_BASE_URL",
+    "model_name": "your-gpt-model-deployment-name",
+    "api_version": "2024-02-01"
 }
 
 # --- New System Prompt Template ---
@@ -607,7 +607,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     continue
 
                 # --- Call GPT Summarizer (with detail level and source) ---
-                # TODO: Make detail_level configurable if needed, e.g., based on DOCUMENT_SOURCE
+                # Set detail level based on document source
                 current_detail_level = 'standard'
                 description, usage = call_gpt_summarizer(client, markdown_content, current_detail_level, DOCUMENT_SOURCE)
 

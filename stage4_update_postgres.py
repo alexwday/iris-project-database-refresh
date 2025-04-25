@@ -33,27 +33,27 @@ from datetime import datetime
 # ==============================================================================
 
 # --- Database Configuration ---
-# IMPORTANT: Replace placeholder values with your actual database credentials.
+# Database connection parameters
 DB_PARAMS = {
     "host": "localhost",
     "port": "5432",
     "dbname": "maven-finance",
-    "user": "your_username",  # Replace with your DB username
-    "password": "your_password"   # Replace with your DB password
+    "user": "your_username",
+    "password": "your_password"
 }
 DB_CATALOG_TABLE = 'apg_catalog'
 DB_CONTENT_TABLE = 'apg_content'
 
 # --- NAS Configuration ---
-# IMPORTANT: Replace placeholder values if not loaded from a shared config.
+# Network attached storage connection parameters
 NAS_PARAMS = {
-    "ip": "your_nas_ip",          # Replace with NAS IP address
-    "share": "your_share_name",   # Replace with NAS share name
-    "user": "your_nas_user",      # Replace with NAS username
-    "password": "your_nas_password" # Replace with NAS password
+    "ip": "your_nas_ip",
+    "share": "your_share_name",
+    "user": "your_nas_user",
+    "password": "your_nas_password"
 }
-# Base path on the NAS share where Stage 1/3 output files were stored.
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # From Stage 1/3
+# Base path on the NAS share where Stage 1/3 output files were stored
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration ---
 # Define the specific document source processed in previous stages.
@@ -209,9 +209,9 @@ def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_
                             print(f"   [WARNING] Skipping deletion for record with missing key components: {item}")
 
                     if not delete_keys:
-                         print("   No valid keys found for deletion after filtering.")
-                         after_delete_catalog_count = initial_catalog_count # Set counts for verification later
-                         after_delete_content_count = initial_content_count
+                        print("   No valid keys found for deletion after filtering.")
+                        after_delete_catalog_count = initial_catalog_count # Set counts for verification later
+                        after_delete_content_count = initial_content_count
                     else:
                         print(f"   Attempting to delete records for {len(delete_keys)} unique keys...")
                         for key_tuple in delete_keys:

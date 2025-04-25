@@ -28,15 +28,15 @@ from datetime import datetime
 # ==============================================================================
 
 # --- NAS Configuration (Should match previous stages or be loaded) ---
-# IMPORTANT: Replace placeholder values if not loaded from a shared config.
+# Network attached storage connection parameters
 NAS_PARAMS = {
-    "ip": "your_nas_ip",          # Replace with NAS IP address
-    "share": "your_share_name",   # Replace with NAS share name
-    "user": "your_nas_user",      # Replace with NAS username
-    "password": "your_nas_password" # Replace with NAS password
+    "ip": "your_nas_ip",
+    "share": "your_share_name",
+    "user": "your_nas_user",
+    "password": "your_nas_password"
 }
-# Base path on the NAS share where Stage 1-4 output files were stored.
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # From previous stages
+# Base path on the NAS share where Stage 1-4 output files were stored
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration ---
 # Define the specific document source processed in previous stages.
@@ -65,7 +65,7 @@ def create_nas_directory(smb_dir_path):
             smbclient.makedirs(smb_dir_path, exist_ok=True)
             print(f"   Successfully created directory.")
         else:
-            # print(f"   NAS directory already exists: {smb_dir_path}") # Optional: reduce verbosity
+            # Directory already exists
             pass
         return True
     except smbclient.SambaClientError as e:

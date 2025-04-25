@@ -35,26 +35,26 @@ from datetime import datetime, timezone
 # ==============================================================================
 
 # --- Database Configuration ---
-# IMPORTANT: Replace placeholder values with your actual database credentials.
+# Database connection parameters
 DB_PARAMS = {
     "host": "localhost",
     "port": "5432",
     "dbname": "maven-finance",
-    "user": "your_username",  # Replace with your DB username
-    "password": "your_password"   # Replace with your DB password
+    "user": "your_username",
+    "password": "your_password"
 }
 
 # --- NAS Configuration ---
-# IMPORTANT: Replace placeholder values with your actual NAS details.
+# Network attached storage connection parameters
 NAS_PARAMS = {
-    "ip": "your_nas_ip",          # Replace with NAS IP address
-    "share": "your_share_name",   # Replace with NAS share name
-    "user": "your_nas_user",      # Replace with NAS username
-    "password": "your_nas_password" # Replace with NAS password
+    "ip": "your_nas_ip",
+    "share": "your_share_name",
+    "user": "your_nas_user",
+    "password": "your_nas_password"
 }
-# Base path on the NAS share containing the root folders for different document sources.
+# Base path on the NAS share containing the root folders for different document sources
 NAS_BASE_INPUT_PATH = "path/to/your/base_input_folder"
-# Base path on the NAS share where output JSON files will be stored.
+# Base path on the NAS share where output JSON files will be stored
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration ---
@@ -168,12 +168,12 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                     if hasattr(stat_info, 'st_birthtime') and stat_info.st_birthtime:
                         try:
                             creation_timestamp = stat_info.st_birthtime
-                            print(f"      Found birthtime: {creation_timestamp}") # Debug print
+                            # Found birthtime
                         except Exception as e:
                              print(f"      [WARNING] Error accessing st_birthtime for {filename}: {e}. Falling back to mtime.")
                              creation_timestamp = stat_info.st_mtime # Fallback
                     else:
-                        # print(f"      No st_birthtime found for {filename}. Falling back to mtime.") # Optional verbosity
+                        # No birthtime, fallback to mtime
                         creation_timestamp = stat_info.st_mtime # Fallback if attribute doesn't exist
 
                     created_dt = datetime.fromtimestamp(creation_timestamp, tz=timezone.utc)
@@ -447,110 +447,110 @@ if __name__ == "__main__":
             print("   Performing comparison based on 'file_name'...")
 
             # Ensure 'file_name' columns exist and are string type for reliable merging
-        if 'file_name' not in nas_df.columns:
-            print("   [CRITICAL ERROR] 'file_name' column missing in NAS DataFrame. Exiting.")
-            sys.exit(1)
-        if 'file_name' not in db_df.columns:
-            print("   [CRITICAL ERROR] 'file_name' column missing in DB DataFrame. Exiting.")
-            sys.exit(1)
+            if 'file_name' not in nas_df.columns:
+                print("   [CRITICAL ERROR] 'file_name' column missing in NAS DataFrame. Exiting.")
+                sys.exit(1)
+            if 'file_name' not in db_df.columns:
+                print("   [CRITICAL ERROR] 'file_name' column missing in DB DataFrame. Exiting.")
+                sys.exit(1)
 
-        nas_df['file_name'] = nas_df['file_name'].astype(str)
-        db_df['file_name'] = db_df['file_name'].astype(str)
+            nas_df['file_name'] = nas_df['file_name'].astype(str)
+            db_df['file_name'] = db_df['file_name'].astype(str)
 
-        # Merge NAS file list (left) with DB catalog (right)
-        # 'outer' merge keeps all rows from both DataFrames
-        # 'indicator=True' adds a '_merge' column indicating the source of each row
-        comparison_df = pd.merge(
-            nas_df,
-            db_df,
-            on='file_name', # Key to join on
-            how='outer',
-            suffixes=('_nas', '_db'), # Suffixes for overlapping columns (like file_path, date_last_modified)
-            indicator=True # Adds '_merge' column ('left_only', 'right_only', 'both')
-        )
+                    # Merge NAS file list (left) with DB catalog (right)
+            # 'outer' merge keeps all rows from both DataFrames
+            # 'indicator=True' adds a '_merge' column indicating the source of each row
+            comparison_df = pd.merge(
+                nas_df,
+                db_df,
+                on='file_name', # Key to join on
+                how='outer',
+                suffixes=('_nas', '_db'), # Suffixes for overlapping columns (like file_path, date_last_modified)
+                indicator=True # Adds '_merge' column ('left_only', 'right_only', 'both')
+            )
 
-        # --- Identify New Files ---
-        # Files present only on NAS ('left_only' in the merge)
-        new_files_mask = comparison_df['_merge'] == 'left_only'
-        # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
-        new_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
-        # Ensure all expected columns actually exist in comparison_df before selecting
-        existing_new_cols = [col for col in new_files_cols if col in comparison_df.columns]
-        if len(existing_new_cols) != len(new_files_cols):
-             missing_cols = set(new_files_cols) - set(existing_new_cols)
-             print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for new files list. Check merge logic.")
-        new_files = comparison_df.loc[new_files_mask, existing_new_cols].copy()
-        # Rename columns with suffixes, date_created is already correct
-        new_files.rename(columns={
-            'file_path_nas': 'file_path',
-            'file_size_nas': 'file_size',
-            'date_last_modified_nas': 'date_last_modified'
-        }, inplace=True)
-        new_files['reason'] = 'new'
-        print(f"      Identified {len(new_files)} new files (present on NAS, not in DB).")
+            # --- Identify New Files ---
+            # Files present only on NAS ('left_only' in the merge)
+            new_files_mask = comparison_df['_merge'] == 'left_only'
+            # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
+            new_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
+            # Ensure all expected columns actually exist in comparison_df before selecting
+            existing_new_cols = [col for col in new_files_cols if col in comparison_df.columns]
+            if len(existing_new_cols) != len(new_files_cols):
+                missing_cols = set(new_files_cols) - set(existing_new_cols)
+                print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for new files list. Check merge logic.")
+            new_files = comparison_df.loc[new_files_mask, existing_new_cols].copy()
+            # Rename columns with suffixes, date_created is already correct
+            new_files.rename(columns={
+                'file_path_nas': 'file_path',
+                'file_size_nas': 'file_size',
+                'date_last_modified_nas': 'date_last_modified'
+            }, inplace=True)
+            new_files['reason'] = 'new'
+            print(f"      Identified {len(new_files)} new files (present on NAS, not in DB).")
 
-        # --- Identify Updated Files and Corresponding DB Entries to Delete ---
-        # Files present in both NAS and DB ('both' in the merge)
-        both_files_mask = comparison_df['_merge'] == 'both'
-        both_files = comparison_df[both_files_mask].copy()
-        updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason']) # Initialize empty
-        files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Initialize empty
-        updated_mask = pd.Series(dtype=bool) # Initialize empty mask
+            # --- Identify Updated Files and Corresponding DB Entries to Delete ---
+            # Files present in both NAS and DB ('both' in the merge)
+            both_files_mask = comparison_df['_merge'] == 'both'
+            both_files = comparison_df[both_files_mask].copy()
+            updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason']) # Initialize empty
+            files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Initialize empty
+            updated_mask = pd.Series(dtype=bool) # Initialize empty mask
 
-        # Only perform update check if there are files present in both sources
-        if not both_files.empty:
-            # Check for updates based on modification time (NAS newer than DB)
-            # Ensure both date columns are valid datetimes before comparison
-            if 'date_last_modified_nas' in both_files.columns and 'date_last_modified_db' in both_files.columns:
-                 # Handle potential NaT values before comparison
-                 valid_dates_mask = both_files['date_last_modified_nas'].notna() & both_files['date_last_modified_db'].notna()
-                 # Compare timestamps truncated to the minute (only on rows with valid dates)
-                 # Initialize updated_mask for all 'both' rows as False
-                 updated_mask = pd.Series(False, index=both_files.index)
-                 # Apply comparison only where dates are valid
-                 updated_mask[valid_dates_mask] = (
-                     both_files.loc[valid_dates_mask, 'date_last_modified_nas'].dt.floor('min') >
-                     both_files.loc[valid_dates_mask, 'date_last_modified_db'].dt.floor('min')
-                 )
+            # Only perform update check if there are files present in both sources
+            if not both_files.empty:
+                # Check for updates based on modification time (NAS newer than DB)
+                # Ensure both date columns are valid datetimes before comparison
+                if 'date_last_modified_nas' in both_files.columns and 'date_last_modified_db' in both_files.columns:
+                    # Handle potential NaT values before comparison
+                    valid_dates_mask = both_files['date_last_modified_nas'].notna() & both_files['date_last_modified_db'].notna()
+                    # Compare timestamps truncated to the minute (only on rows with valid dates)
+                    # Initialize updated_mask for all 'both' rows as False
+                    updated_mask = pd.Series(False, index=both_files.index)
+                    # Apply comparison only where dates are valid
+                    updated_mask[valid_dates_mask] = (
+                        both_files.loc[valid_dates_mask, 'date_last_modified_nas'].dt.floor('min') >
+                        both_files.loc[valid_dates_mask, 'date_last_modified_db'].dt.floor('min')
+                    )
 
-                 # Get NAS details for files identified as updated
-                 # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
-                 updated_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
-                 # Ensure all expected columns actually exist in both_files before selecting
-                 existing_updated_cols = [col for col in updated_files_cols if col in both_files.columns]
-                 if len(existing_updated_cols) != len(updated_files_cols):
-                      missing_cols = set(updated_files_cols) - set(existing_updated_cols)
-                      print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for updated files list. Check merge logic.")
-                 # Select rows using the boolean mask 'updated_mask'
-                 updated_files_nas = both_files.loc[updated_mask, existing_updated_cols].copy()
-                 # Rename columns with suffixes, date_created is already correct
-                 updated_files_nas.rename(columns={
-                     'file_path_nas': 'file_path',
-                     'file_size_nas': 'file_size',
-                     'date_last_modified_nas': 'date_last_modified'
-                 }, inplace=True)
-                 updated_files_nas['reason'] = 'updated'
-                 print(f"      Identified {len(updated_files_nas)} updated files (newer on NAS than in DB).")
+                    # Get NAS details for files identified as updated
+                    # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
+                    updated_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
+                    # Ensure all expected columns actually exist in both_files before selecting
+                    existing_updated_cols = [col for col in updated_files_cols if col in both_files.columns]
+                    if len(existing_updated_cols) != len(updated_files_cols):
+                        missing_cols = set(updated_files_cols) - set(existing_updated_cols)
+                        print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for updated files list. Check merge logic.")
+                    # Select rows using the boolean mask 'updated_mask'
+                    updated_files_nas = both_files.loc[updated_mask, existing_updated_cols].copy()
+                    # Rename columns with suffixes, date_created is already correct
+                    updated_files_nas.rename(columns={
+                        'file_path_nas': 'file_path',
+                        'file_size_nas': 'file_size',
+                        'date_last_modified_nas': 'date_last_modified'
+                    }, inplace=True)
+                    updated_files_nas['reason'] = 'updated'
+                    print(f"      Identified {len(updated_files_nas)} updated files (newer on NAS than in DB).")
 
-                 # Get DB details for files that need to be deleted because they were updated
-             # Select the original column names from the DB side of the merge
-             # (document_source, document_type, document_name don't get suffixes as they only exist in db_df)
-                 db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source', 'document_type', 'document_name']
-                 # Ensure all required columns exist before selecting
-                 existing_db_cols = [col for col in db_cols_to_keep if col in both_files.columns]
-                 if len(existing_db_cols) != len(db_cols_to_keep):
-                      missing_cols = set(db_cols_to_keep) - set(existing_db_cols)
-                      print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for deletion list. Check merge logic.")
-                 # Select rows using the boolean mask 'updated_mask'
-                 files_to_delete = both_files.loc[updated_mask, existing_db_cols].copy()
-                 # Rename only the column that definitely has a suffix
-                 files_to_delete.rename(columns={'file_path_db': 'file_path'}, inplace=True)
-                 print(f"      Identified {len(files_to_delete)} DB records to delete (corresponding to updated files).")
+                    # Get DB details for files that need to be deleted because they were updated
+                    # Select the original column names from the DB side of the merge
+                    # (document_source, document_type, document_name don't get suffixes as they only exist in db_df)
+                    db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source', 'document_type', 'document_name']
+                    # Ensure all required columns exist before selecting
+                    existing_db_cols = [col for col in db_cols_to_keep if col in both_files.columns]
+                    if len(existing_db_cols) != len(db_cols_to_keep):
+                        missing_cols = set(db_cols_to_keep) - set(existing_db_cols)
+                        print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for deletion list. Check merge logic.")
+                    # Select rows using the boolean mask 'updated_mask'
+                    files_to_delete = both_files.loc[updated_mask, existing_db_cols].copy()
+                    # Rename only the column that definitely has a suffix
+                    files_to_delete.rename(columns={'file_path_db': 'file_path'}, inplace=True)
+                    print(f"      Identified {len(files_to_delete)} DB records to delete (corresponding to updated files).")
+                else:
+                    print("      [WARNING] 'date_last_modified' columns missing in merged data for update check. Skipping update detection.")
+                    # updated_files_nas and files_to_delete remain empty as initialized
             else:
-                 print("      [WARNING] 'date_last_modified' columns missing in merged data for update check. Skipping update detection.")
-                 # updated_files_nas and files_to_delete remain empty as initialized
-        else:
-             print("      No files found in both NAS and DB. Skipping update check.")
+                print("      No files found in both NAS and DB. Skipping update check.")
              # updated_files_nas and files_to_delete remain empty as initialized
 
         # --- Detailed File-by-File Comparison Logging ---
