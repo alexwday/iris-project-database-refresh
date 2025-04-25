@@ -333,22 +333,29 @@ if __name__ == "__main__":
         else:
             print(f"   Inserting {len(content_entries)} content entries into '{DB_CONTENT_TABLE}'...")
             # Define columns in the order they appear in the table
-            content_cols = [
+            # NOTE: The JSON key is 'content', but the DB column is 'section_content'
+            content_cols_db = [
                 'document_source', 'document_type', 'document_name',
-                'section_id', 'section_name', 'content', 'date_created'
+                'section_id', 'section_name', 'section_content', 'date_created' # Use DB column name here
             ]
-            # Prepare data tuples
+            # Define corresponding keys in the JSON data
+            content_cols_json = [
+                'document_source', 'document_type', 'document_name',
+                'section_id', 'section_name', 'content', 'date_created' # Use JSON key name here
+            ]
+            # Prepare data tuples using JSON keys
             content_data = []
             for entry in content_entries:
-                 data_tuple = tuple(entry.get(col) for col in content_cols)
+                 # Fetch data using JSON keys, maintaining order of DB columns for insertion
+                 data_tuple = tuple(entry.get(json_col) for json_col in content_cols_json)
                  content_data.append(data_tuple)
 
             if content_data:
                 try:
                     with conn.cursor() as cur:
-                        # Construct query using .format() instead of f-string
+                        # Construct query using .format() and DB column names
                         insert_query_template = "INSERT INTO {} ({}) VALUES %s;"
-                        insert_query = insert_query_template.format(DB_CONTENT_TABLE, ", ".join(content_cols))
+                        insert_query = insert_query_template.format(DB_CONTENT_TABLE, ", ".join(content_cols_db)) # Use DB column names
 
                         psycopg2.extras.execute_values(
                             cur, insert_query, content_data, template=None, page_size=100
