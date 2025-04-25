@@ -339,12 +339,13 @@ def call_gpt_summarizer(api_client, markdown_content):
 
 def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                            stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                           ca_bundle_smb_path):
+                           ca_bundle_smb_path, refresh_flag_smb_path): # Added refresh_flag_smb_path
     """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
     print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
     original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
     original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
+    is_full_refresh = False # Flag to track refresh mode
 
     try:
         # --- Download and Set Custom CA Bundle ---
@@ -377,8 +378,36 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     print(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
                     temp_cert_file_path = None
                 except OSError: pass # Ignore cleanup error
+
+        # --- Check for Full Refresh Flag ---
+        print(f"[5] Checking for Full Refresh flag: {os.path.basename(refresh_flag_smb_path)}...") # Renumbered
+        try:
+            if smbclient.path.exists(refresh_flag_smb_path):
+                print("   *** FULL REFRESH MODE DETECTED ***")
+                is_full_refresh = True
+                # Delete existing Stage 3 output files
+                print("   Deleting existing Stage 3 output files (if they exist)...")
+                for file_path in [stage3_catalog_output_smb_path, stage3_content_output_smb_path]:
+                    try:
+                        if smbclient.path.exists(file_path):
+                            smbclient.remove(file_path)
+                            print(f"      Deleted: {os.path.basename(file_path)}")
+                        else:
+                            print(f"      File not found (already deleted or never existed): {os.path.basename(file_path)}")
+                    except smbclient.SambaClientError as rm_err:
+                        print(f"      [WARNING] SMB Error deleting file {os.path.basename(file_path)}: {rm_err}")
+                    except Exception as rm_err:
+                        print(f"      [WARNING] Unexpected error deleting file {os.path.basename(file_path)}: {rm_err}")
+            else:
+                print("   Full Refresh flag not found. Running in incremental mode.")
+        except smbclient.SambaClientError as e:
+            print(f"   [WARNING] SMB Error checking for refresh flag file '{refresh_flag_smb_path}': {e}. Assuming incremental mode.")
+        except Exception as e:
+            print(f"   [WARNING] Unexpected error checking for refresh flag file '{refresh_flag_smb_path}': {e}. Assuming incremental mode.")
+        print("-" * 60)
+
         # --- Load Stage 1 Metadata ---
-        print(f"[5] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...")
+        print(f"[6] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...") # Renumbered
         stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
         if stage1_metadata_list is None:
             print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
@@ -399,37 +428,44 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
         print(f"   Loaded metadata for {len(metadata_lookup)} files.")
         print("-" * 60)
 
-        # --- Load Existing Stage 3 Results (Checkpointing) ---
-        print(f"[6] Loading existing Stage 3 results...")
-        # Load Catalog Entries
-        print(f"   Loading catalog entries from: {os.path.basename(stage3_catalog_output_smb_path)}...")
-        catalog_entries = read_json_from_nas(stage3_catalog_output_smb_path)
-        if catalog_entries is None:
-            print("[CRITICAL ERROR] Failed to load or initialize existing catalog entries. Exiting.")
-            sys.exit(1)
-        if not isinstance(catalog_entries, list):
-            print(f"[CRITICAL ERROR] Existing catalog entries file is not a list. Found type: {type(catalog_entries)}. Exiting.")
-            sys.exit(1)
-        print(f"   Found {len(catalog_entries)} existing catalog entries.")
+        # --- Load Existing Stage 3 Results (Checkpointing - only if not full refresh) ---
+        print(f"[7] Loading existing Stage 3 results (if incremental mode)...") # Renumbered
+        catalog_entries = []
+        content_entries = []
+        processed_md_files = set()
 
-        # Load Content Entries
-        print(f"   Loading content entries from: {os.path.basename(stage3_content_output_smb_path)}...")
-        content_entries = read_json_from_nas(stage3_content_output_smb_path)
-        if content_entries is None:
-            print("[CRITICAL ERROR] Failed to load or initialize existing content entries. Exiting.")
-            sys.exit(1)
-        if not isinstance(content_entries, list):
-            print(f"[CRITICAL ERROR] Existing content entries file is not a list. Found type: {type(content_entries)}. Exiting.")
-            sys.exit(1)
-        print(f"   Found {len(content_entries)} existing content entries.")
+        if not is_full_refresh:
+            # Load Catalog Entries
+            print(f"   Loading catalog entries from: {os.path.basename(stage3_catalog_output_smb_path)}...")
+            catalog_entries = read_json_from_nas(stage3_catalog_output_smb_path)
+            if catalog_entries is None:
+                print("[CRITICAL ERROR] Failed to load or initialize existing catalog entries. Exiting.")
+                sys.exit(1)
+            if not isinstance(catalog_entries, list):
+                print(f"[CRITICAL ERROR] Existing catalog entries file is not a list. Found type: {type(catalog_entries)}. Exiting.")
+                sys.exit(1)
+            print(f"   Found {len(catalog_entries)} existing catalog entries.")
 
-        # Determine processed files based on catalog entries (assuming catalog is the primary indicator)
-        processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
-        print(f"   Identified {len(processed_md_files)} already processed Markdown files (based on catalog).")
+            # Load Content Entries
+            print(f"   Loading content entries from: {os.path.basename(stage3_content_output_smb_path)}...")
+            content_entries = read_json_from_nas(stage3_content_output_smb_path)
+            if content_entries is None:
+                print("[CRITICAL ERROR] Failed to load or initialize existing content entries. Exiting.")
+                sys.exit(1)
+            if not isinstance(content_entries, list):
+                print(f"[CRITICAL ERROR] Existing content entries file is not a list. Found type: {type(content_entries)}. Exiting.")
+                sys.exit(1)
+            print(f"   Found {len(content_entries)} existing content entries.")
+
+            # Determine processed files based on catalog entries (assuming catalog is the primary indicator)
+            processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
+            print(f"   Identified {len(processed_md_files)} already processed Markdown files (based on catalog).")
+        else:
+            print("   Full refresh mode: Initializing empty results lists and skipping checkpoint loading.")
         print("-" * 60)
 
         # --- Find Markdown Files from Stage 2 ---
-        print(f"[7] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...")
+        print(f"[8] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...") # Renumbered
         md_files_to_process = find_md_files(stage2_md_dir_smb_path)
         if not md_files_to_process:
             print("   No Markdown files found to process.")
@@ -441,7 +477,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             print("-" * 60)
 
             # --- Process Each Markdown File ---
-            print(f"[8] Processing {len(md_files_to_process)} Markdown files...")
+            print(f"[9] Processing {len(md_files_to_process)} Markdown files...") # Renumbered
             new_entries_count = 0
             skipped_count = 0
             error_count = 0
@@ -453,11 +489,13 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 print(f"\n--- Processing file {i+1}/{len(md_files_to_process)} ---")
                 print(f"   MD File Path (SMB): {md_smb_path}")
 
-                if md_smb_path in processed_md_files:
+                # Skip if already processed (only in incremental mode)
+                if not is_full_refresh and md_smb_path in processed_md_files:
                     print("   File already processed (found in existing results). Skipping.")
                     skipped_count += 1
                     continue
 
+                # Check token expiry
                 if time.time() >= token_expiry_time:
                     print("   OAuth token expired or not yet fetched. Requesting new token...")
                     current_token = get_oauth_token()
@@ -661,17 +699,19 @@ if __name__ == "__main__":
     print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
     print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
+    # Add Refresh Flag Path
+    refresh_flag_file_name = '_FULL_REFRESH.flag'
+    refresh_flag_smb_path = os.path.join(source_base_dir_smb, refresh_flag_file_name).replace('\\', '/')
+    print(f"   Refresh Flag File (SMB): {refresh_flag_smb_path}")
     print("-" * 60)
 
     # --- Check for Skip Flag from Stage 1 ---
     print("[3] Checking for skip flag from Stage 1...")
     skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    # Flag file is in the base output dir for the source (same level as 1C*.json)
     skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
     print(f"   Checking for flag file: {skip_flag_smb_path}")
     should_skip = False
     try:
-        # Ensure SMB client is configured (should be from step [1])
         if smbclient.path.exists(skip_flag_smb_path):
             print(f"   Skip flag file found. Stage 1 indicated no files to process.")
             should_skip = True
@@ -696,6 +736,6 @@ if __name__ == "__main__":
         # Call the main processing function only if not skipping
         main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                                stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                               ca_bundle_smb_path)
+                               ca_bundle_smb_path, refresh_flag_smb_path) # Pass refresh flag path
 
     # Script ends naturally here if skipped or after main_processing completes

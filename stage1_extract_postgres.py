@@ -64,6 +64,11 @@ DOCUMENT_SOURCE = 'internal_esg'
 # The name of the database table containing the file catalog.
 DB_TABLE_NAME = 'apg_catalog'
 
+# --- Full Refresh Mode ---
+# Set to True to ignore DB/NAS comparison and process ALL NAS files,
+# marking ALL existing DB records for this source for deletion.
+FULL_REFRESH = False # Default is False (incremental update)
+
 # ==============================================================================
 # --- Helper Functions ---
 # ==============================================================================
@@ -378,28 +383,57 @@ if __name__ == "__main__":
     print(f"   NAS files found: {len(nas_df)}")
 
     # Initialize comparison result DataFrames
-    # Add date_created to files_to_process
     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
-    # Add document_source, document_type, document_name to files_to_delete
     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Files to delete from DB
 
-    # Handle edge cases: both empty, NAS empty, DB empty
-    if db_df.empty and nas_df.empty:
-        print("   Result: Both DB catalog and NAS list are empty. No actions needed.")
-    elif nas_df.empty:
-        print("   Result: NAS list is empty. No files to process. All DB entries are potentially stale (but not deleted by this script).")
-        # files_to_delete remains empty as we only delete based on NAS updates here
-    elif db_df.empty:
-        print("   Result: DB catalog is empty. All NAS files are considered 'new'.")
-        # Include date_created when selecting columns
-        files_to_process = nas_df[['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']].copy()
-        files_to_process['reason'] = 'new'
-        # files_to_delete remains empty
-    else:
-        # --- Perform the Comparison using Merge ---
-        print("   Performing comparison based on 'file_name'...")
+    # --- Check for Full Refresh Mode ---
+    if FULL_REFRESH:
+        print("\n   *** FULL REFRESH MODE ENABLED ***")
+        print("   Skipping DB/NAS comparison.")
 
-        # Ensure 'file_name' columns exist and are string type for reliable merging
+        if nas_df.empty:
+            print("   NAS directory is empty. No files to process even in full refresh mode.")
+            files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
+        else:
+            print(f"   Marking all {len(nas_df)} NAS files for processing.")
+            # Select necessary columns from nas_df
+            process_cols = ['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']
+            existing_process_cols = [col for col in process_cols if col in nas_df.columns]
+            files_to_process = nas_df[existing_process_cols].copy()
+            files_to_process['reason'] = 'full_refresh'
+
+        if db_df.empty:
+            print("   DB catalog is empty for this source. No existing records to mark for deletion.")
+            files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
+        else:
+            print(f"   Marking all {len(db_df)} existing DB records for deletion.")
+            # Select necessary columns from db_df
+            delete_cols = ['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']
+            existing_delete_cols = [col for col in delete_cols if col in db_df.columns]
+            files_to_delete = db_df[existing_delete_cols].copy()
+
+    else:
+        # --- Incremental Update Logic (Original Comparison) ---
+        print("\n   --- Incremental Update Mode ---")
+        # Handle edge cases: both empty, NAS empty, DB empty
+        if db_df.empty and nas_df.empty:
+            print("   Result: Both DB catalog and NAS list are empty. No actions needed.")
+        elif nas_df.empty:
+            print("   Result: NAS list is empty. No files to process. All DB entries are potentially stale (but not deleted by this script).")
+            # files_to_delete remains empty as we only delete based on NAS updates here
+        elif db_df.empty:
+            print("   Result: DB catalog is empty. All NAS files are considered 'new'.")
+            # Include date_created when selecting columns
+            new_cols = ['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']
+            existing_new_cols = [col for col in new_cols if col in nas_df.columns]
+            files_to_process = nas_df[existing_new_cols].copy()
+            files_to_process['reason'] = 'new'
+            # files_to_delete remains empty
+        else:
+            # --- Perform the Comparison using Merge ---
+            print("   Performing comparison based on 'file_name'...")
+
+            # Ensure 'file_name' columns exist and are string type for reliable merging
         if 'file_name' not in nas_df.columns:
             print("   [CRITICAL ERROR] 'file_name' column missing in NAS DataFrame. Exiting.")
             sys.exit(1)
@@ -556,10 +590,10 @@ if __name__ == "__main__":
         deleted_files_db = comparison_df[comparison_df['_merge'] == 'right_only']
         if not deleted_files_db.empty:
             print(f"      Note: Found {len(deleted_files_db)} files in DB but not on NAS (potentially deleted/moved). No action taken by this script.")
+        # --- End of Incremental Update Comparison Logic ---
 
-
-    # --- Final Summary of Comparison ---
-    # Calculate unchanged count (present in both, but not updated)
+    # --- Final Summary of Comparison (Applies to both modes) ---
+    # Calculate unchanged count (only relevant for incremental mode)
     unchanged_count = 0
     if not both_files.empty and not updated_files_nas.empty:
          # Count rows in 'both_files' that are NOT in 'updated_files_nas' based on the updated_mask
@@ -600,10 +634,13 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # --- Create Skip Flag if No Files to Process ---
-    print("[7] Checking if subsequent stages should be skipped...")
+    print("[7] Managing Flag Files...")
     skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    refresh_flag_file_name = '_FULL_REFRESH.flag'
     skip_flag_smb_path = os.path.join(nas_output_dir_smb_path, skip_flag_file_name).replace('\\', '/')
+    refresh_flag_smb_path = os.path.join(nas_output_dir_smb_path, refresh_flag_file_name).replace('\\', '/')
 
+    # --- Skip Flag Logic ---
     if files_to_process.empty:
         print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
         # Create an empty file as a flag
@@ -615,22 +652,43 @@ if __name__ == "__main__":
             print(f"   Successfully created skip flag file: {skip_flag_smb_path}")
         except smbclient.SambaClientError as e:
             print(f"   [WARNING] SMB Error creating skip flag file '{skip_flag_smb_path}': {e}")
-            # Warn but continue; subsequent stages might still check the JSON content as a fallback.
         except Exception as e:
             print(f"   [WARNING] Unexpected error creating skip flag file '{skip_flag_smb_path}': {e}")
     else:
-        print(f"   Files found for processing ({len(files_to_process)}). Skip flag will not be created.")
-        # Ensure the flag file doesn't exist from a previous run
+        print(f"   Files found for processing ({len(files_to_process)}). Ensuring skip flag does not exist.")
         try:
             smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
             if smbclient.path.exists(skip_flag_smb_path):
-                print(f"   Removing existing skip flag file (if any): {skip_flag_smb_path}")
+                print(f"   Removing existing skip flag file: {skip_flag_smb_path}")
                 smbclient.remove(skip_flag_smb_path)
         except smbclient.SambaClientError as e:
-            # Log as info, as file might not exist, which is fine.
             print(f"   [INFO] Could not remove potentially existing skip flag file (may not exist or permissions issue): {e}")
         except Exception as e:
             print(f"   [INFO] Error checking/removing existing skip flag file: {e}")
+
+    # --- Full Refresh Flag Logic ---
+    if FULL_REFRESH:
+        print(f"   Full refresh mode enabled. Creating refresh flag file: '{refresh_flag_file_name}'")
+        try:
+            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+            with smbclient.open_file(refresh_flag_smb_path, mode='w', encoding='utf-8') as f:
+                f.write('') # Create empty flag file
+            print(f"   Successfully created refresh flag file: {refresh_flag_smb_path}")
+        except smbclient.SambaClientError as e:
+            print(f"   [WARNING] SMB Error creating refresh flag file '{refresh_flag_smb_path}': {e}")
+        except Exception as e:
+            print(f"   [WARNING] Unexpected error creating refresh flag file '{refresh_flag_smb_path}': {e}")
+    else:
+        print(f"   Incremental mode. Ensuring refresh flag does not exist.")
+        try:
+            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+            if smbclient.path.exists(refresh_flag_smb_path):
+                print(f"   Removing existing refresh flag file: {refresh_flag_smb_path}")
+                smbclient.remove(refresh_flag_smb_path)
+        except smbclient.SambaClientError as e:
+            print(f"   [INFO] Could not remove potentially existing refresh flag file (may not exist or permissions issue): {e}")
+        except Exception as e:
+            print(f"   [INFO] Error checking/removing existing refresh flag file: {e}")
 
     print("-" * 60)
     print("\n" + "="*60)
