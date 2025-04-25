@@ -130,60 +130,12 @@ def count_records(conn, table_name, document_source):
     return count
 
 # ==============================================================================
-# --- Main Execution Logic ---
+# --- Main Processing Function ---
 # ==============================================================================
 
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print(f"--- Running Stage 4: Update PostgreSQL Database ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
-    print("="*60 + "\n")
-
-    # --- Initialize SMB Client ---
-    print("[1] Initializing SMB Client...")
-    if not initialize_smb_client():
-        sys.exit(1)
-    print("-" * 60)
-
-    # --- Define NAS Paths ---
-    print("[2] Defining NAS Input Paths...")
-    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
-
-    delete_list_smb_path = os.path.join(source_base_dir_smb, FILES_TO_DELETE_FILENAME).replace('\\', '/')
-    catalog_list_smb_path = os.path.join(source_base_dir_smb, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
-    content_list_smb_path = os.path.join(source_base_dir_smb, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
-
-    print(f"   Files to Delete List (SMB): {delete_list_smb_path}")
-    print(f"   Catalog Entries List (SMB): {catalog_list_smb_path}")
-    print(f"   Content Entries List (SMB): {content_list_smb_path}")
-    print("-" * 60)
-
-    # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    # Flag file is in the base output dir for the source (same level as 1D*.json, 3A*.json etc.)
-    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
-    try:
-        # Ensure SMB client is configured (should be from step [1])
-        if smbclient.path.exists(skip_flag_smb_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            print("\n" + "="*60)
-            print(f"--- Stage 4 Skipped (No files to process from Stage 1) ---")
-            print("="*60 + "\n")
-            sys.exit(0) # Exit successfully as this is expected behavior
-        else:
-            print(f"   Skip flag file not found. Proceeding with Stage 4.")
-    except smbclient.SambaClientError as e:
-        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 4, but there might be an issue accessing NAS.")
-        # Continue execution, assuming no skip if flag check fails
-    except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 4.")
-        # Continue execution
-    print("-" * 60)
+def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_list_smb_path):
+    """Handles the core logic for Stage 4: reading inputs, DB operations."""
+    print(f"--- Starting Main Processing for Stage 4 ---")
 
     # --- Read Input Files from NAS ---
     print("[4] Reading Input JSON Files from NAS...") # Renumbered step
@@ -194,6 +146,14 @@ if __name__ == "__main__":
     if files_to_delete is None or catalog_entries is None or content_entries is None:
         print("[CRITICAL ERROR] Failed to read one or more input JSON files from NAS. Exiting.")
         sys.exit(1)
+
+    # Check if there's nothing to do (no deletions and no insertions)
+    if not files_to_delete and not catalog_entries and not content_entries:
+        print("   No files to delete and no new entries to insert. Stage 4 has no work.")
+        print("\n" + "="*60)
+        print(f"--- Stage 4 Completed (No DB operations needed) ---")
+        print("="*60 + "\n")
+        return # Nothing to do, exit function cleanly
 
     print(f"   Files to Delete: {len(files_to_delete)} records")
     print(f"   Catalog Entries to Insert: {len(catalog_entries)} records")
@@ -211,14 +171,14 @@ if __name__ == "__main__":
 
     try:
         # --- Connect to Database ---
-        print("[4] Connecting to PostgreSQL Database...")
+        print("[5] Connecting to PostgreSQL Database...") # Renumbered
         conn = get_db_connection()
         if conn is None:
-            sys.exit(1)
+            sys.exit(1) # Exit script if DB connection fails
         print("-" * 60)
 
         # --- Validation (Before) ---
-        print("[5] Performing Pre-Operation Validation...")
+        print("[6] Performing Pre-Operation Validation...") # Renumbered
         initial_catalog_count = count_records(conn, DB_CATALOG_TABLE, DOCUMENT_SOURCE)
         initial_content_count = count_records(conn, DB_CONTENT_TABLE, DOCUMENT_SOURCE)
         print(f"   Initial count in '{DB_CATALOG_TABLE}' for source '{DOCUMENT_SOURCE}': {initial_catalog_count}")
@@ -226,10 +186,12 @@ if __name__ == "__main__":
         print("-" * 60)
 
         # --- Deletion Phase ---
-        print("[6] Deleting Records Marked for Deletion...")
+        print("[7] Deleting Records Marked for Deletion...") # Renumbered
         deleted_count = 0
         if not files_to_delete:
             print("   No records marked for deletion. Skipping deletion phase.")
+            after_delete_catalog_count = initial_catalog_count # Set counts for verification later
+            after_delete_content_count = initial_content_count
         else:
             try:
                 with conn.cursor() as cur:
@@ -248,6 +210,8 @@ if __name__ == "__main__":
 
                     if not delete_keys:
                          print("   No valid keys found for deletion after filtering.")
+                         after_delete_catalog_count = initial_catalog_count # Set counts for verification later
+                         after_delete_content_count = initial_content_count
                     else:
                         print(f"   Attempting to delete records for {len(delete_keys)} unique keys...")
                         for key_tuple in delete_keys:
@@ -274,6 +238,13 @@ if __name__ == "__main__":
                 conn.commit() # Commit transaction after all deletions for a key set
                 print(f"   Deletion phase completed. Committed changes for {deleted_count} unique keys.")
 
+                # --- Validation (After Deletion) ---
+                print("\n   Performing Post-Deletion Validation...")
+                after_delete_catalog_count = count_records(conn, DB_CATALOG_TABLE, DOCUMENT_SOURCE)
+                after_delete_content_count = count_records(conn, DB_CONTENT_TABLE, DOCUMENT_SOURCE)
+                print(f"   Count in '{DB_CATALOG_TABLE}' after deletion: {after_delete_catalog_count}")
+                print(f"   Count in '{DB_CONTENT_TABLE}' after deletion: {after_delete_content_count}")
+
             except psycopg2.Error as e:
                 print(f"   [ERROR] Database error during deletion: {e}")
                 if conn:
@@ -288,17 +259,8 @@ if __name__ == "__main__":
                 sys.exit(1) # Exit on deletion error
         print("-" * 60)
 
-        # --- Validation (After Deletion) ---
-        print("[7] Performing Post-Deletion Validation...")
-        after_delete_catalog_count = count_records(conn, DB_CATALOG_TABLE, DOCUMENT_SOURCE)
-        after_delete_content_count = count_records(conn, DB_CONTENT_TABLE, DOCUMENT_SOURCE)
-        print(f"   Count in '{DB_CATALOG_TABLE}' after deletion: {after_delete_catalog_count}")
-        print(f"   Count in '{DB_CONTENT_TABLE}' after deletion: {after_delete_content_count}")
-        # More detailed validation could involve checking specific deleted keys are gone
-        print("-" * 60)
-
         # --- Insertion Phase ---
-        print("[8] Inserting New/Updated Records...")
+        print("[8] Inserting New/Updated Records...") # Renumbered
         inserted_catalog_count = 0
         inserted_content_count = 0
 
@@ -406,7 +368,7 @@ if __name__ == "__main__":
         print("-" * 60)
 
         # --- Validation (After Insertion) ---
-        print("[9] Performing Post-Insertion Validation...")
+        print("[9] Performing Post-Insertion Validation...") # Renumbered
         final_catalog_count = count_records(conn, DB_CATALOG_TABLE, DOCUMENT_SOURCE)
         final_content_count = count_records(conn, DB_CONTENT_TABLE, DOCUMENT_SOURCE)
         print(f"   Final count in '{DB_CATALOG_TABLE}' for source '{DOCUMENT_SOURCE}': {final_catalog_count}")
@@ -445,9 +407,75 @@ if __name__ == "__main__":
         # Ensure the database connection is always closed
         if conn is not None:
             conn.close()
-            print("\n[10] Database connection closed.")
+            print("\n[10] Database connection closed.") # Renumbered
 
     print("\n" + "="*60)
     print(f"--- Stage 4 Completed Successfully ---")
     print("--- Database updates applied ---")
     print("="*60 + "\n")
+    print(f"--- End of Main Processing for Stage 4 ---")
+
+# ==============================================================================
+# --- Script Entry Point ---
+# ==============================================================================
+
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print(f"--- Running Stage 4: Update PostgreSQL Database ---")
+    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print("="*60 + "\n")
+
+    # --- Initialize SMB Client ---
+    print("[1] Initializing SMB Client...")
+    if not initialize_smb_client():
+        sys.exit(1)
+    print("-" * 60)
+
+    # --- Define NAS Paths ---
+    print("[2] Defining NAS Input Paths...")
+    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
+
+    delete_list_smb_path = os.path.join(source_base_dir_smb, FILES_TO_DELETE_FILENAME).replace('\\', '/')
+    catalog_list_smb_path = os.path.join(source_base_dir_smb, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
+    content_list_smb_path = os.path.join(source_base_dir_smb, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
+
+    print(f"   Files to Delete List (SMB): {delete_list_smb_path}")
+    print(f"   Catalog Entries List (SMB): {catalog_list_smb_path}")
+    print(f"   Content Entries List (SMB): {content_list_smb_path}")
+    print("-" * 60)
+
+    # --- Check for Skip Flag from Stage 1 ---
+    print("[3] Checking for skip flag from Stage 1...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    # Flag file is in the base output dir for the source (same level as 1D*.json, 3A*.json etc.)
+    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    should_skip = False
+    try:
+        # Ensure SMB client is configured (should be from step [1])
+        if smbclient.path.exists(skip_flag_smb_path):
+            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+            should_skip = True
+        else:
+            print(f"   Skip flag file not found. Proceeding with Stage 4.")
+    except smbclient.SambaClientError as e:
+        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 4, but there might be an issue accessing NAS.")
+        # Continue execution, assuming no skip if flag check fails
+    except Exception as e:
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 4.")
+        # Continue execution
+    print("-" * 60)
+
+    # --- Execute Main Processing if Not Skipped ---
+    if should_skip:
+        print("\n" + "="*60)
+        print(f"--- Stage 4 Skipped (No files to process from Stage 1) ---")
+        print("="*60 + "\n")
+    else:
+        # Call the main processing function only if not skipping
+        main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_list_smb_path)
+
+    # Script ends naturally here if skipped or after main_processing completes

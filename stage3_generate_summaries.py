@@ -334,71 +334,18 @@ def call_gpt_summarizer(api_client, markdown_content):
         return None, None
 
 # ==============================================================================
-# --- Main Execution Logic ---
+# --- Main Processing Function ---
 # ==============================================================================
 
-if __name__ == "__main__":
+def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
+                           stage3_catalog_output_smb_path, stage3_content_output_smb_path,
+                           ca_bundle_smb_path):
+    """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
+    print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
     original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
     original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
 
-    print("\n" + "="*60)
-    print(f"--- Running Stage 3: Generate Document Summaries ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
-    print(f"--- Document Type: {DOCUMENT_TYPE} ---")
-    print("="*60 + "\n")
-
-    # --- Initialize SMB Client ---
-    print("[1] Initializing SMB Client...")
-    if not initialize_smb_client():
-        sys.exit(1) # Exit if SMB client fails
-    print("-" * 60)
-
-    # --- Define Paths ---
-    print("[2] Defining NAS Paths...")
-    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
-    stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
-    stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
-    stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Updated path
-    stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # New path
-    ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
-
-    print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
-    print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
-    print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
-    print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
-    print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
-    print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
-    print("-" * 60)
-
-    # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    # Flag file is in the base output dir for the source (same level as 1C*.json)
-    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
-    try:
-        # Ensure SMB client is configured (should be from step [1])
-        if smbclient.path.exists(skip_flag_smb_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            print("\n" + "="*60)
-            print(f"--- Stage 3 Skipped (No files to process from Stage 1) ---")
-            print("="*60 + "\n")
-            sys.exit(0) # Exit successfully as this is expected behavior
-        else:
-            print(f"   Skip flag file not found. Proceeding with Stage 3.")
-    except smbclient.SambaClientError as e:
-        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 3, but there might be an issue accessing NAS.")
-        # Continue execution, assuming no skip if flag check fails
-    except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 3.")
-        # Continue execution
-    print("-" * 60)
-
-    # --- Main Processing Block with Cleanup ---
     try:
         # --- Download and Set Custom CA Bundle ---
         print("[4] Setting up Custom CA Bundle...") # Renumbered step
@@ -443,7 +390,9 @@ if __name__ == "__main__":
         metadata_lookup = {}
         for item in stage1_metadata_list:
             if 'file_name' in item:
-                base_name = os.path.splitext(item['file_name'])[0]
+                # Use original file name from metadata as the key base
+                original_file_name = item['file_name']
+                base_name = os.path.splitext(original_file_name)[0]
                 metadata_lookup[base_name] = item
             else:
                 print(f"   [WARNING] Skipping metadata item due to missing 'file_name': {item}")
@@ -516,7 +465,7 @@ if __name__ == "__main__":
                         print("   [ERROR] Failed to obtain OAuth token. Skipping file.")
                         error_count += 1
                         continue
-                    token_expiry_time = time.time() + (50 * 60)
+                    token_expiry_time = time.time() + (50 * 60) # Assume 50 min validity
 
                 try:
                     client = OpenAI(
@@ -635,6 +584,7 @@ if __name__ == "__main__":
                 print(f"[WARNING] {error_count} files encountered errors during processing. Check logs above.")
 
         print(f"--- Stage 3 Completed ---")
+        print(f"--- End of Main Processing for Stage 3 ---")
 
     # --- Cleanup (Executes regardless of success/failure in the try block) ---
     finally:
@@ -677,3 +627,75 @@ if __name__ == "__main__":
             if current_ssl_cert != original_ssl_cert_file:
                  print(f"   Restoring original SSL_CERT_FILE environment variable.")
                  os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+
+# ==============================================================================
+# --- Script Entry Point ---
+# ==============================================================================
+
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print(f"--- Running Stage 3: Generate Document Summaries ---")
+    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print(f"--- Document Type: {DOCUMENT_TYPE} ---")
+    print("="*60 + "\n")
+
+    # --- Initialize SMB Client ---
+    print("[1] Initializing SMB Client...")
+    if not initialize_smb_client():
+        sys.exit(1) # Exit if SMB client fails
+    print("-" * 60)
+
+    # --- Define Paths ---
+    print("[2] Defining NAS Paths...")
+    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
+    stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
+    stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
+    stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Updated path
+    stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # New path
+    ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
+
+    print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
+    print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
+    print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
+    print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
+    print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
+    print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
+    print("-" * 60)
+
+    # --- Check for Skip Flag from Stage 1 ---
+    print("[3] Checking for skip flag from Stage 1...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    # Flag file is in the base output dir for the source (same level as 1C*.json)
+    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    should_skip = False
+    try:
+        # Ensure SMB client is configured (should be from step [1])
+        if smbclient.path.exists(skip_flag_smb_path):
+            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+            should_skip = True
+        else:
+            print(f"   Skip flag file not found. Proceeding with Stage 3.")
+    except smbclient.SambaClientError as e:
+        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 3, but there might be an issue accessing NAS.")
+        # Continue execution, assuming no skip if flag check fails
+    except Exception as e:
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 3.")
+        # Continue execution
+    print("-" * 60)
+
+    # --- Execute Main Processing if Not Skipped ---
+    if should_skip:
+        print("\n" + "="*60)
+        print(f"--- Stage 3 Skipped (No files to process from Stage 1) ---")
+        print("="*60 + "\n")
+    else:
+        # Call the main processing function only if not skipping
+        main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
+                               stage3_catalog_output_smb_path, stage3_content_output_smb_path,
+                               ca_bundle_smb_path)
+
+    # Script ends naturally here if skipped or after main_processing completes

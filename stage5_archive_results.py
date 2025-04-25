@@ -183,43 +183,15 @@ if __name__ == "__main__":
     print(f"   Target Archive Directory (SMB): {archive_base_dir_smb}")
     print("-" * 60)
 
-    # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    # Flag file is in the source directory we intend to archive
-    skip_flag_smb_path = os.path.join(source_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
-    skip_execution = False
-    try:
-        if smbclient.path.exists(skip_flag_smb_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            skip_execution = True # Set flag instead of exiting immediately
-        else:
-            print(f"   Skip flag file not found. Proceeding with Stage 5 Archiving.")
-    except smbclient.SambaClientError as e:
-        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 5, but there might be an issue accessing NAS.")
-    except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 5.")
-    print("-" * 60)
-
-    # --- Conditional Exit based on Skip Flag ---
-    if skip_execution:
-        print("\n" + "="*60)
-        print(f"--- Stage 5 Skipped (Skip flag found from Stage 1) ---")
-        print("="*60 + "\n")
-        sys.exit(0) # Exit successfully
-
     # --- Ensure Archive Directory Exists ---
-    print(f"[4] Ensuring Target Archive Directory Exists on NAS: {archive_base_dir_smb}")
+    print(f"[3] Ensuring Target Archive Directory Exists on NAS: {archive_base_dir_smb}") # Renumbered step
     if not create_nas_directory(archive_base_dir_smb):
         print(f"[CRITICAL ERROR] Failed to create or access target archive directory. Exiting.")
         sys.exit(1)
     print("-" * 60)
 
     # --- Create Local Temporary Directory ---
-    print("[5] Creating Local Temporary Directory...")
+    print("[4] Creating Local Temporary Directory...") # Renumbered step
     temp_dir_local = tempfile.mkdtemp(prefix=f"stage5_archive_{DOCUMENT_SOURCE}_")
     print(f"   Local Temp Directory: {temp_dir_local}")
     print("-" * 60)
@@ -238,7 +210,7 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # --- Create Zip Archive ---
-    print("[7] Creating Local Zip Archive...")
+    print("[5] Creating Local Zip Archive...") # Renumbered step
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_filename_base = f"{DOCUMENT_SOURCE}_{timestamp}"
     # Place the zip file directly inside temp_dir_local, not inside the downloaded content folder
@@ -264,7 +236,7 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # --- Upload Zip Archive to NAS ---
-    print(f"[8] Uploading Zip Archive to NAS Archive Directory: {archive_base_dir_smb}")
+    print(f"[6] Uploading Zip Archive to NAS Archive Directory: {archive_base_dir_smb}") # Renumbered step
     zip_filename = os.path.basename(final_zip_local_path)
     target_zip_smb_path = os.path.join(archive_base_dir_smb, zip_filename).replace('\\', '/')
 
@@ -276,7 +248,7 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # --- Cleanup Local Temporary Directory ---
-    print("[9] Cleaning Up Local Temporary Directory...")
+    print("[7] Cleaning Up Local Temporary Directory...") # Renumbered step
     try:
         shutil.rmtree(temp_dir_local)
         print(f"   Successfully removed local temp directory: {temp_dir_local}")

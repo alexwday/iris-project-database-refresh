@@ -167,73 +167,12 @@ def split_pdf(local_pdf_path, chunk_size, temp_dir):
         return [] # Return empty list on failure
 
 # ==============================================================================
-# --- Main Execution Logic ---
+# --- Main Processing Function ---
 # ==============================================================================
 
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print(f"--- Running Stage 2: Process Documents with Document Intelligence ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
-    print("="*60 + "\n")
-
-    # --- Initialize Clients ---
-    print("[1] Initializing Clients...")
-    if not initialize_smb_client():
-        sys.exit(1)
-
-    try:
-        di_client = DocumentIntelligenceClient(
-            endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
-        )
-        print("Document Intelligence client initialized successfully.")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize Document Intelligence client: {e}")
-        sys.exit(1)
-    print("-" * 60)
-
-    # --- Define Paths ---
-    print("[2] Defining NAS Paths...")
-    # Base output directory from Stage 1
-    stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    stage1_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage1_output_dir_relative}"
-    # Input JSON file from Stage 1
-    files_to_process_json_smb = os.path.join(stage1_output_dir_smb, '1C_nas_files_to_process.json').replace('\\', '/')
-    # Base output directory for Stage 2 results
-    stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
-    stage2_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage2_output_dir_relative}"
-
-    print(f"   Stage 1 Output Dir (SMB): {stage1_output_dir_smb}")
-    print(f"   Input JSON File (SMB): {files_to_process_json_smb}")
-    print(f"   Stage 2 Output Base Dir (SMB): {stage2_output_dir_smb}")
-
-    # Ensure base Stage 2 output directory exists
-    if not create_nas_directory(stage2_output_dir_smb):
-        print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS. Exiting.")
-        sys.exit(1)
-    print("-" * 60)
-
-    # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_smb_path = os.path.join(stage1_output_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
-    try:
-        # Ensure SMB client is configured (should be from step [1])
-        if smbclient.path.exists(skip_flag_smb_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            print("\n" + "="*60)
-            print(f"--- Stage 2 Skipped (No files to process from Stage 1) ---")
-            print("="*60 + "\n")
-            sys.exit(0) # Exit successfully as this is expected behavior
-        else:
-            print(f"   Skip flag file not found. Proceeding with Stage 2.")
-    except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 2.")
-        # Continue execution
-    print("-" * 60)
-
-
+def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_dir_smb):
+    """Loads input files, processes them with DI, and saves results."""
+    print(f"--- Starting Main Processing for Stage 2 ---")
     # --- Load Files to Process List ---
     print(f"[4] Loading list of files to process from: {os.path.basename(files_to_process_json_smb)}...")
     files_to_process = []
@@ -247,13 +186,13 @@ if __name__ == "__main__":
              print("\n" + "="*60)
              print(f"--- Stage 2 Completed (No files to process) ---")
              print("="*60 + "\n")
-             sys.exit(0) # Successful exit, nothing to do
+             return # Exit this function early
     except json.JSONDecodeError as e:
         print(f"   [CRITICAL ERROR] Failed to parse JSON from '{files_to_process_json_smb}': {e}")
-        sys.exit(1)
+        sys.exit(1) # Exit script if critical file cannot be read/parsed
     except Exception as e:
         print(f"   [CRITICAL ERROR] Unexpected error reading or parsing '{files_to_process_json_smb}': {e}")
-        sys.exit(1)
+        sys.exit(1) # Exit script if critical file cannot be read/parsed
     print("-" * 60)
 
     # --- Process Each File ---
@@ -475,3 +414,81 @@ if __name__ == "__main__":
         # sys.exit(1)
 
     print(f"--- Stage 2 Completed ---")
+    print(f"--- End of Main Processing for Stage 2 ---")
+
+# ==============================================================================
+# --- Script Entry Point ---
+# ==============================================================================
+
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print(f"--- Running Stage 2: Process Documents with Document Intelligence ---")
+    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print("="*60 + "\n")
+
+    # --- Initialize Clients ---
+    print("[1] Initializing Clients...")
+    if not initialize_smb_client():
+        sys.exit(1) # Exit if SMB client fails
+
+    di_client = None # Initialize to None
+    try:
+        di_client = DocumentIntelligenceClient(
+            endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
+        )
+        print("Document Intelligence client initialized successfully.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize Document Intelligence client: {e}")
+        sys.exit(1) # Exit if DI client fails
+    print("-" * 60)
+
+    # --- Define Paths ---
+    print("[2] Defining NAS Paths...")
+    # Base output directory from Stage 1
+    stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    stage1_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage1_output_dir_relative}"
+    # Input JSON file from Stage 1
+    files_to_process_json_smb = os.path.join(stage1_output_dir_smb, '1C_nas_files_to_process.json').replace('\\', '/')
+    # Base output directory for Stage 2 results
+    stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
+    stage2_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage2_output_dir_relative}"
+
+    print(f"   Stage 1 Output Dir (SMB): {stage1_output_dir_smb}")
+    print(f"   Input JSON File (SMB): {files_to_process_json_smb}")
+    print(f"   Stage 2 Output Base Dir (SMB): {stage2_output_dir_smb}")
+
+    # Ensure base Stage 2 output directory exists
+    if not create_nas_directory(stage2_output_dir_smb):
+        print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS. Exiting.")
+        sys.exit(1)
+    print("-" * 60)
+
+    # --- Check for Skip Flag from Stage 1 ---
+    print("[3] Checking for skip flag from Stage 1...")
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    skip_flag_smb_path = os.path.join(stage1_output_dir_smb, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    should_skip = False
+    try:
+        # Ensure SMB client is configured (should be from step [1])
+        if smbclient.path.exists(skip_flag_smb_path):
+            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+            should_skip = True
+        else:
+            print(f"   Skip flag file not found. Proceeding with Stage 2.")
+    except Exception as e:
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   Proceeding with Stage 2.")
+        # Continue execution if flag check fails
+    print("-" * 60)
+
+    # --- Execute Main Processing if Not Skipped ---
+    if should_skip:
+        print("\n" + "="*60)
+        print(f"--- Stage 2 Skipped (No files to process from Stage 1) ---")
+        print("="*60 + "\n")
+    else:
+        # Call the main processing function only if not skipping
+        main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_dir_smb)
+
+    # Script ends naturally here if skipped or after main_processing completes
