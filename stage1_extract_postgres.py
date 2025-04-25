@@ -494,37 +494,32 @@ if __name__ == "__main__":
 
         # --- Detailed File-by-File Comparison Logging ---
         print("\n   Detailed Comparison Results:")
-        # Create a temporary series from the updated_mask for easy lookup by index
-        update_status_lookup = pd.Series(updated_mask.values, index=both_files.index)
-
-        for row in comparison_df.itertuples(index=True): # Use index=True to get the original index
+        for row in comparison_df.itertuples(index=False): # Use index=False for simplicity
             file_name = getattr(row, 'file_name', 'N/A')
             nas_time = getattr(row, 'date_last_modified_nas', pd.NaT)
             db_time = getattr(row, 'date_last_modified_db', pd.NaT)
             merge_status = getattr(row, '_merge', 'N/A')
-            row_index = getattr(row, 'Index') # Get the original index from comparison_df
 
             # Format timestamps for printing (handle NaT)
             nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
             db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
 
-            status = "Unknown"
+            status = "Unknown" # Default status
             if merge_status == 'left_only':
                 status = "New"
             elif merge_status == 'right_only':
                 status = "Deleted/Moved (DB only)"
             elif merge_status == 'both':
-                # Check if this row's index exists in the update_status_lookup
-                if row_index in update_status_lookup:
-                    if update_status_lookup[row_index]: # Check the pre-calculated update status
-                         status = "Updated"
+                # Directly re-evaluate the update condition for 'both' rows within the loop
+                if pd.notna(nas_time) and pd.notna(db_time):
+                    if nas_time.floor('S') > db_time.floor('S'):
+                        status = "Updated"
                     else:
-                         status = "Unchanged"
+                        status = "Unchanged" # Timestamps match or NAS is older (treated as unchanged)
                 else:
-                     # This case might occur if the row wasn't part of the original 'both_files' DataFrame
-                     # due to NaT dates, but the merge status is 'both'. Defaulting to Unchanged.
-                     status = "Unchanged (or date error)"
-
+                    # Handle cases where one date might be NaT even if merge is 'both'
+                    # This indicates an issue, but we'll classify as Unchanged for logging.
+                    status = "Unchanged (Date Error?)"
 
             print(f"      - File: {file_name}")
             print(f"        NAS Time: {nas_time_str}")
