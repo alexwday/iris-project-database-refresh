@@ -397,6 +397,7 @@ if __name__ == "__main__":
     # Initialize comparison result DataFrames
     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name']) # Files to delete from DB
+    both_files = pd.DataFrame() # Initialize to ensure it exists even in full refresh mode
 
     # --- Check for Full Refresh Mode ---
     if FULL_REFRESH:
