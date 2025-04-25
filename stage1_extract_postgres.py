@@ -494,40 +494,45 @@ if __name__ == "__main__":
 
         # --- Detailed File-by-File Comparison Logging ---
         print("\n   Detailed Comparison Results:")
-        for row in comparison_df.itertuples(index=False): # Use index=False for simplicity
-            file_name = getattr(row, 'file_name', 'N/A')
-            nas_time = getattr(row, 'date_last_modified_nas', pd.NaT)
-            db_time = getattr(row, 'date_last_modified_db', pd.NaT)
-            merge_status = getattr(row, '_merge', 'N/A')
+        # Use iterrows for more robust column access
+        for index, row in comparison_df.iterrows():
+            file_name = row.get('file_name', 'N/A') # Use .get for safety
+            nas_time = row.get('date_last_modified_nas', pd.NaT)
+            db_time = row.get('date_last_modified_db', pd.NaT)
+            merge_status = row.get('_merge', None) # Get the merge status, default to None
 
             # Format timestamps for printing (handle NaT)
             nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
             db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
 
             # Determine status based on merge indicator and timestamp comparison
-            merge_status_val = str(getattr(row, '_merge', 'N/A')) # Ensure it's a string
-
-            if merge_status_val == 'left_only':
-                status = "New"
-            elif merge_status_val == 'right_only':
-                status = "Deleted/Moved (DB only)"
-            elif merge_status_val == 'both':
-                # Re-check timestamps directly for 'both' rows, comparing down to the minute
-                if pd.notna(nas_time) and pd.notna(db_time):
-                    nas_time_minute = nas_time.floor('min')
-                    db_time_minute = db_time.floor('min')
-                    if nas_time_minute > db_time_minute:
-                        status = "Updated"
-                    elif nas_time_minute == db_time_minute:
-                        status = "Unchanged"
-                    else: # nas_time_minute < db_time_minute (DB is newer? Should be rare)
-                        status = "Unchanged (DB Newer/Same)" # Treat DB newer as unchanged for processing
+            status = "Error (Unknown Merge Status)" # Default status
+            if pd.notna(merge_status):
+                merge_status_val = str(merge_status) # Convert category/object to string
+                if merge_status_val == 'left_only':
+                    status = "New"
+                elif merge_status_val == 'right_only':
+                    status = "Deleted/Moved (DB only)"
+                elif merge_status_val == 'both':
+                    # Re-check timestamps directly for 'both' rows, comparing down to the minute
+                    if pd.notna(nas_time) and pd.notna(db_time):
+                        nas_time_minute = nas_time.floor('min')
+                        db_time_minute = db_time.floor('min')
+                        if nas_time_minute > db_time_minute:
+                            status = "Updated"
+                        elif nas_time_minute == db_time_minute:
+                            status = "Unchanged"
+                        else: # nas_time_minute < db_time_minute (DB is newer? Should be rare)
+                            status = "Unchanged (DB Newer/Same)" # Treat DB newer as unchanged for processing
+                    else:
+                        # Handle missing dates if merge status is 'both'
+                        status = "Error (Missing Date in 'both')"
                 else:
-                    # Handle missing dates if merge status is 'both'
-                    status = "Error (Missing Date in 'both')"
+                    # Fallback for any unexpected merge status string
+                    status = f"Error (Unexpected Merge Value: {merge_status_val})"
             else:
-                 # Fallback for any unexpected merge status
-                 status = f"Error (Unexpected Merge: {merge_status_val})"
+                # Handle cases where _merge column itself is missing or NaN
+                status = "Error (Missing Merge Status)"
 
 
             print(f"      - File: {file_name}")
