@@ -367,9 +367,10 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
             model=GPT_CONFIG['model_name'],
             messages=messages,
             tools=[GPT_TOOL_DEFINITION],
-            tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}} # Force tool use with updated name
-            # Add other parameters like temperature, max_tokens if needed
-            # Consider adjusting max_tokens based on detail_level if necessary
+            tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}}, # Force tool use with updated name
+            max_tokens=2048, # Add max_tokens
+            temperature=0.2  # Add temperature
+            # Consider adjusting max_tokens based on detail_level if necessary (2048 should be sufficient for now)
         )
 
         # --- Process Response ---
