@@ -505,10 +505,6 @@ if __name__ == "__main__":
             nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
             db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
 
-            # --- DEBUGGING PRINT ---
-            print(f"      DEBUG: File: {file_name}, Merge Status Raw: {merge_status}, Type: {type(merge_status)}")
-            # --- END DEBUGGING PRINT ---
-
             # Determine status based on merge indicator and timestamp comparison
             status = "Error (Processing Failed)" # Default error status
 
@@ -518,10 +514,6 @@ if __name__ == "__main__":
             else:
                 # Convert the non-null merge status object to string
                 merge_status_val = str(merge_status)
-
-                # --- DEBUGGING PRINT ---
-                print(f"      DEBUG: Merge Status String: '{merge_status_val}'")
-                # --- END DEBUGGING PRINT ---
 
                 if merge_status_val == 'left_only':
                     status = "New"
