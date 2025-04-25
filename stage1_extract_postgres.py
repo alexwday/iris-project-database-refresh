@@ -505,10 +505,24 @@ if __name__ == "__main__":
             nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
             db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
 
+            # --- DEBUGGING PRINT ---
+            print(f"      DEBUG: File: {file_name}, Merge Status Raw: {merge_status}, Type: {type(merge_status)}")
+            # --- END DEBUGGING PRINT ---
+
             # Determine status based on merge indicator and timestamp comparison
-            status = "Error (Unknown Merge Status)" # Default status
-            if pd.notna(merge_status):
-                merge_status_val = str(merge_status) # Convert category/object to string
+            status = "Error (Processing Failed)" # Default error status
+
+            # Explicitly check if the merge status object is null/None first
+            if pd.isna(merge_status):
+                status = "Error (Missing Merge Status)"
+            else:
+                # Convert the non-null merge status object to string
+                merge_status_val = str(merge_status)
+
+                # --- DEBUGGING PRINT ---
+                print(f"      DEBUG: Merge Status String: '{merge_status_val}'")
+                # --- END DEBUGGING PRINT ---
+
                 if merge_status_val == 'left_only':
                     status = "New"
                 elif merge_status_val == 'right_only':
@@ -530,9 +544,7 @@ if __name__ == "__main__":
                 else:
                     # Fallback for any unexpected merge status string
                     status = f"Error (Unexpected Merge Value: {merge_status_val})"
-            else:
-                # Handle cases where _merge column itself is missing or NaN
-                status = "Error (Missing Merge Status)"
+            # Note: The case where pd.isna(merge_status) is true is handled above
 
 
             print(f"      - File: {file_name}")
