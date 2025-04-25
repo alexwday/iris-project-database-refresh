@@ -425,14 +425,19 @@ if __name__ == "__main__":
         # --- Identify New Files ---
         # Files present only on NAS ('left_only' in the merge)
         new_files_mask = comparison_df['_merge'] == 'left_only'
-        # Include date_created_nas when selecting columns
-        new_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created_nas']
-        new_files = comparison_df.loc[new_files_mask, new_files_cols].copy()
+        # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
+        new_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
+        # Ensure all expected columns actually exist in comparison_df before selecting
+        existing_new_cols = [col for col in new_files_cols if col in comparison_df.columns]
+        if len(existing_new_cols) != len(new_files_cols):
+             missing_cols = set(new_files_cols) - set(existing_new_cols)
+             print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for new files list. Check merge logic.")
+        new_files = comparison_df.loc[new_files_mask, existing_new_cols].copy()
+        # Rename columns with suffixes, date_created is already correct
         new_files.rename(columns={
             'file_path_nas': 'file_path',
             'file_size_nas': 'file_size',
-            'date_last_modified_nas': 'date_last_modified',
-            'date_created_nas': 'date_created' # Rename date_created
+            'date_last_modified_nas': 'date_last_modified'
         }, inplace=True)
         new_files['reason'] = 'new'
         print(f"      Identified {len(new_files)} new files (present on NAS, not in DB).")
@@ -450,14 +455,19 @@ if __name__ == "__main__":
              updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'] > both_files['date_last_modified_db'])
 
              # Get NAS details for files identified as updated
-             # Include date_created_nas when selecting columns
-             updated_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created_nas']
-             updated_files_nas = both_files.loc[updated_mask, updated_files_cols].copy()
+             # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
+             updated_files_cols = ['file_name', 'file_path_nas', 'file_size_nas', 'date_last_modified_nas', 'date_created']
+             # Ensure all expected columns actually exist in both_files before selecting
+             existing_updated_cols = [col for col in updated_files_cols if col in both_files.columns]
+             if len(existing_updated_cols) != len(updated_files_cols):
+                  missing_cols = set(updated_files_cols) - set(existing_updated_cols)
+                  print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for updated files list. Check merge logic.")
+             updated_files_nas = both_files.loc[updated_mask, existing_updated_cols].copy()
+             # Rename columns with suffixes, date_created is already correct
              updated_files_nas.rename(columns={
                  'file_path_nas': 'file_path',
                  'file_size_nas': 'file_size',
-                 'date_last_modified_nas': 'date_last_modified',
-                 'date_created_nas': 'date_created' # Rename date_created
+                 'date_last_modified_nas': 'date_last_modified'
              }, inplace=True)
              updated_files_nas['reason'] = 'updated'
              print(f"      Identified {len(updated_files_nas)} updated files (newer on NAS than in DB).")
