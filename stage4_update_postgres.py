@@ -332,18 +332,17 @@ if __name__ == "__main__":
             print("   No content entries to insert.")
         else:
             print(f"   Inserting {len(content_entries)} content entries into '{DB_CONTENT_TABLE}'...")
-            # Define columns in the order they appear in the table
-            # NOTE: The JSON key is 'content', but the DB column is 'section_content'
+            # Define DB columns for insertion (matching apg_content schema, excluding id, created_at)
             content_cols_db = [
                 'document_source', 'document_type', 'document_name',
-                'section_id', 'section_name', 'section_content', 'date_created' # Use DB column name here
+                'section_id', 'section_name', 'section_summary', 'section_content' # Correct DB columns
             ]
-            # Define corresponding keys in the JSON data
+            # Define corresponding keys expected in the JSON data from Stage 3, in the same order as DB columns
             content_cols_json = [
                 'document_source', 'document_type', 'document_name',
-                'section_id', 'section_name', 'content', 'date_created' # Use JSON key name here
+                'section_id', 'section_name', 'section_summary', 'content' # Correct JSON keys ('content' maps to 'section_content')
             ]
-            # Prepare data tuples using JSON keys
+            # Prepare data tuples using JSON keys in the order of DB columns
             content_data = []
             for entry in content_entries:
                  # Fetch data using JSON keys, maintaining order of DB columns for insertion
