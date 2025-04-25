@@ -452,7 +452,8 @@ if __name__ == "__main__":
         if 'date_last_modified_nas' in both_files.columns and 'date_last_modified_db' in both_files.columns:
              # Handle potential NaT values before comparison
              valid_dates_mask = both_files['date_last_modified_nas'].notna() & both_files['date_last_modified_db'].notna()
-             updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'] > both_files['date_last_modified_db'])
+             # Compare timestamps truncated to the second to avoid microsecond issues
+             updated_mask = valid_dates_mask & (both_files['date_last_modified_nas'].dt.floor('S') > both_files['date_last_modified_db'].dt.floor('S'))
 
              # Get NAS details for files identified as updated
              # Use 'date_created' (no suffix) as it only exists on the left side (nas_df)
