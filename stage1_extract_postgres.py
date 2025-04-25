@@ -506,9 +506,18 @@ if __name__ == "__main__":
 
 
     # --- Final Summary of Comparison ---
+    # Calculate unchanged count (present in both, but not updated)
+    unchanged_count = 0
+    if not both_files.empty and not updated_files_nas.empty:
+         # Count rows in 'both_files' that are NOT in 'updated_files_nas' based on the updated_mask
+         unchanged_count = len(both_files[~updated_mask])
+    elif not both_files.empty: # If both_files exists but updated_files is empty
+         unchanged_count = len(both_files)
+
     print(f"\n   Comparison Summary:")
     print(f"      - NAS Files to Process (New or Updated): {len(files_to_process)}")
     print(f"      - Existing DB Records to Delete (Updated Files): {len(files_to_delete)}")
+    print(f"      - Files Found Unchanged (Timestamp Match): {unchanged_count}") # Added this line
     print("-" * 60)
 
 
