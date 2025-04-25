@@ -492,8 +492,48 @@ if __name__ == "__main__":
              updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
              files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
 
+        # --- Detailed File-by-File Comparison Logging ---
+        print("\n   Detailed Comparison Results:")
+        # Create a temporary series from the updated_mask for easy lookup by index
+        update_status_lookup = pd.Series(updated_mask.values, index=both_files.index)
+
+        for row in comparison_df.itertuples(index=True): # Use index=True to get the original index
+            file_name = getattr(row, 'file_name', 'N/A')
+            nas_time = getattr(row, 'date_last_modified_nas', pd.NaT)
+            db_time = getattr(row, 'date_last_modified_db', pd.NaT)
+            merge_status = getattr(row, '_merge', 'N/A')
+            row_index = getattr(row, 'Index') # Get the original index from comparison_df
+
+            # Format timestamps for printing (handle NaT)
+            nas_time_str = nas_time.isoformat() if pd.notna(nas_time) else "N/A (Not on NAS)"
+            db_time_str = db_time.isoformat() if pd.notna(db_time) else "N/A (Not in DB)"
+
+            status = "Unknown"
+            if merge_status == 'left_only':
+                status = "New"
+            elif merge_status == 'right_only':
+                status = "Deleted/Moved (DB only)"
+            elif merge_status == 'both':
+                # Check if this row's index exists in the update_status_lookup
+                if row_index in update_status_lookup:
+                    if update_status_lookup[row_index]: # Check the pre-calculated update status
+                         status = "Updated"
+                    else:
+                         status = "Unchanged"
+                else:
+                     # This case might occur if the row wasn't part of the original 'both_files' DataFrame
+                     # due to NaT dates, but the merge status is 'both'. Defaulting to Unchanged.
+                     status = "Unchanged (or date error)"
+
+
+            print(f"      - File: {file_name}")
+            print(f"        NAS Time: {nas_time_str}")
+            print(f"        DB Time : {db_time_str}")
+            print(f"        Status  : {status}")
+        print("-" * 30) # Separator after detailed list
 
         # --- Combine New and Updated Files for Processing ---
+        # Note: The DataFrames new_files and updated_files_nas are still created based on the masks above
         files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
 
         # --- Identify Files Only in DB (Potentially Deleted/Moved on NAS) ---
