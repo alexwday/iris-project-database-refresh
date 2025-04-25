@@ -81,9 +81,6 @@ def create_nas_directory(smb_dir_path):
             # print(f"   NAS directory already exists: {smb_dir_path}") # Optional: reduce verbosity
             pass
         return True
-    # except smbclient.SambaClientError as e: # Removed specific catch
-    #     print(f"   [ERROR] SMB Error creating/accessing directory '{smb_dir_path}': {e}")
-    #     return False
     except Exception as e: # General exception will catch SMB errors too
         print(f"   [ERROR] Unexpected error creating/accessing NAS directory '{smb_dir_path}': {e}")
         return False
@@ -101,9 +98,6 @@ def write_to_nas(smb_path, content_bytes):
             f.write(content_bytes)
         print(f"   Successfully wrote {len(content_bytes)} bytes to: {smb_path}")
         return True
-    # except smbclient.SambaClientError as e: # Removed specific catch
-    #     print(f"   [ERROR] SMB Error writing to '{smb_path}': {e}")
-    #     return False
     except Exception as e: # General exception will catch SMB errors too
         print(f"   [ERROR] Unexpected error writing to NAS '{smb_path}': {e}")
         return False
@@ -118,9 +112,6 @@ def download_from_nas(smb_path, local_temp_dir):
                 local_f.write(nas_f.read())
         print(f"   Successfully downloaded to: {local_file_path}")
         return local_file_path
-    # except smbclient.SambaClientError as e: # Removed specific catch
-    #     print(f"   [ERROR] SMB Error downloading from '{smb_path}': {e}")
-    #     return None
     except Exception as e: # General exception will catch SMB errors too
         print(f"   [ERROR] Unexpected error downloading from NAS '{smb_path}': {e}")
         return None
@@ -236,10 +227,6 @@ if __name__ == "__main__":
             sys.exit(0) # Exit successfully as this is expected behavior
         else:
             print(f"   Skip flag file not found. Proceeding with Stage 2.")
-    # except smbclient.SambaClientError as e: # Removed specific catch
-    #     print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-    #     print(f"   Proceeding with Stage 2, but there might be an issue accessing NAS.")
-        # Continue execution, assuming no skip if flag check fails
     except Exception as e:
         print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
         print(f"   Proceeding with Stage 2.")
@@ -261,9 +248,6 @@ if __name__ == "__main__":
              print(f"--- Stage 2 Completed (No files to process) ---")
              print("="*60 + "\n")
              sys.exit(0) # Successful exit, nothing to do
-    # except smbclient.SambaClientError as e: # Removed specific catch
-    #     print(f"   [CRITICAL ERROR] SMB Error reading '{files_to_process_json_smb}': {e}")
-    #     sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"   [CRITICAL ERROR] Failed to parse JSON from '{files_to_process_json_smb}': {e}")
         sys.exit(1)
