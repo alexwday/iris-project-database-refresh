@@ -51,9 +51,7 @@ GPT_CONFIG = {
 }
 
 # --- CA Bundle Configuration ---
-# Corrected to use NAS_OUTPUT_FOLDER_PATH
-CA_BUNDLE_NAS_PATH = os.path.join(NAS_OUTPUT_FOLDER_PATH, "rbc-ca-bundle.cer") # Path on NAS
-# Define CA_BUNDLE_FILENAME for use in main()
+# Align with small variant
 CA_BUNDLE_FILENAME = "rbc-ca-bundle.cer" # Filename for the bundle
 
 # --- System Prompt Template (Copied from catalog search - small) ---
@@ -140,8 +138,16 @@ GPT_TOOL_DEFINITION = {
 }
 
 # ==============================================================================
+# --- Input/Output Filenames ---
+STAGE1_METADATA_FILENAME = '1C_nas_files_to_process.json'
+STAGE2_OUTPUT_SUBFOLDER = '2A_vision_outputs' # Different from small variant
+STAGE3_CATALOG_OUTPUT_FILENAME = '3A_catalog_entries.json'
+STAGE3_CONTENT_OUTPUT_FILENAME = '3B_content_entries.json'
+STAGE3_MARKDOWN_OUTPUT_SUBFOLDER = '3C_generated_markdown' # Additional output for vision variant
+CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer'
+
 # --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout) # Log to stdout
 
 # --- Global Variables ---
 access_token = None
@@ -151,13 +157,13 @@ gpt_client = None
 # --- Helper Functions ---
 
 def initialize_smb_client():
-    """Sets up smbclient credentials using configured NAS_PARAMS."""
+    """Sets up smbclient credentials."""
     try:
         smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        logging.info("SMB client configured successfully.")
+        print("SMB client configured successfully.")
         return True
     except Exception as e:
-        logging.error(f"Failed to configure SMB client: {e}")
+        print(f"[ERROR] Failed to configure SMB client: {e}")
         return False
 
 # Removed setup_ca_bundle function - logic moved to main()
@@ -301,10 +307,10 @@ GPT_TOOL_DEFINITION = {
 def call_gpt_summarization(api_client, markdown_content, detail_level='standard', document_source='unknown'):
     """
     Calls the custom GPT model to generate summaries using tool calling.
-    (Implementation copied and adapted from catalog search - small)
+    (Implementation aligned with catalog search - small's call_gpt_summarizer)
 
     Args:
-        api_client: The initialized OpenAI client (renamed from gpt_client for clarity).
+        api_client: The initialized OpenAI client.
         markdown_content: The text content of the document to summarize.
         detail_level (str): The desired level of detail ('concise', 'standard', 'detailed').
         document_source (str): The source identifier for context in the prompt.
@@ -397,8 +403,10 @@ def call_gpt_summarization(api_client, markdown_content, detail_level='standard'
 # ==============================================================================
 
 def main():
-    logging.info("--- Starting Stage 3: Generate Markdown and Summaries ---")
-    logging.info(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print("\n" + "="*60)
+    print(f"--- Running Stage 3: Generate Markdown and Summaries ---")
+    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print("="*60 + "\n")
 
     if not initialize_smb_client():
         logging.error("Exiting due to SMB client initialization failure.")
@@ -410,19 +418,21 @@ def main():
     original_ssl_cert_file = os.environ.get('SSL_CERT_FILE')
     is_full_refresh = False # Flag to track refresh mode
 
-    # Define paths using consistent variable name NAS_OUTPUT_FOLDER_PATH
+    # --- Define Paths (using constants) ---
     source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
     source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
 
-    stage1_metadata_file = os.path.join(source_base_dir_smb, "1C_nas_files_to_process.json").replace('\\', '/')
-    stage2_input_dir_smb = os.path.join(source_base_dir_smb, "2A_vision_outputs").replace('\\', '/') # Input dir from Stage 2
-    stage3_md_output_dir_smb = os.path.join(source_base_dir_smb, "3C_generated_markdown").replace('\\', '/') # MD output dir for Stage 3
-    stage3_catalog_output_file = os.path.join(source_base_dir_smb, "3A_catalog_entries.json").replace('\\', '/') # Catalog output file
-    stage3_content_output_file = os.path.join(source_base_dir_smb, "3B_content_entries.json").replace('\\', '/') # Content output file
-    skip_flag_path = os.path.join(source_base_dir_smb, "_SKIP_SUBSEQUENT_STAGES.flag").replace('\\', '/')
-    refresh_flag_path = os.path.join(source_base_dir_smb, "_FULL_REFRESH.flag").replace('\\', '/')
-    # Construct CA bundle path using consistent variable
-    ca_bundle_full_smb_path = os.path.join(source_base_dir_smb, "..", CA_BUNDLE_FILENAME).replace('\\', '/') # Assumes bundle is one level up from source dir
+    stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
+    stage2_input_dir_smb = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/') # Input dir from Stage 2
+    stage3_md_output_dir_smb = os.path.join(source_base_dir_smb, STAGE3_MARKDOWN_OUTPUT_SUBFOLDER).replace('\\', '/') # MD output dir for Stage 3
+    stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Catalog output file
+    stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # Content output file
+    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+    refresh_flag_file_name = '_FULL_REFRESH.flag'
+    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
+    refresh_flag_smb_path = os.path.join(source_base_dir_smb, refresh_flag_file_name).replace('\\', '/')
+    # Construct CA bundle path aligned with small variant
+    ca_bundle_full_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
 
     try: # Wrap main logic in try/finally for cleanup
         # --- Download and Set Custom CA Bundle (using temp file) ---
@@ -463,19 +473,20 @@ def main():
         logging.info("[2] Defining NAS Paths...") # Renumbered step
         # Paths are already defined above using source_base_dir_smb etc.
         # Just log them again for clarity in this step
-        logging.info(f"   Stage 1 Metadata File: {stage1_metadata_file}")
-        logging.info(f"   Stage 2 Input Dir (Vision Outputs): {stage2_input_dir_smb}")
-        logging.info(f"   Stage 3 Markdown Output Dir: {stage3_md_output_dir_smb}")
-        logging.info(f"   Stage 3 Catalog Output File: {stage3_catalog_output_file}")
-        logging.info(f"   Stage 3 Content Output File: {stage3_content_output_file}")
-        logging.info(f"   Skip Flag File: {skip_flag_path}")
-        logging.info(f"   Refresh Flag File: {refresh_flag_path}")
+        print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
+        print(f"   Stage 2 Input Dir (SMB): {stage2_input_dir_smb}")
+        print(f"   Stage 3 Markdown Output Dir (SMB): {stage3_md_output_dir_smb}")
+        print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}")
+        print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}")
+        print(f"   Skip Flag File (SMB): {skip_flag_smb_path}")
+        print(f"   Refresh Flag File (SMB): {refresh_flag_smb_path}")
+        print(f"   CA Bundle File (SMB): {ca_bundle_full_smb_path}")
         logging.info("-" * 60)
 
         # --- Check Skip Flag ---
         logging.info("[3] Checking Skip Flag...") # Renumbered step
-        if smbclient.path.exists(skip_flag_path):
-            logging.info(f"'{skip_flag_path}' found. Skipping Stage 3.")
+        if smbclient.path.exists(skip_flag_smb_path):
+            logging.info(f"'{skip_flag_smb_path}' found. Skipping Stage 3.")
             sys.exit(0) # Exit cleanly
         logging.info("-" * 60)
 
@@ -492,10 +503,10 @@ def main():
 
         # --- Handle Full Refresh ---
         logging.info("[5] Checking Full Refresh Flag...") # Renumbered step
-        is_full_refresh = smbclient.path.exists(refresh_flag_path)
+        is_full_refresh = smbclient.path.exists(refresh_flag_smb_path)
         if is_full_refresh:
             logging.warning("'_FULL_REFRESH.flag' found. Deleting existing Stage 3 output files.")
-            for f_path in [stage3_catalog_output_file, stage3_content_output_file]:
+            for f_path in [stage3_catalog_output_smb_path, stage3_content_output_smb_path]:
                 try:
                     if smbclient.path.exists(f_path):
                         smbclient.remove(f_path)
@@ -513,13 +524,13 @@ def main():
         # --- Load Metadata ---
         logging.info("[6] Loading Stage 1 Metadata...") # Renumbered step
         try:
-            with smbclient.open_file(stage1_metadata_file, mode='r', encoding='utf-8') as f:
+            with smbclient.open_file(stage1_metadata_smb_path, mode='r', encoding='utf-8') as f:
                 original_metadata_list = json.load(f)
             # Create a lookup dictionary by filename stem
             metadata_lookup = {Path(item['file_name']).stem: item for item in original_metadata_list if 'file_name' in item} # Added check for file_name
-            logging.info(f"Loaded metadata for {len(metadata_lookup)} files from {stage1_metadata_file}")
+            logging.info(f"Loaded metadata for {len(metadata_lookup)} files from {stage1_metadata_smb_path}")
         except Exception as e:
-            logging.error(f"Failed to load or parse metadata file {stage1_metadata_file}: {e}")
+            logging.error(f"Failed to load or parse metadata file {stage1_metadata_smb_path}: {e}")
             sys.exit(1) # Exit with error
         logging.info("-" * 60)
 
@@ -531,24 +542,24 @@ def main():
 
         if not is_full_refresh:
             try:
-                if smbclient.path.exists(stage3_catalog_output_file):
-                    with smbclient.open_file(stage3_catalog_output_file, mode='r', encoding='utf-8') as f:
+                if smbclient.path.exists(stage3_catalog_output_smb_path):
+                    with smbclient.open_file(stage3_catalog_output_smb_path, mode='r', encoding='utf-8') as f:
                         catalog_entries = json.load(f)
                     processed_stems.update(Path(entry.get('processed_md_path', '')).stem for entry in catalog_entries if entry.get('processed_md_path'))
                     logging.info(f"Loaded {len(catalog_entries)} existing catalog entries for checkpointing.")
             except Exception as e:
-                logging.warning(f"Could not load existing catalog entries from {stage3_catalog_output_file}: {e}. Starting fresh.")
+                logging.warning(f"Could not load existing catalog entries from {stage3_catalog_output_smb_path}: {e}. Starting fresh.")
                 catalog_entries = []
                 processed_stems = set()
 
             # Content entries are less critical for checkpointing based on processed_stems, but load if needed
             try:
-                if smbclient.path.exists(stage3_content_output_file):
-                     with smbclient.open_file(stage3_content_output_file, mode='r', encoding='utf-8') as f:
+                if smbclient.path.exists(stage3_content_output_smb_path):
+                     with smbclient.open_file(stage3_content_output_smb_path, mode='r', encoding='utf-8') as f:
                          content_entries = json.load(f) # Load but don't necessarily use for checkpointing logic here
                      logging.info(f"Loaded {len(content_entries)} existing content entries.")
             except Exception as e:
-                 logging.warning(f"Could not load existing content entries from {stage3_content_output_file}: {e}.")
+                 logging.warning(f"Could not load existing content entries from {stage3_content_output_smb_path}: {e}.")
                  content_entries = [] # Reset if loading fails
         logging.info("-" * 60)
 
@@ -670,23 +681,27 @@ def main():
                 continue
 
             # Create Catalog Entry - Use data from original_meta and summaries
+            # Match small variant field names
             catalog_entry = {
                 "document_source": DOCUMENT_SOURCE,
                 "document_type": original_meta.get("document_type", "infographic"), # Get type from meta or default
                 "document_name": original_meta.get("file_name"), # Use 'file_name' from Stage 1 metadata
-                "description": description_summary,
-                "usage": usage_summary,
+                "document_description": description_summary, # Renamed to match small variant
+                "document_usage": usage_summary, # Renamed to match small variant
                 # Use correct keys from Stage 1 metadata JSON
-                "file_creation_date_utc": original_meta.get("date_created"),
-                "file_last_modified_date_utc": original_meta.get("date_last_modified"),
-                "file_size_bytes": original_meta.get("file_size"),
-                "nas_link": None, # Construct this if needed, currently not in Stage 1 meta
-                "nas_path": original_meta.get("file_path"), # Use 'file_path' from Stage 1 metadata
+                "date_created": original_meta.get("date_created"), # Renamed to match small variant
+                "date_last_modified": original_meta.get("date_last_modified"), # Renamed to match small variant
+                "file_name": original_meta.get("file_name"), # Redundant but matches small variant
+                "file_type": os.path.splitext(original_meta.get("file_name", ''))[1],
+                "file_size": original_meta.get("file_size"), # Renamed to match small variant
+                "file_path": original_meta.get("file_path"), # Use 'file_path' from Stage 1 metadata
+                "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_meta.get('file_path', '')}",
                 "processed_md_path": markdown_filepath_nas # Link to the generated MD
             }
             catalog_entries.append(catalog_entry)
 
             # Create Content Entry - Use data from original_meta and summaries/markdown
+            # Match small variant field names
             content_entry = {
                 "document_source": DOCUMENT_SOURCE,
                 "document_type": original_meta.get("document_type", "infographic"),
@@ -695,17 +710,17 @@ def main():
                 "section_name": file_stem, # Use base filename (stem) as section name
                 "section_summary": usage_summary, # Use usage summary for section summary
                 "content": final_markdown,
-                "creation_timestamp": datetime.utcnow().isoformat() # Add timestamp
+                "date_created": datetime.utcnow().isoformat() # Match small variant field name
             }
             content_entries.append(content_entry)
 
             # 6. Save Checkpoint Files (after EACH successfully processed file stem)
             try:
                 # Save Catalog Entries
-                with smbclient.open_file(stage3_catalog_output_file, mode='w', encoding='utf-8') as f:
+                with smbclient.open_file(stage3_catalog_output_smb_path, mode='w', encoding='utf-8') as f:
                     json.dump(catalog_entries, f, indent=2)
                 # Save Content Entries
-                with smbclient.open_file(stage3_content_output_file, mode='w', encoding='utf-8') as f:
+                with smbclient.open_file(stage3_content_output_smb_path, mode='w', encoding='utf-8') as f:
                     json.dump(content_entries, f, indent=2)
                 processing_time = time.time() - start_time
                 logging.info(f"Successfully processed and checkpointed stem '{file_stem}' ({processing_time:.2f}s).")
@@ -718,7 +733,7 @@ def main():
 
     # --- Cleanup --- (Moved outside the main processing loop)
     finally:
-        logging.info("\n--- Cleaning up ---")
+        print("\n--- Cleaning up ---")
         # Clean up the temporary certificate file
         if temp_cert_file_path and os.path.exists(temp_cert_file_path):
             try:
