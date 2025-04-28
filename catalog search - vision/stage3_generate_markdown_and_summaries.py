@@ -158,24 +158,7 @@ def initialize_smb_client():
         logging.error(f"Failed to configure SMB client: {e}")
         return False
 
-def setup_ca_bundle():
-    """Downloads CA bundle from NAS and sets environment variables."""
-    try:
-        if not os.path.exists(LOCAL_CA_BUNDLE_PATH):
-            logging.info(f"Downloading CA bundle from {CA_BUNDLE_NAS_PATH}...")
-            with smbclient.open_file(CA_BUNDLE_NAS_PATH, mode='rb') as nas_f, open(LOCAL_CA_BUNDLE_PATH, 'wb') as local_f:
-                local_f.write(nas_f.read())
-            logging.info(f"CA bundle saved to {LOCAL_CA_BUNDLE_PATH}")
-        else:
-            logging.info(f"Using existing local CA bundle: {LOCAL_CA_BUNDLE_PATH}")
-
-        os.environ['REQUESTS_CA_BUNDLE'] = LOCAL_CA_BUNDLE_PATH
-        os.environ['SSL_CERT_FILE'] = LOCAL_CA_BUNDLE_PATH
-        logging.info("REQUESTS_CA_BUNDLE and SSL_CERT_FILE environment variables set.")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to setup CA bundle from {CA_BUNDLE_NAS_PATH}: {e}")
-        return False
+# Removed setup_ca_bundle function - logic moved to main()
 
 def get_access_token():
     """Gets a new OAuth2 access token using client credentials flow."""
@@ -197,7 +180,9 @@ def get_access_token():
 
     try:
         # Use token_url directly from OAUTH_CONFIG
-        response = requests.post(OAUTH_CONFIG['token_url'], data=payload, headers=headers, verify=LOCAL_CA_BUNDLE_PATH)
+        # Rely on environment variables (REQUESTS_CA_BUNDLE/SSL_CERT_FILE) set in main()
+        # Remove explicit verify= parameter
+        response = requests.post(OAUTH_CONFIG['token_url'], data=payload, headers=headers)
         response.raise_for_status()
         token_data = response.json()
         access_token = token_data['access_token']
@@ -417,11 +402,351 @@ def main():
         logging.error("Exiting due to SMB client initialization failure.")
         sys.exit(1)
 
-    if not setup_ca_bundle():
-        logging.error("Failed to set up CA bundle. Exiting.")
-        return
+    # Variables for CA bundle handling
+    temp_cert_file_path = None
+    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE')
+    is_full_refresh = False # Flag to track refresh mode
 
-    # Define paths using consistent variable name NAS_OUTPUT_FOLDER_PATH
+    try: # Wrap main logic in try/finally for cleanup
+        # --- Download and Set Custom CA Bundle (using temp file) ---
+        logging.info("[1] Setting up Custom CA Bundle...") # Renumbered step
+        # Construct CA bundle path using consistent variable
+        ca_bundle_full_smb_path = os.path.join(source_base_dir_smb, "..", CA_BUNDLE_FILENAME).replace('\\', '/') # Assumes bundle is one level up from source dir
+        logging.info(f"   Looking for CA bundle at: {ca_bundle_full_smb_path}")
+        try: # Inner try/except for CA bundle download/setup
+            if smbclient.path.exists(ca_bundle_full_smb_path):
+                # Create a temporary file to store the certificate
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".cer") as temp_cert_file:
+                    logging.info(f"   Downloading to temporary file: {temp_cert_file.name}")
+                    with smbclient.open_file(ca_bundle_full_smb_path, mode='rb') as nas_f:
+                        temp_cert_file.write(nas_f.read())
+                    temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
+
+                # Set the environment variables
+                if temp_cert_file_path: # Ensure path was obtained
+                    os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
+                    os.environ['SSL_CERT_FILE'] = temp_cert_file_path
+                    logging.info(f"   Set REQUESTS_CA_BUNDLE environment variable to: {temp_cert_file_path}")
+                    logging.info(f"   Set SSL_CERT_FILE environment variable to: {temp_cert_file_path}")
+            else:
+                logging.warning(f"   CA Bundle file not found at {ca_bundle_full_smb_path}. Proceeding without custom CA bundle.")
+        except smbclient.SambaClientError as e:
+            logging.error(f"   SMB Error during CA bundle handling '{ca_bundle_full_smb_path}': {e}. Proceeding without custom CA bundle.")
+        except Exception as e:
+            logging.error(f"   Unexpected error during CA bundle handling '{ca_bundle_full_smb_path}': {e}. Proceeding without custom CA bundle.")
+            # Cleanup potentially created temp file if error occurred after creation
+            if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+                try:
+                    os.remove(temp_cert_file_path)
+                    logging.info(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
+                    temp_cert_file_path = None
+                except OSError: pass # Ignore cleanup error
+        logging.info("-" * 60)
+
+
+        # --- Define Paths --- (Moved after CA bundle setup)
+        logging.info("[2] Defining NAS Paths...") # Renumbered step
+        # Paths are already defined above using source_base_dir_smb etc.
+        # Just log them again for clarity in this step
+        logging.info(f"   Stage 1 Metadata File: {stage1_metadata_file}")
+        logging.info(f"   Stage 2 Input Dir (Vision Outputs): {stage2_input_dir_smb}")
+        logging.info(f"   Stage 3 Markdown Output Dir: {stage3_md_output_dir_smb}")
+        logging.info(f"   Stage 3 Catalog Output File: {stage3_catalog_output_file}")
+        logging.info(f"   Stage 3 Content Output File: {stage3_content_output_file}")
+        logging.info(f"   Skip Flag File: {skip_flag_path}")
+        logging.info(f"   Refresh Flag File: {refresh_flag_path}")
+        logging.info("-" * 60)
+
+        # --- Check Skip Flag ---
+        logging.info("[3] Checking Skip Flag...") # Renumbered step
+        if smbclient.path.exists(skip_flag_path):
+            logging.info(f"'{skip_flag_path}' found. Skipping Stage 3.")
+            sys.exit(0) # Exit cleanly
+        logging.info("-" * 60)
+
+        # --- Ensure Output Directory ---
+        logging.info("[4] Ensuring Stage 3 Markdown Output Directory Exists...") # Renumbered step
+        try:
+            if not smbclient.path.exists(stage3_md_output_dir_smb): # Use correct variable
+                smbclient.makedirs(stage3_md_output_dir_smb, exist_ok=True)
+                logging.info(f"Created NAS directory: {stage3_md_output_dir_smb}")
+        except Exception as e:
+            logging.error(f"Failed to create NAS directory {stage3_md_output_dir_smb}: {e}")
+            sys.exit(1) # Exit with error
+        logging.info("-" * 60)
+
+        # --- Handle Full Refresh ---
+        logging.info("[5] Checking Full Refresh Flag...") # Renumbered step
+        is_full_refresh = smbclient.path.exists(refresh_flag_path)
+        if is_full_refresh:
+            logging.warning("'_FULL_REFRESH.flag' found. Deleting existing Stage 3 output files.")
+            for f_path in [stage3_catalog_output_file, stage3_content_output_file]:
+                try:
+                    if smbclient.path.exists(f_path):
+                        smbclient.remove(f_path)
+                        logging.info(f"Deleted existing file: {f_path}")
+                except Exception as e:
+                    logging.error(f"Failed to delete {f_path} during full refresh: {e}")
+            # Optionally delete existing generated markdown files too
+            try:
+                if smbclient.path.exists(stage3_md_output_dir_smb): # Use correct variable
+                    logging.warning(f"Full refresh mode: Existing markdown directory '{stage3_md_output_dir_smb}' found. Contents will be overwritten file-by-file, but old files not corresponding to current inputs will remain.")
+            except Exception as e:
+                 logging.error(f"Error checking markdown dir {stage3_md_output_dir_smb}: {e}")
+        logging.info("-" * 60)
+
+        # --- Load Metadata ---
+        logging.info("[6] Loading Stage 1 Metadata...") # Renumbered step
+        try:
+            with smbclient.open_file(stage1_metadata_file, mode='r', encoding='utf-8') as f:
+                original_metadata_list = json.load(f)
+            # Create a lookup dictionary by filename stem
+            metadata_lookup = {Path(item['file_name']).stem: item for item in original_metadata_list if 'file_name' in item} # Added check for file_name
+            logging.info(f"Loaded metadata for {len(metadata_lookup)} files from {stage1_metadata_file}")
+        except Exception as e:
+            logging.error(f"Failed to load or parse metadata file {stage1_metadata_file}: {e}")
+            sys.exit(1) # Exit with error
+        logging.info("-" * 60)
+
+        # --- Load Checkpoints ---
+        logging.info("[7] Loading Checkpoint Data (if incremental)...") # Renumbered step
+        catalog_entries = []
+        content_entries = []
+        processed_stems = set() # Keep track of processed base filenames (stems)
+
+        if not is_full_refresh:
+            try:
+                if smbclient.path.exists(stage3_catalog_output_file):
+                    with smbclient.open_file(stage3_catalog_output_file, mode='r', encoding='utf-8') as f:
+                        catalog_entries = json.load(f)
+                    processed_stems.update(Path(entry.get('processed_md_path', '')).stem for entry in catalog_entries if entry.get('processed_md_path'))
+                    logging.info(f"Loaded {len(catalog_entries)} existing catalog entries for checkpointing.")
+            except Exception as e:
+                logging.warning(f"Could not load existing catalog entries from {stage3_catalog_output_file}: {e}. Starting fresh.")
+                catalog_entries = []
+                processed_stems = set()
+
+            # Content entries are less critical for checkpointing based on processed_stems, but load if needed
+            try:
+                if smbclient.path.exists(stage3_content_output_file):
+                     with smbclient.open_file(stage3_content_output_file, mode='r', encoding='utf-8') as f:
+                         content_entries = json.load(f) # Load but don't necessarily use for checkpointing logic here
+                     logging.info(f"Loaded {len(content_entries)} existing content entries.")
+            except Exception as e:
+                 logging.warning(f"Could not load existing content entries from {stage3_content_output_file}: {e}.")
+                 content_entries = [] # Reset if loading fails
+        logging.info("-" * 60)
+
+        # --- Find Input Subdirectories ---
+        logging.info("[8] Finding Stage 2 Input Subdirectories...") # Renumbered step
+        try:
+            # List items in the Stage 2 output directory
+            stage2_items = smbclient.listdir(stage2_input_dir_smb)
+            # Filter for directories (these should correspond to file stems)
+            stage2_subdirs = [
+                item for item in stage2_items
+                if smbclient.path.isdir(os.path.join(stage2_input_dir_smb, item).replace('\\', '/'))
+            ]
+            logging.info(f"Found {len(stage2_subdirs)} potential input subdirectories in {stage2_input_dir_smb}")
+        except Exception as e:
+            logging.error(f"Failed to list subdirectories in {stage2_input_dir_smb}: {e}")
+            sys.exit(1) # Exit with error
+        logging.info("-" * 60)
+
+        # --- Initialize GPT Client ---
+        logging.info("[9] Initializing GPT Client...") # Renumbered step
+        initialize_gpt_client() # Initialize once before the loop
+        if not gpt_client:
+             logging.error("Failed to initialize GPT client initially. Exiting.")
+             sys.exit(1) # Exit with error
+        logging.info("-" * 60)
+
+        # --- Process Files ---
+        logging.info("[10] Processing Input Files...") # Renumbered step
+        # Process each subdirectory (representing one original file)
+        for file_stem in stage2_subdirs: # Iterate through directory names (stems)
+            start_time = time.time()
+            # Construct paths based on the subdirectory name (file_stem)
+            json_filename = f"{file_stem}.json"
+            json_filepath_nas = os.path.join(stage2_input_dir_smb, file_stem, json_filename).replace('\\', '/')
+            markdown_filename = f"{file_stem}.md"
+            markdown_filepath_nas = os.path.join(stage3_md_output_dir_smb, markdown_filename).replace('\\', '/') # Use correct MD output dir
+
+            # Check if already processed (using stem)
+            if file_stem in processed_stems:
+                logging.info(f"Skipping '{file_stem}' as it appears to be already processed (based on stem).")
+                continue
+
+            logging.info(f"--- Processing vision output for stem: {file_stem} ---")
+            logging.info(f"   Input JSON: {json_filepath_nas}")
+            logging.info(f"   Output MD: {markdown_filepath_nas}")
+
+            # Check if the expected JSON file exists within the subdirectory
+            try:
+                if not smbclient.path.exists(json_filepath_nas):
+                    logging.warning(f"   Expected JSON file not found at {json_filepath_nas}. Skipping stem '{file_stem}'.")
+                    continue
+            except Exception as e:
+                 logging.error(f"   Error checking existence of {json_filepath_nas}: {e}. Skipping stem '{file_stem}'.")
+                 continue
+
+            # 1. Load vision output data from the JSON file inside the subdirectory
+            try:
+                with smbclient.open_file(json_filepath_nas, mode='r', encoding='utf-8') as f:
+                    all_pages_vision_output = json.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load or parse {json_filepath_nas}: {e}")
+                continue # Skip to next file stem
+
+            # 2. Synthesize Markdown page by page
+            final_markdown_parts = []
+            synthesis_successful = True
+            # Sort pages based on the key "page_N"
+            sorted_page_keys = sorted(all_pages_vision_output.keys(), key=lambda x: int(x.split('_')[-1]))
+
+            for page_key in sorted_page_keys:
+                page_number = int(page_key.split('_')[-1])
+                page_vision_data = all_pages_vision_output[page_key]
+                try:
+                    page_markdown = call_gpt_markdown_synthesis(page_vision_data, page_number)
+                    if page_markdown.startswith("Error:"):
+                        logging.error(f"Markdown synthesis failed for page {page_number} of stem '{file_stem}'. Aborting file.")
+                        synthesis_successful = False
+                        break # Stop processing this file
+                    final_markdown_parts.append(page_markdown)
+                except Exception as e: # Catch errors from backoff failure etc.
+                     logging.error(f"Critical error during Markdown synthesis for page {page_number} of stem '{file_stem}': {e}")
+                     synthesis_successful = False
+                     break # Stop processing this file
+
+            if not synthesis_successful:
+                continue # Skip to the next file stem
+
+            # 3. Combine and Save Final Markdown
+            final_markdown = f"\n\n---\n\n<!-- Page Separator -->\n\n---\n\n".join(final_markdown_parts)
+            try:
+                with smbclient.open_file(markdown_filepath_nas, mode='w', encoding='utf-8') as f:
+                    f.write(final_markdown)
+                logging.info(f"Saved synthesized Markdown to {markdown_filepath_nas}")
+            except Exception as e:
+                logging.error(f"Failed to save final Markdown to {markdown_filepath_nas}: {e}")
+                continue # Skip file if cannot save MD
+
+            # 4. Generate Usage/Description Summaries using the refactored function
+            try:
+                # Define detail level (can be made dynamic later if needed)
+                current_detail_level = 'standard'
+                # Call with initialized client (gpt_client global), markdown, detail level, and source
+                description_summary, usage_summary = call_gpt_summarization(
+                    gpt_client, final_markdown, current_detail_level, DOCUMENT_SOURCE
+                )
+                # Check if None was returned (indicates an error in call_gpt_summarizer)
+                if description_summary is None or usage_summary is None:
+                     logging.error(f"Summarization failed for stem '{file_stem}' (check logs from call_gpt_summarization). Skipping DB entry creation.")
+                     continue # Skip to next file stem
+            except Exception as e: # Catch errors from backoff failure etc.
+                 logging.error(f"Critical error during summarization call for stem '{file_stem}': {e}")
+                 continue # Skip to next file stem
+
+            # 5. Prepare and Append DB Entries
+            original_meta = metadata_lookup.get(file_stem) # Lookup using the stem
+            if not original_meta:
+                logging.warning(f"Could not find original metadata for stem '{file_stem}'. Skipping DB entry creation.")
+                continue
+
+            # Create Catalog Entry - Use data from original_meta and summaries
+            catalog_entry = {
+                "document_source": DOCUMENT_SOURCE,
+                "document_type": original_meta.get("document_type", "infographic"), # Get type from meta or default
+                "document_name": original_meta.get("file_name"), # Use 'file_name' from Stage 1 metadata
+                "description": description_summary,
+                "usage": usage_summary,
+                # Use correct keys from Stage 1 metadata JSON
+                "file_creation_date_utc": original_meta.get("date_created"),
+                "file_last_modified_date_utc": original_meta.get("date_last_modified"),
+                "file_size_bytes": original_meta.get("file_size"),
+                "nas_link": None, # Construct this if needed, currently not in Stage 1 meta
+                "nas_path": original_meta.get("file_path"), # Use 'file_path' from Stage 1 metadata
+                "processed_md_path": markdown_filepath_nas # Link to the generated MD
+            }
+            catalog_entries.append(catalog_entry)
+
+            # Create Content Entry - Use data from original_meta and summaries/markdown
+            content_entry = {
+                "document_source": DOCUMENT_SOURCE,
+                "document_type": original_meta.get("document_type", "infographic"),
+                "document_name": original_meta.get("file_name"), # Use 'file_name' from Stage 1 metadata
+                "section_id": 0, # Use 0 for the whole document
+                "section_name": file_stem, # Use base filename (stem) as section name
+                "section_summary": usage_summary, # Use usage summary for section summary
+                "content": final_markdown,
+                "creation_timestamp": datetime.utcnow().isoformat() # Add timestamp
+            }
+            content_entries.append(content_entry)
+
+            # 6. Save Checkpoint Files (after EACH successfully processed file stem)
+            try:
+                # Save Catalog Entries
+                with smbclient.open_file(stage3_catalog_output_file, mode='w', encoding='utf-8') as f:
+                    json.dump(catalog_entries, f, indent=2)
+                # Save Content Entries
+                with smbclient.open_file(stage3_content_output_file, mode='w', encoding='utf-8') as f:
+                    json.dump(content_entries, f, indent=2)
+                processing_time = time.time() - start_time
+                logging.info(f"Successfully processed and checkpointed stem '{file_stem}' ({processing_time:.2f}s).")
+            except Exception as e:
+                logging.error(f"CRITICAL: Failed to save checkpoint files after processing stem '{file_stem}': {e}")
+                # Decide how to handle - potentially stop the process?
+                # For now, log and continue, but data might be lost on restart if script fails later.
+
+        logging.info("--- Finished Stage 3 Processing Loop ---")
+
+    # --- Cleanup --- (Moved outside the main processing loop)
+    finally:
+        logging.info("\n--- Cleaning up ---")
+        # Clean up the temporary certificate file
+        if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+            try:
+                os.remove(temp_cert_file_path)
+                logging.info(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
+            except OSError as e:
+                 logging.warning(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
+
+        # Restore original environment variables
+        # Restore REQUESTS_CA_BUNDLE
+        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+        if original_requests_ca_bundle is None:
+            # If it didn't exist originally, remove it if we set it
+            if current_requests_bundle == temp_cert_file_path:
+                 logging.info("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
+                 # Check if key exists before deleting
+                 if 'REQUESTS_CA_BUNDLE' in os.environ:
+                     del os.environ['REQUESTS_CA_BUNDLE']
+        else:
+            # If it existed originally, restore its value if it changed
+            if current_requests_bundle != original_requests_ca_bundle:
+                 logging.info(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
+                 os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
+
+        # Restore SSL_CERT_FILE
+        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
+        if original_ssl_cert_file is None:
+            # If it didn't exist originally, remove it if we set it
+            if current_ssl_cert == temp_cert_file_path:
+                 logging.info("   Unsetting SSL_CERT_FILE environment variable.")
+                 # Check if key exists before deleting
+                 if 'SSL_CERT_FILE' in os.environ:
+                     del os.environ['SSL_CERT_FILE']
+        else:
+            # If it existed originally, restore its value if it changed
+            if current_ssl_cert != original_ssl_cert_file:
+                 logging.info(f"   Restoring original SSL_CERT_FILE environment variable.")
+                 os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+
+
+if __name__ == "__main__":
+    main()
     source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
     source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
 
