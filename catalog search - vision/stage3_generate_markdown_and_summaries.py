@@ -4,6 +4,7 @@ import requests
 import smbclient
 import logging
 import time
+import tempfile # Import for temporary CA bundle file
 from pathlib import Path
 from datetime import datetime
 from openai import AzureOpenAI, RateLimitError, APIError, AuthenticationError
