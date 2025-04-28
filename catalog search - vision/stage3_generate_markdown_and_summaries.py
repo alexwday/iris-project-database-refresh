@@ -182,9 +182,11 @@ def get_access_token():
     payload = {
         'client_id': OAUTH_CONFIG['client_id'],
         'client_secret': OAUTH_CONFIG['client_secret'],
-        'scope': OAUTH_CONFIG['scope'],
         'grant_type': 'client_credentials'
     }
+    # Only add scope if it exists and is not empty
+    if OAUTH_CONFIG.get('scope'):
+        payload['scope'] = OAUTH_CONFIG['scope']
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
     try:
