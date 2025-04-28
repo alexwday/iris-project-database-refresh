@@ -217,11 +217,16 @@ def initialize_gpt_client():
     try:
         token = get_access_token()
         # Use base_url for AzureOpenAI endpoint
-        gpt_client = AzureOpenAI(
-            base_url=GPT_CONFIG['base_url'],
-            api_version=GPT_CONFIG['api_version'],
-            azure_ad_token=token
-        )
+        # Handle different parameter requirements
+        client_params = {
+            'base_url': GPT_CONFIG['base_url'],
+            'azure_ad_token': token
+        }
+        # Only add api_version if it's in the config
+        if 'api_version' in GPT_CONFIG:
+            client_params['api_version'] = GPT_CONFIG['api_version']
+            
+        gpt_client = AzureOpenAI(**client_params)
         logging.info("Azure OpenAI client initialized.")
     except AuthenticationError as e:
         logging.error(f"Authentication failed during client initialization: {e}")
