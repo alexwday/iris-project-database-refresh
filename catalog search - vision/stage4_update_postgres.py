@@ -270,14 +270,14 @@ def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_
         else:
             print(f"   Inserting {len(catalog_entries)} catalog entries into '{DB_CATALOG_TABLE}'...")
             # Define DB columns in the order they should be inserted
-            # Define columns in the order they appear in the table (matching small variant)
+            # Define columns in the order they appear in the table
             catalog_cols = [
                 'document_source', 'document_type', 'document_name', 'document_description',
                 'document_usage', 'date_created', 'date_last_modified', 'file_name',
                 'file_type', 'file_size', 'file_path', 'file_link'
+                # Add 'processed_md_path' if it exists in the table, otherwise omit
             ]
-            # Prepare data tuples, ensuring order matches catalog_cols (matching small variant)
-            # Assumes JSON keys directly match the column names in catalog_cols
+            # Prepare data tuples, ensuring order matches catalog_cols
             catalog_data = []
             for entry in catalog_entries:
                  # Handle potential missing keys gracefully (e.g., default to None)
