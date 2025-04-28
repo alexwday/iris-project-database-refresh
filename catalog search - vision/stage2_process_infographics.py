@@ -160,6 +160,30 @@ def download_from_nas(smb_path, local_temp_dir):
         logging.error(f"   [ERROR] Unexpected error downloading from NAS '{smb_path}': {e}")
         return None
 
+def read_json_from_nas(smb_path):
+    """Reads and parses JSON content from a file on NAS."""
+    logging.info(f"   Attempting to read JSON from NAS: {smb_path}")
+    try:
+        with smbclient.open_file(smb_path, mode='r', encoding='utf-8') as f:
+            content = f.read()
+            data = json.loads(content)
+        logging.info(f"   Successfully read and parsed JSON from: {smb_path}")
+        return data
+    except smbclient.SambaClientError as e:
+        # Specifically handle file not found - this is okay if we're processing for the first time
+        if "NT_STATUS_NO_SUCH_FILE" in str(e):
+             logging.info(f"   JSON file not found (expected for first run): {smb_path}")
+        else:
+             logging.error(f"   [ERROR] SMB error reading JSON file '{smb_path}': {e}")
+        return None # Indicate failure to read or file not found
+    except json.JSONDecodeError as e:
+        logging.error(f"   [ERROR] Failed to parse JSON from '{smb_path}': {e}")
+        return None # Indicate failure
+    except Exception as e:
+        logging.error(f"   [ERROR] Unexpected error reading JSON from NAS '{smb_path}': {e}")
+        return None # Indicate failure
+
+
 # --- Vision Specific Helpers ---
 
 def encode_image(image_path):
@@ -192,34 +216,75 @@ def call_vision_api(image_path, prompt_text):
         'max_tokens': MAX_TOKENS
     }
 
+    max_retries = 3
+    retry_delay = 5 # seconds
+
     logging.info(f"Sending request to Vision API for {Path(image_path).name} with prompt type: {prompt_text[:50]}...") # Log prompt start
-    try:
-        response = requests.post(VISION_API_URL, headers=headers, json=payload, timeout=120) # Added timeout
-        response.raise_for_status()
-        result = response.json()
-        response_text = result.get('choices', [{}])[0].get('message', {}).get('content', 'Error: No content found')
-        logging.info(f"Received response from Vision API for {Path(image_path).name}.")
-        return response_text
-    except requests.exceptions.Timeout:
-        logging.error(f"Timeout error calling Vision API for {image_path}.")
-        return "Error: API call timed out."
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error calling Vision API for {image_path}: {e}")
-        # Log response body if possible and useful
-        if hasattr(e, 'response') and e.response is not None:
-             logging.error(f"Response status: {e.response.status_code}")
-             logging.error(f"Response body: {e.response.text}")
-        return f"Error: API call failed - {str(e)}"
-    except (KeyError, IndexError) as e:
-        logging.error(f"Unexpected response format from Vision API for {image_path}: {e}")
-        logging.error(f"Raw response: {json.dumps(result, indent=2)}")
-        return "Error: Unexpected API response format."
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during Vision API call for {image_path}: {e}")
-        return "Error: An unexpected error occurred."
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(VISION_API_URL, headers=headers, json=payload, timeout=120) # Added timeout
+            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+
+            result = response.json()
+            response_text = result.get('choices', [{}])[0].get('message', {}).get('content', 'Error: No content found in API response structure')
+            logging.info(f"Received successful response from Vision API for {Path(image_path).name} (Attempt {attempt + 1}).")
+            return response_text # Success, return response
+
+        except requests.exceptions.Timeout:
+            logging.warning(f"Timeout error calling Vision API for {image_path} (Attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay}s...")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+            else:
+                logging.error(f"Timeout error calling Vision API for {image_path} after {max_retries} attempts.")
+                return "Error: API call timed out after retries."
+
+        except requests.exceptions.RequestException as e:
+            status_code = e.response.status_code if hasattr(e, 'response') and e.response is not None else None
+            logging.warning(f"RequestException calling Vision API for {image_path} (Attempt {attempt + 1}/{max_retries}). Status: {status_code}. Error: {e}")
+
+            # Decide whether to retry based on status code
+            # Retry on server errors (5xx), potentially rate limits (429)
+            # Do NOT retry on client errors like 400, 401, 403, 404
+            if status_code and (500 <= status_code < 600 or status_code == 429):
+                if attempt < max_retries - 1:
+                    logging.warning(f"Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    logging.error(f"API call failed for {image_path} with status {status_code} after {max_retries} attempts.")
+                    return f"Error: API call failed after retries - Status {status_code}"
+            else:
+                # Non-retryable client error or unknown error
+                logging.error(f"Non-retryable API error for {image_path}. Status: {status_code}. Error: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                     logging.error(f"Response body: {e.response.text}")
+                return f"Error: API call failed - {str(e)}" # Return specific error
+
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            # Error parsing the successful response, likely indicates an API contract violation or unexpected format
+            logging.error(f"Unexpected response format or JSON decode error from Vision API for {image_path}: {e}")
+            # Log raw response if possible (might already be logged by RequestException handler)
+            if 'response' in locals() and response is not None:
+                 logging.error(f"Raw response text: {response.text}")
+            # Do not retry format errors
+            return "Error: Unexpected API response format."
+
+        except Exception as e:
+            # Catch-all for other unexpected errors during the attempt
+            logging.error(f"An unexpected error occurred during Vision API call attempt {attempt + 1} for {image_path}: {e}")
+            if attempt < max_retries - 1:
+                 logging.warning(f"Retrying in {retry_delay}s...")
+                 time.sleep(retry_delay)
+            else:
+                 logging.error(f"Unexpected error persisted after {max_retries} attempts for {image_path}.")
+                 return "Error: An unexpected error occurred after retries."
+
+    # Should not be reached if logic is correct, but as a fallback:
+    logging.error(f"Exited retry loop unexpectedly for {image_path}.")
+    return "Error: Failed to get response after all retries (unexpected loop exit)."
 
 
-# --- Main Processing Logic ---
+# ==============================================================================
 
 # ==============================================================================
 # --- Main Processing Logic ---
@@ -363,75 +428,115 @@ def main():
                     error_count += 1
                     continue
 
-                # Check if output already exists (for potential resume capability)
-                # TODO: Add more robust checkpointing if needed (e.g., check timestamp or content hash)
+                # --- Resume Logic ---
+                existing_output_data = None
+                is_resuming = False
                 if smbclient.path.exists(output_json_smb_path):
-                    logging.info(f"   Output file {output_json_smb_path} already exists. Skipping.")
-                    continue # Skip to next file
+                    logging.info(f"   Potential resume: Output file found at {output_json_smb_path}. Attempting to load...")
+                    existing_output_data = read_json_from_nas(output_json_smb_path)
+                    if existing_output_data is not None:
+                        logging.info(f"   Successfully loaded existing data. Resuming processing for {file_name}.")
+                        is_resuming = True
+                    else:
+                        logging.warning(f"   Found existing output file, but failed to load/parse it. Reprocessing {file_name} from scratch.")
+                        # Proceed as if file didn't exist
+                else:
+                    logging.info(f"   No existing output file found. Processing {file_name} from scratch.")
 
-                # 1. Download PDF from NAS using helper
+                # 1. Download PDF from NAS (still needed to generate images for API calls)
                 local_pdf_path = download_from_nas(input_file_smb_path, local_temp_dir)
                 if not local_pdf_path:
                     logging.error(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
                     error_count += 1
+                    error_count += 1
                     continue # Skip to next file
 
-                all_pages_vision_output = {}
+                # Initialize output dictionary - use existing data if resuming, else empty
+                all_pages_vision_output = existing_output_data if is_resuming else {}
                 pdf_processing_error = False
 
-                # 2. Process PDF: Split, Convert, Analyze
+                # 2. Process PDF: Convert Pages and Analyze with Vision API
                 try:
                     pdf_document = fitz.open(local_pdf_path)
                     num_pages = len(pdf_document)
                     logging.info(f"   Opened PDF '{file_name}' with {num_pages} pages.")
 
                     for page_num in range(num_pages):
-                        page_index = page_num + 1 # Use 1-based index for logging/keys
-                        logging.info(f"   Processing Page {page_index}/{num_pages}...")
+                        page_index_str = f"page_{page_num + 1}" # Use 1-based index string key
+                        logging.info(f"   Processing {page_index_str}/{num_pages}...")
                         page_start_time = time.time()
                         page = pdf_document.load_page(page_num)
                         local_page_jpeg_path = None # Ensure defined for cleanup
 
+                        # Get existing results for this page if resuming, else initialize
+                        page_results = all_pages_vision_output.get(page_index_str, {})
+
                         try:
-                            # Convert page to JPEG using configured DPI
+                            # --- Image Generation (Only if needed) ---
+                            # Check if *any* pass for this page needs processing before generating image
+                            needs_processing = False
+                            for pass_name in VISION_PROMPTS:
+                                pass_result = page_results.get(pass_name)
+                                if pass_result is None or (isinstance(pass_result, str) and pass_result.startswith("Error:")):
+                                    needs_processing = True
+                                    break # Found a pass that needs work
+
+                            if not needs_processing:
+                                logging.info(f"      Skipping image generation and API calls for {page_index_str} - all passes completed previously.")
+                                all_pages_vision_output[page_index_str] = page_results # Ensure it's in the main dict
+                                continue # Go to next page
+
+                            # Generate JPEG if we need to run any API calls for this page
+                            logging.info(f"      Generating JPEG for {page_index_str}...")
                             pix = page.get_pixmap(dpi=IMAGE_DPI)
                             img_bytes = pix.tobytes("jpeg")
-                            local_page_jpeg_path = os.path.join(local_temp_dir, f"{file_name_base}_page_{page_index}.jpg")
+                            local_page_jpeg_path = os.path.join(local_temp_dir, f"{file_name_base}_{page_index_str}.jpg")
 
                             try:
                                 with open(local_page_jpeg_path, "wb") as img_file:
                                     img_file.write(img_bytes)
+                                logging.info(f"      Saved JPEG: {local_page_jpeg_path}")
                             except Exception as e:
-                                 logging.error(f"   [ERROR] Failed to save page {page_index} as JPEG: {e}")
-                                 # Decide how to handle: skip page or fail file?
+                                 logging.error(f"      [ERROR] Failed to save {page_index_str} as JPEG: {e}")
                                  pdf_processing_error = True # Mark error for the file
-                                 break # Stop processing pages for this file
+                                 break # Stop processing pages for this file if JPEG save fails
 
-                            # Run multi-pass vision analysis for the page
-                            page_results = {}
-                            api_call_failed = False
+                            # --- Run Multi-Pass Vision Analysis (Retry Failed Passes) ---
+                            api_call_failed_this_page = False
                             for pass_name, prompt in VISION_PROMPTS.items():
-                                logging.info(f"      Running {pass_name} for page {page_index}...")
-                                vision_response = call_vision_api(local_page_jpeg_path, prompt)
-                                if vision_response is None or "Error:" in vision_response:
-                                     logging.error(f"      [ERROR] Vision API call failed for {pass_name} on page {page_index}. Response: {vision_response}")
-                                     page_results[pass_name] = vision_response if vision_response is not None else "Error: Failed to get response"
-                                     api_call_failed = True
-                                     # Decide: break inner loop (passes) or continue? Let's continue for now.
+                                existing_result = page_results.get(pass_name)
+                                should_run_pass = False
+
+                                if existing_result is None:
+                                    logging.info(f"      Pass '{pass_name}' needed (never run).")
+                                    should_run_pass = True
+                                elif isinstance(existing_result, str) and existing_result.startswith("Error:"):
+                                    logging.info(f"      Pass '{pass_name}' needed (retrying previous error: {existing_result[:100]}...).")
+                                    should_run_pass = True
                                 else:
-                                     page_results[pass_name] = vision_response
-                                # Optional: Add a small delay between API calls if needed
-                                # time.sleep(0.5)
+                                    logging.info(f"      Skipping pass '{pass_name}' (already completed successfully).")
 
-                            all_pages_vision_output[f"page_{page_index}"] = page_results
+                                if should_run_pass:
+                                    vision_response = call_vision_api(local_page_jpeg_path, prompt)
+                                    page_results[pass_name] = vision_response # Store result (success or error string)
+                                    if vision_response is None or (isinstance(vision_response, str) and vision_response.startswith("Error:")):
+                                         logging.error(f"      [ERROR] Vision API call failed for '{pass_name}' on {page_index_str} after retries. Response: {vision_response}")
+                                         api_call_failed_this_page = True
+                                         # Continue processing other passes for this page
+                                    else:
+                                         logging.info(f"      Pass '{pass_name}' completed successfully.")
+                                    # Optional: Add a small delay between API calls if needed
+                                    # time.sleep(0.5)
+
+                            all_pages_vision_output[page_index_str] = page_results # Update the main dict with results for this page
                             page_end_time = time.time()
-                            logging.info(f"   Finished Page {page_index} ({page_end_time - page_start_time:.2f}s). API errors: {api_call_failed}")
+                            logging.info(f"   Finished {page_index_str} ({page_end_time - page_start_time:.2f}s). API errors on this page: {api_call_failed_this_page}")
 
-                            if api_call_failed:
-                                # Decide if one failed API call should fail the whole file
-                                # pdf_processing_error = True
-                                # break # Option: Stop processing pages if one API call fails
-                                pass # Continue processing other pages for now
+                            # Decide if API errors on this page should halt processing for the *entire file*
+                            # For now, we continue processing other pages even if one page has API errors,
+                            # but the file will be marked with an error at the end if any page had issues.
+                            if api_call_failed_this_page:
+                                file_has_error = True # Mark the file as having an error if any pass failed ultimately
 
                         finally:
                             # Clean up temporary page image inside the page loop
@@ -439,38 +544,42 @@ def main():
                                 try:
                                     os.remove(local_page_jpeg_path)
                                 except OSError as e:
-                                    logging.warning(f"   [WARNING] Could not remove temporary page file {local_page_jpeg_path}: {e}")
+                                    logging.warning(f"      [WARNING] Could not remove temporary page file {local_page_jpeg_path}: {e}")
 
                     pdf_document.close()
 
+                except fitz.fitz.FileNotFoundError:
+                     logging.error(f"   [ERROR] PDF file not found locally (should have been downloaded): {local_pdf_path}")
+                     pdf_processing_error = True
                 except Exception as e:
-                    logging.error(f"   [ERROR] Failed to process PDF {local_pdf_path}: {e}")
+                    logging.error(f"   [ERROR] Failed during PDF processing or analysis loop for {local_pdf_path}: {e}")
                     pdf_processing_error = True # Mark error for the file
 
+                # Mark file as having error if PDF processing failed
                 if pdf_processing_error:
-                    file_has_error = True # Mark the file as having an error
-                    # No results to save if PDF processing failed critically
+                    file_has_error = True
+
+                # 3. Save potentially updated results to NAS (always save state, even if errors occurred)
+                if all_pages_vision_output: # Check if there's anything to save
+                    logging.info(f"   Saving final vision analysis state to NAS: {output_json_smb_path}")
+                    try:
+                        output_data_str = json.dumps(all_pages_vision_output, indent=2)
+                        output_data_bytes = output_data_str.encode('utf-8')
+                        if not write_to_nas(output_json_smb_path, output_data_bytes): # Use helper
+                            logging.error(f"   [ERROR] Failed to write final JSON state for {file_name} to NAS.")
+                            file_has_error = True # Mark error if saving fails
+                        else:
+                             logging.info(f"   Successfully saved final state for {file_name}.")
+                    except Exception as e:
+                        logging.error(f"   [ERROR] Failed to serialize or save final results JSON to {output_json_smb_path}: {e}")
+                        file_has_error = True
                 else:
-                    # 3. Save results to NAS using helper
-                    if all_pages_vision_output:
-                        logging.info(f"   Saving vision analysis JSON output to NAS...")
-                        try:
-                            output_data_str = json.dumps(all_pages_vision_output, indent=2)
-                            output_data_bytes = output_data_str.encode('utf-8')
-                            if not write_to_nas(output_json_smb_path, output_data_bytes): # Use helper
-                                logging.error(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
-                                file_has_error = True # Mark error even if vision analysis worked
-                        except Exception as e:
-                            logging.error(f"   [ERROR] Failed to serialize or save results JSON to {output_json_smb_path}: {e}")
-                            file_has_error = True
-                    else:
-                         logging.warning(f"   No vision output generated for {file_name}. Nothing to save.")
-                         # This might be an error condition depending on expectations
-                         # file_has_error = True
+                     # This case should be rare if processing started, but possible if PDF was empty or initial load failed badly
+                     logging.warning(f"   No vision output generated or loaded for {file_name}. Nothing to save.")
 
 
             except Exception as e:
-                logging.error(f"   [ERROR] Unexpected error processing file {file_info.get('file_name', 'N/A')}: {e}")
+                logging.error(f"   [ERROR] Top-level unexpected error processing file {file_info.get('file_name', 'N/A')}: {e}")
                 file_has_error = True
             finally:
                 # --- Cleanup ---
