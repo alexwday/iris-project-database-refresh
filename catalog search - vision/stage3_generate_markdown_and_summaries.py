@@ -44,7 +44,6 @@ OAUTH_CONFIG = {
 # --- GPT API Configuration (Matching original structure) ---
 GPT_CONFIG = {
     "base_url": "https://your-aoai-endpoint.openai.azure.com/", # Replace with actual AOAI endpoint (Azure uses base_url)
-    "api_version": "2024-02-01", # Or your desired API version
     # Model for Markdown Synthesis (can be different from summarization model)
     "markdown_synthesis_model": "gpt-4o", # Or your preferred model
     # Model for Usage/Description Summarization (using tool calling)
@@ -216,17 +215,11 @@ def initialize_gpt_client():
     global gpt_client
     try:
         token = get_access_token()
-        # Use base_url for AzureOpenAI endpoint
-        # Handle different parameter requirements
-        client_params = {
-            'base_url': GPT_CONFIG['base_url'],
-            'azure_ad_token': token
-        }
-        # Only add api_version if it's in the config
-        if 'api_version' in GPT_CONFIG:
-            client_params['api_version'] = GPT_CONFIG['api_version']
-            
-        gpt_client = AzureOpenAI(**client_params)
+        # Initialize client just like in small variant
+        gpt_client = AzureOpenAI(
+            base_url=GPT_CONFIG['base_url'],
+            azure_ad_token=token
+        )
         logging.info("Azure OpenAI client initialized.")
     except AuthenticationError as e:
         logging.error(f"Authentication failed during client initialization: {e}")
