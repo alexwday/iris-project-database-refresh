@@ -24,10 +24,8 @@ NAS_PARAMS = {
     "user": "your_smb_user",         # Replace with actual SMB username
     "password": "your_smb_password"  # Replace with actual SMB password
 }
-# Base path on the NAS share containing the root folders for different document sources
-NAS_BASE_INPUT_FOLDER = "//nas_ip/share/path/to/your/base_input_folder" # e.g., //192.168.1.100/share/documents
-# Base path on the NAS share where output JSON files will be stored
-NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
+# Base path on the NAS share where output JSON files will be stored (matching Stage 1)
+NAS_BASE_OUTPUT_FOLDER = "path/to/your/output_folder"   # e.g., path/to/your/output_folder (relative to share root)
 
 # --- Processing Configuration ---
 DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1 and DB
