@@ -20,14 +20,14 @@ import backoff # For retry logic
 NAS_PARAMS = {
     "ip": "your_nas_ip",             # Replace with actual NAS IP
     "share": "your_share_name",      # Replace with actual share name
-    "user": "your_smb_user",         # Replace with actual SMB username
-    "password": "your_smb_password"  # Replace with actual SMB password
+    "user": "your_nas_user",         # Replace with actual SMB username (ensure consistency)
+    "password": "your_nas_password"  # Replace with actual SMB password (ensure consistency)
 }
-# Base path on the NAS share where output JSON files will be stored (matching Stage 1)
-NAS_BASE_OUTPUT_FOLDER = "path/to/your/output_folder"   # e.g., path/to/your/output_folder (relative to share root)
+# Base path on the NAS share where Stage 1/2 output files were stored (matching Stage 1/2)
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"   # e.g., path/to/your/output_folder (relative to share root) - RENAMED FOR CONSISTENCY
 
 # --- Processing Configuration ---
-DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1/2 and DB
+DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1/2 and DB (ensure this is correct for vision)
 
 # --- Azure AD / OAuth Configuration for GPT API (Matching original structure) ---
 OAUTH_CONFIG = {
@@ -50,7 +50,8 @@ GPT_CONFIG = {
 }
 
 # --- CA Bundle Configuration ---
-CA_BUNDLE_NAS_PATH = os.path.join(NAS_BASE_OUTPUT_FOLDER, "rbc-ca-bundle.cer") # Path on NAS
+# Corrected to use NAS_OUTPUT_FOLDER_PATH
+CA_BUNDLE_NAS_PATH = os.path.join(NAS_OUTPUT_FOLDER_PATH, "rbc-ca-bundle.cer") # Path on NAS
 LOCAL_CA_BUNDLE_PATH = "rbc-ca-bundle.cer" # Local path to save the bundle
 
 # --- System Prompt Template (Copied from catalog search - small) ---
@@ -420,27 +421,37 @@ def main():
         logging.error("Failed to set up CA bundle. Exiting.")
         return
 
-    source_output_dir_nas = os.path.join(NAS_BASE_OUTPUT_FOLDER, DOCUMENT_SOURCE)
-    stage1_metadata_file = os.path.join(source_output_dir_nas, "1C_nas_files_to_process.json")
-    stage2_input_dir_nas = os.path.join(source_output_dir_nas, "2A_vision_outputs")
-    stage3_md_output_dir_nas = os.path.join(source_output_dir_nas, "3C_generated_markdown")
-    stage3_catalog_output_file = os.path.join(source_output_dir_nas, "3A_catalog_entries.json")
-    stage3_content_output_file = os.path.join(source_output_dir_nas, "3B_content_entries.json")
-    skip_flag_path = os.path.join(source_output_dir_nas, "_SKIP_SUBSEQUENT_STAGES.flag")
-    refresh_flag_path = os.path.join(source_output_dir_nas, "_FULL_REFRESH.flag")
+    # Define paths using consistent variable name NAS_OUTPUT_FOLDER_PATH
+    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
+
+    stage1_metadata_file = os.path.join(source_base_dir_smb, "1C_nas_files_to_process.json").replace('\\', '/')
+    stage2_input_dir_smb = os.path.join(source_base_dir_smb, "2A_vision_outputs").replace('\\', '/') # Input dir from Stage 2
+    stage3_md_output_dir_smb = os.path.join(source_base_dir_smb, "3C_generated_markdown").replace('\\', '/') # MD output dir for Stage 3
+    stage3_catalog_output_file = os.path.join(source_base_dir_smb, "3A_catalog_entries.json").replace('\\', '/') # Catalog output file
+    stage3_content_output_file = os.path.join(source_base_dir_smb, "3B_content_entries.json").replace('\\', '/') # Content output file
+    skip_flag_path = os.path.join(source_base_dir_smb, "_SKIP_SUBSEQUENT_STAGES.flag").replace('\\', '/')
+    refresh_flag_path = os.path.join(source_base_dir_smb, "_FULL_REFRESH.flag").replace('\\', '/')
+
+    logging.info(f"Stage 1 Metadata File: {stage1_metadata_file}")
+    logging.info(f"Stage 2 Input Dir (Vision Outputs): {stage2_input_dir_smb}")
+    logging.info(f"Stage 3 Markdown Output Dir: {stage3_md_output_dir_smb}")
+    logging.info(f"Stage 3 Catalog Output File: {stage3_catalog_output_file}")
+    logging.info(f"Stage 3 Content Output File: {stage3_content_output_file}")
 
     # Check skip flag
     if smbclient.path.exists(skip_flag_path):
+        logging.info(f"'{skip_flag_path}' found. Skipping Stage 3.")
         logging.info(f"'{skip_flag_path}' found. Skipping Stage 3.")
         return
 
     # Ensure Stage 3 Markdown output directory exists on NAS
     try:
-        if not smbclient.path.exists(stage3_md_output_dir_nas):
-            smbclient.makedirs(stage3_md_output_dir_nas, exist_ok=True)
-            logging.info(f"Created NAS directory: {stage3_md_output_dir_nas}")
+        if not smbclient.path.exists(stage3_md_output_dir_smb): # Use correct variable
+            smbclient.makedirs(stage3_md_output_dir_smb, exist_ok=True)
+            logging.info(f"Created NAS directory: {stage3_md_output_dir_smb}")
     except Exception as e:
-        logging.error(f"Failed to create NAS directory {stage3_md_output_dir_nas}: {e}")
+        logging.error(f"Failed to create NAS directory {stage3_md_output_dir_smb}: {e}")
         return
 
     # Handle Full Refresh
@@ -455,12 +466,13 @@ def main():
             except Exception as e:
                 logging.error(f"Failed to delete {f_path} during full refresh: {e}")
         # Optionally delete existing generated markdown files too
-        # try:
-        #     if smbclient.path.exists(stage3_md_output_dir_nas):
-        #         # This might be slow/complex with smbclient, consider carefully
-        #         logging.warning(f"Manual deletion of contents in {stage3_md_output_dir_nas} might be needed for full refresh.")
-        # except Exception as e:
-        #      logging.error(f"Error checking/deleting markdown dir {stage3_md_output_dir_nas}: {e}")
+        try:
+            if smbclient.path.exists(stage3_md_output_dir_smb): # Use correct variable
+                # This might be slow/complex with smbclient, consider carefully
+                # For now, just log a warning if the directory exists during full refresh
+                logging.warning(f"Full refresh mode: Existing markdown directory '{stage3_md_output_dir_smb}' found. Contents will be overwritten file-by-file, but old files not corresponding to current inputs will remain.")
+        except Exception as e:
+             logging.error(f"Error checking markdown dir {stage3_md_output_dir_smb}: {e}")
 
 
     # Load original file metadata
@@ -502,39 +514,57 @@ def main():
              content_entries = [] # Reset if loading fails
 
 
-    # Find vision output JSON files to process
+    # Find vision output *subdirectories* to process from Stage 2
     try:
-        vision_output_files = [f for f in smbclient.listdir(stage2_input_dir_nas) if f.endswith('.json')]
-        logging.info(f"Found {len(vision_output_files)} JSON files in {stage2_input_dir_nas}")
+        # List items in the Stage 2 output directory
+        stage2_items = smbclient.listdir(stage2_input_dir_smb)
+        # Filter for directories (these should correspond to file stems)
+        stage2_subdirs = [
+            item for item in stage2_items
+            if smbclient.path.isdir(os.path.join(stage2_input_dir_smb, item).replace('\\', '/'))
+        ]
+        logging.info(f"Found {len(stage2_subdirs)} potential input subdirectories in {stage2_input_dir_smb}")
     except Exception as e:
-        logging.error(f"Failed to list files in {stage2_input_dir_nas}: {e}")
+        logging.error(f"Failed to list subdirectories in {stage2_input_dir_smb}: {e}")
         return
 
     # Initialize GPT client once before the loop if possible
     initialize_gpt_client()
 
-    # Process each vision output file
-    for json_filename in vision_output_files:
+    # Process each subdirectory (representing one original file)
+    for file_stem in stage2_subdirs: # Iterate through directory names (stems)
         start_time = time.time()
-        file_stem = Path(json_filename).stem
-        json_filepath_nas = os.path.join(stage2_input_dir_nas, json_filename)
+        # Construct paths based on the subdirectory name (file_stem)
+        json_filename = f"{file_stem}.json"
+        json_filepath_nas = os.path.join(stage2_input_dir_smb, file_stem, json_filename).replace('\\', '/')
         markdown_filename = f"{file_stem}.md"
-        markdown_filepath_nas = os.path.join(stage3_md_output_dir_nas, markdown_filename)
+        markdown_filepath_nas = os.path.join(stage3_md_output_dir_smb, markdown_filename).replace('\\', '/') # Use correct MD output dir
 
         # Check if already processed (using stem)
         if file_stem in processed_stems:
-            logging.info(f"Skipping '{json_filename}' as it appears to be already processed (based on stem).")
+            logging.info(f"Skipping '{file_stem}' as it appears to be already processed (based on stem).")
             continue
 
-        logging.info(f"--- Processing vision output: {json_filename} ---")
+        logging.info(f"--- Processing vision output for stem: {file_stem} ---")
+        logging.info(f"   Input JSON: {json_filepath_nas}")
+        logging.info(f"   Output MD: {markdown_filepath_nas}")
 
-        # 1. Load vision output data
+        # Check if the expected JSON file exists within the subdirectory
+        try:
+            if not smbclient.path.exists(json_filepath_nas):
+                logging.warning(f"   Expected JSON file not found at {json_filepath_nas}. Skipping stem '{file_stem}'.")
+                continue
+        except Exception as e:
+             logging.error(f"   Error checking existence of {json_filepath_nas}: {e}. Skipping stem '{file_stem}'.")
+             continue
+
+        # 1. Load vision output data from the JSON file inside the subdirectory
         try:
             with smbclient.open_file(json_filepath_nas, mode='r', encoding='utf-8') as f:
                 all_pages_vision_output = json.load(f)
         except Exception as e:
             logging.error(f"Failed to load or parse {json_filepath_nas}: {e}")
-            continue # Skip to next file
+            continue # Skip to next file stem
 
         # 2. Synthesize Markdown page by page
         final_markdown_parts = []
@@ -548,17 +578,17 @@ def main():
             try:
                 page_markdown = call_gpt_markdown_synthesis(page_vision_data, page_number)
                 if page_markdown.startswith("Error:"):
-                    logging.error(f"Markdown synthesis failed for page {page_number} of {json_filename}. Aborting file.")
+                    logging.error(f"Markdown synthesis failed for page {page_number} of stem '{file_stem}'. Aborting file.")
                     synthesis_successful = False
                     break # Stop processing this file
                 final_markdown_parts.append(page_markdown)
             except Exception as e: # Catch errors from backoff failure etc.
-                 logging.error(f"Critical error during Markdown synthesis for page {page_number} of {json_filename}: {e}")
+                 logging.error(f"Critical error during Markdown synthesis for page {page_number} of stem '{file_stem}': {e}")
                  synthesis_successful = False
                  break # Stop processing this file
 
         if not synthesis_successful:
-            continue # Skip to the next JSON file
+            continue # Skip to the next file stem
 
         # 3. Combine and Save Final Markdown
         final_markdown = f"\n\n---\n\n<!-- Page Separator -->\n\n---\n\n".join(final_markdown_parts)
@@ -580,61 +610,64 @@ def main():
             )
             # Check if None was returned (indicates an error in call_gpt_summarizer)
             if description_summary is None or usage_summary is None:
-                 logging.error(f"Summarization failed for {json_filename} (check logs from call_gpt_summarization). Skipping DB entry creation.")
-                 continue # Skip to next file
+                 logging.error(f"Summarization failed for stem '{file_stem}' (check logs from call_gpt_summarization). Skipping DB entry creation.")
+                 continue # Skip to next file stem
         except Exception as e: # Catch errors from backoff failure etc.
-             logging.error(f"Critical error during summarization call for {json_filename}: {e}")
-             continue # Skip to next file
+             logging.error(f"Critical error during summarization call for stem '{file_stem}': {e}")
+             continue # Skip to next file stem
 
         # 5. Prepare and Append DB Entries
-        original_meta = metadata_lookup.get(file_stem)
+        original_meta = metadata_lookup.get(file_stem) # Lookup using the stem
         if not original_meta:
-            logging.warning(f"Could not find original metadata for {file_stem}. Skipping DB entry creation.")
+            logging.warning(f"Could not find original metadata for stem '{file_stem}'. Skipping DB entry creation.")
             continue
 
-        # Create Catalog Entry
+        # Create Catalog Entry - Use data from original_meta and summaries
         catalog_entry = {
             "document_source": DOCUMENT_SOURCE,
             "document_type": original_meta.get("document_type", "infographic"), # Get type from meta or default
-            "document_name": original_meta.get("filename"),
+            "document_name": original_meta.get("file_name"), # Use 'file_name' from Stage 1 metadata
             "description": description_summary,
             "usage": usage_summary,
-            "file_creation_date_utc": original_meta.get("creation_time_utc"),
-            "file_last_modified_date_utc": original_meta.get("modified_time_utc"),
-            "file_size_bytes": original_meta.get("size"),
-            "nas_link": original_meta.get("nas_link"), # Construct this if not present
-            "nas_path": original_meta.get("nas_path"),
+            # Use correct keys from Stage 1 metadata JSON
+            "file_creation_date_utc": original_meta.get("date_created"),
+            "file_last_modified_date_utc": original_meta.get("date_last_modified"),
+            "file_size_bytes": original_meta.get("file_size"),
+            "nas_link": None, # Construct this if needed, currently not in Stage 1 meta
+            "nas_path": original_meta.get("file_path"), # Use 'file_path' from Stage 1 metadata
             "processed_md_path": markdown_filepath_nas # Link to the generated MD
         }
         catalog_entries.append(catalog_entry)
 
-        # Create Content Entry
+        # Create Content Entry - Use data from original_meta and summaries/markdown
         content_entry = {
             "document_source": DOCUMENT_SOURCE,
             "document_type": original_meta.get("document_type", "infographic"),
-            "document_name": original_meta.get("filename"),
+            "document_name": original_meta.get("file_name"), # Use 'file_name' from Stage 1 metadata
             "section_id": 0, # Use 0 for the whole document
-            "section_name": file_stem, # Use base filename as section name
+            "section_name": file_stem, # Use base filename (stem) as section name
             "section_summary": usage_summary, # Use usage summary for section summary
             "content": final_markdown,
-            "creation_timestamp": datetime.utcnow().isoformat()
+            "creation_timestamp": datetime.utcnow().isoformat() # Add timestamp
         }
         content_entries.append(content_entry)
 
-        # 6. Save Checkpoint Files (after EACH file)
+        # 6. Save Checkpoint Files (after EACH successfully processed file stem)
         try:
+            # Save Catalog Entries
             with smbclient.open_file(stage3_catalog_output_file, mode='w', encoding='utf-8') as f:
                 json.dump(catalog_entries, f, indent=2)
+            # Save Content Entries
             with smbclient.open_file(stage3_content_output_file, mode='w', encoding='utf-8') as f:
                 json.dump(content_entries, f, indent=2)
             processing_time = time.time() - start_time
-            logging.info(f"Successfully processed and checkpointed '{json_filename}' ({processing_time:.2f}s).")
+            logging.info(f"Successfully processed and checkpointed stem '{file_stem}' ({processing_time:.2f}s).")
         except Exception as e:
-            logging.error(f"CRITICAL: Failed to save checkpoint files after processing {json_filename}: {e}")
+            logging.error(f"CRITICAL: Failed to save checkpoint files after processing stem '{file_stem}': {e}")
             # Decide how to handle - potentially stop the process?
-            # For now, log and continue, but data might be lost on restart.
+            # For now, log and continue, but data might be lost on restart if script fails later.
 
-    logging.info("--- Finished Stage 3 ---")
+    logging.info("--- Finished Stage 3 Processing Loop ---")
 
 
 if __name__ == "__main__":
