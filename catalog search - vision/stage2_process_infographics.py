@@ -15,7 +15,7 @@ import tempfile
 # TODO: Externalize configuration
 NAS_BASE_INPUT_FOLDER = "//nas_ip/share/path/to/your/base_input_folder" # e.g., //192.168.1.100/share/documents
 NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
-DOCUMENT_SOURCE = "infographics_source" # Matches the source identifier used in Stage 1 and DB
+DOCUMENT_SOURCE = "internal_cheatsheets" # Corrected document source
 SMB_USER = os.getenv("SMB_USER", "your_smb_user")
 SMB_PASSWORD = os.getenv("SMB_PASSWORD", "your_smb_password")
 

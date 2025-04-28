@@ -15,15 +15,15 @@ It processes these PDFs by:
 
 The generated summaries (`usage` and `description`) are optimized for use by the Iris project's agentic retrieval system, allowing an AI agent to select relevant documents based on the `usage` field and retrieve the full synthesized Markdown content.
 
-The pipeline operates in five distinct stages, executed sequentially. It uses intermediate JSON files stored on the NAS within a directory specific to the `DOCUMENT_SOURCE` being processed (e.g., `path/to/your/output_folder/infographics_source/`) to pass data between stages and enable checkpointing/resumption.
+The pipeline operates in five distinct stages, executed sequentially. It uses intermediate JSON files stored on the NAS within a directory specific to the `DOCUMENT_SOURCE` being processed (e.g., `path/to/your/output_folder/internal_cheatsheets/`) to pass data between stages and enable checkpointing/resumption.
 
 ## Workflow Stages
 
 ### Stage 1: Extract & Compare (`stage1_extract_postgres.py`)
 
 *   **(Identical to Catalog Search - Small)**
-*   Connects to PostgreSQL, queries `apg_catalog` for the `DOCUMENT_SOURCE`.
-*   Connects to NAS, lists files in the source directory.
+*   Connects to PostgreSQL, queries `apg_catalog` for the `DOCUMENT_SOURCE` (e.g., 'internal_cheatsheets').
+*   Connects to NAS, lists files in the source directory (e.g., `base_input_folder/internal_cheatsheets`).
 *   Compares DB and NAS lists (filename, mod time) to find new/updated PDF files.
 *   Outputs: `1A_catalog_in_postgres.json`, `1B_files_in_nas.json`, `1C_nas_files_to_process.json`, `1D_postgres_files_to_delete.json`.
 *   Sets flags (`_SKIP_SUBSEQUENT_STAGES.flag`, `_FULL_REFRESH.flag`) as needed.
@@ -31,7 +31,7 @@ The pipeline operates in five distinct stages, executed sequentially. It uses in
 ### Stage 2: Process Infographics (`stage2_process_infographics.py`)
 
 *   **(Vision-Specific Implementation)**
-1.  **Check Skip Flag:** Skips if `_SKIP_SUBSEQUENT_STAGES.flag` exists.
+1.  **Check Skip Flag:** Skips if `_SKIP_SUBSEQUENT_STAGES.flag` exists in the source output directory (e.g., `output_folder/internal_cheatsheets/`).
 2.  **Load Input:** Reads `1C_nas_files_to_process.json`.
 3.  **Process PDFs:** For each PDF file in the list:
     *   Downloads the PDF from NAS to a local temporary directory.
@@ -53,7 +53,7 @@ The pipeline operates in five distinct stages, executed sequentially. It uses in
 
 *   **(Vision-Specific Implementation)**
 1.  **Check Skip Flag:** Skips if `_SKIP_SUBSEQUENT_STAGES.flag` exists.
-2.  **Setup:** Downloads CA bundle, sets environment variables, handles OAuth for GPT API.
+2.  **Setup:** Downloads CA bundle (from `NAS_BASE_OUTPUT_FOLDER`), sets environment variables, handles OAuth for GPT API.
 3.  **Check Refresh Flag:** Deletes existing Stage 3 outputs (`3A_...`, `3B_...`, potentially `3C_...`) if `_FULL_REFRESH.flag` exists.
 4.  **Load Metadata & Checkpoints:** Loads `1C...json` for metadata lookup. Loads existing `3A...json` to identify already processed files (based on `processed_md_path` stem) if not in full refresh.
 5.  **Find JSON Files:** Locates all `.json` files in the `2A_vision_outputs` directory.
@@ -73,9 +73,9 @@ The pipeline operates in five distinct stages, executed sequentially. It uses in
 
 ### Stage 4: Update PostgreSQL (`stage4_update_postgres.py`)
 
-*   **(Identical to Catalog Search - Small)**
+*   **(Identical Logic to Catalog Search - Small, uses configured `DOCUMENT_SOURCE`)**
 *   Checks skip flag.
-*   Loads `1D...json` (deletions), `3A...json` (catalog entries), `3B...json` (content entries).
+*   Loads `1D...json` (deletions), `3A...json` (catalog entries), `3B...json` (content entries) from the source output directory.
 *   Connects to DB.
 *   Performs validation counts.
 *   Executes `DELETE` statements based on `1D...json`.
@@ -85,10 +85,10 @@ The pipeline operates in five distinct stages, executed sequentially. It uses in
 
 ### Stage 5: Archive Results (`stage5_archive_results.py`)
 
-*   **(Identical to Catalog Search - Small)**
+*   **(Identical Logic to Catalog Search - Small, uses configured `DOCUMENT_SOURCE`)**
 *   Checks skip flag.
-*   Constructs source output path (e.g., `.../output_folder/infographics_source`) and archive path (`.../output_folder/_archive`).
-*   Renames the source output directory with a timestamp (e.g., `infographics_source_YYYYMMDD_HHMMSS`).
+*   Constructs source output path (e.g., `.../output_folder/internal_cheatsheets`) and archive path (`.../output_folder/_archive`).
+*   Renames the source output directory with a timestamp (e.g., `internal_cheatsheets_YYYYMMDD_HHMMSS`).
 *   Moves the renamed directory into the archive directory using `smbclient.rename()`.
 
 ## Configuration
@@ -99,7 +99,7 @@ Key configuration parameters are currently hardcoded within each script. **Exter
 
 *   **NAS:** `NAS_BASE_INPUT_FOLDER`, `NAS_BASE_OUTPUT_FOLDER`, `SMB_USER`, `SMB_PASSWORD`.
 *   **Database:** PostgreSQL connection details (within Stage 1 and 4).
-*   **Pipeline:** `DOCUMENT_SOURCE` (must be consistent across stages).
+*   **Pipeline:** `DOCUMENT_SOURCE` (e.g., 'internal_cheatsheets', must be consistent across stages).
 *   **Vision Model:** `VISION_API_URL`, `VISION_MODEL_NAME`, `MAX_TOKENS` (in Stage 2).
 *   **GPT API:**
     *   OAuth: `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET`, `SCOPE` (in Stage 3).
@@ -124,4 +124,4 @@ Ensure these are installed in your Python environment (e.g., via `pip install -r
 
 ## Execution
 
-The scripts are designed to be run in sequence (Stage 1 -> Stage 5) for a given `DOCUMENT_SOURCE`. The use of the `_SKIP_SUBSEQUENT_STAGES.flag` allows subsequent stages to exit cleanly if Stage 1 determines there are no new or updated files to process. The checkpointing in Stage 3 allows it to be resumed if interrupted.
+The scripts are designed to be run in sequence (Stage 1 -> Stage 5) for a given `DOCUMENT_SOURCE` (e.g., 'internal_cheatsheets'). The use of the `_SKIP_SUBSEQUENT_STAGES.flag` allows subsequent stages to exit cleanly if Stage 1 determines there are no new or updated files to process. The checkpointing in Stage 3 allows it to be resumed if interrupted.
