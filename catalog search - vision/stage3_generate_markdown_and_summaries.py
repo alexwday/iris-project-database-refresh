@@ -7,7 +7,8 @@ import time
 import tempfile # Import for temporary CA bundle file
 from pathlib import Path
 from datetime import datetime
-from openai import AzureOpenAI, RateLimitError, APIError, AuthenticationError
+# Change import from AzureOpenAI to OpenAI
+from openai import OpenAI, RateLimitError, APIError, AuthenticationError
 from requests.exceptions import RequestException
 import backoff # For retry logic
 import sys # Import sys for sys.exit()
@@ -48,6 +49,7 @@ GPT_CONFIG = {
     "markdown_synthesis_model": "gpt-4o", # Or your preferred model
     # Model for Usage/Description Summarization (using tool calling)
     "summarization_model": "gpt-4" # Or your preferred model
+    # api_version removed as it's not used with the standard OpenAI client here
 }
 
 # --- CA Bundle Configuration ---
@@ -211,21 +213,23 @@ def get_access_token():
         raise AuthenticationError("Invalid token response format.")
 
 def initialize_gpt_client():
-    """Initializes the AzureOpenAI client with the current access token."""
+    """Initializes the standard OpenAI client with the current access token."""
     global gpt_client
     try:
         token = get_access_token()
-        # Initialize client just like in small variant
-        gpt_client = AzureOpenAI(
+        # Initialize standard OpenAI client, using api_key for the token
+        gpt_client = OpenAI(
             base_url=GPT_CONFIG['base_url'],
-            azure_ad_token=token
+            api_key=token # Use api_key for the token with the standard client
+            # api_version is typically not passed here unless specifically needed for Azure via base client
         )
-        logging.info("Azure OpenAI client initialized.")
+        logging.info("Standard OpenAI client initialized.") # Updated log message
     except AuthenticationError as e:
         logging.error(f"Authentication failed during client initialization: {e}")
         gpt_client = None # Ensure client is None if init fails
     except Exception as e:
-        logging.error(f"Unexpected error initializing Azure OpenAI client: {e}")
+        # Log error with the correct client name
+        logging.error(f"Unexpected error initializing standard OpenAI client: {e}")
         gpt_client = None
 
 # Decorator for retry logic on specific OpenAI errors
