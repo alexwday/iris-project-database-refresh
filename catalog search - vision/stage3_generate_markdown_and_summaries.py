@@ -23,26 +23,31 @@ NAS_PARAMS = {
     "user": "your_smb_user",         # Replace with actual SMB username
     "password": "your_smb_password"  # Replace with actual SMB password
 }
-# Base path on the NAS share where output JSON files will be stored
-NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
+# Base path on the NAS share where output JSON files will be stored (matching Stage 1)
+NAS_BASE_OUTPUT_FOLDER = "path/to/your/output_folder"   # e.g., path/to/your/output_folder (relative to share root)
 
 # --- Processing Configuration ---
 DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1/2 and DB
 
-# --- Azure AD / OAuth Configuration for GPT API ---
-TENANT_ID = "your_tenant_id" # Replace with actual Tenant ID
-CLIENT_ID = "your_client_id" # Replace with actual Client ID
-CLIENT_SECRET = "your_client_secret" # Replace with actual Client Secret
-TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-SCOPE = "api://your_api_scope/.default" # Replace with actual API scope, e.g., api://your-guid/.default
+# --- Azure AD / OAuth Configuration for GPT API (Matching original structure) ---
+OAUTH_CONFIG = {
+    "token_url": "YOUR_OAUTH_TOKEN_ENDPOINT_URL", # Replace with actual Token Endpoint URL
+    "client_id": "your_client_id",        # Replace with actual Client ID
+    "client_secret": "your_client_secret",  # Replace with actual Client Secret
+    "scope": "api://your_api_scope/.default" # Replace with actual API scope, e.g., api://your-guid/.default
+}
+# TOKEN_ENDPOINT is no longer needed as it's part of OAUTH_CONFIG
 
-# --- GPT API Configuration ---
-AZURE_OPENAI_ENDPOINT = "https://your-aoai-endpoint.openai.azure.com/" # Replace with actual AOAI endpoint
-API_VERSION = "2024-02-01" # Or your desired API version
-# Model for Markdown Synthesis (can be different from summarization model)
-MARKDOWN_SYNTHESIS_MODEL = "gpt-4o" # Or your preferred model
-# Model for Usage/Description Summarization (using tool calling)
-SUMMARIZATION_MODEL = "gpt-4" # Or your preferred model
+
+# --- GPT API Configuration (Matching original structure) ---
+GPT_CONFIG = {
+    "base_url": "https://your-aoai-endpoint.openai.azure.com/", # Replace with actual AOAI endpoint (Azure uses base_url)
+    "api_version": "2024-02-01", # Or your desired API version
+    # Model for Markdown Synthesis (can be different from summarization model)
+    "markdown_synthesis_model": "gpt-4o", # Or your preferred model
+    # Model for Usage/Description Summarization (using tool calling)
+    "summarization_model": "gpt-4" # Or your preferred model
+}
 
 # --- CA Bundle Configuration ---
 CA_BUNDLE_NAS_PATH = os.path.join(NAS_BASE_OUTPUT_FOLDER, "rbc-ca-bundle.cer") # Path on NAS
@@ -182,15 +187,16 @@ def get_access_token():
 
     logging.info("Requesting new OAuth access token...")
     payload = {
-        'client_id': CLIENT_ID,
-        'client_secret': CLIENT_SECRET,
-        'scope': SCOPE,
+        'client_id': OAUTH_CONFIG['client_id'],
+        'client_secret': OAUTH_CONFIG['client_secret'],
+        'scope': OAUTH_CONFIG['scope'],
         'grant_type': 'client_credentials'
     }
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
     try:
-        response = requests.post(TOKEN_ENDPOINT, data=payload, headers=headers, verify=LOCAL_CA_BUNDLE_PATH)
+        # Use token_url directly from OAUTH_CONFIG
+        response = requests.post(OAUTH_CONFIG['token_url'], data=payload, headers=headers, verify=LOCAL_CA_BUNDLE_PATH)
         response.raise_for_status()
         token_data = response.json()
         access_token = token_data['access_token']
@@ -213,9 +219,10 @@ def initialize_gpt_client():
     global gpt_client
     try:
         token = get_access_token()
+        # Use base_url for AzureOpenAI endpoint
         gpt_client = AzureOpenAI(
-            azure_endpoint=AZURE_OPENAI_ENDPOINT,
-            api_version=API_VERSION,
+            base_url=GPT_CONFIG['base_url'],
+            api_version=GPT_CONFIG['api_version'],
             azure_ad_token=token
         )
         logging.info("Azure OpenAI client initialized.")
@@ -257,7 +264,7 @@ def call_gpt_markdown_synthesis(page_vision_data, page_number):
     logging.info(f"Sending request to GPT for Markdown synthesis (Page {page_number})...")
     try:
         completion = gpt_client.chat.completions.create(
-            model=MARKDOWN_SYNTHESIS_MODEL,
+            model=GPT_CONFIG['markdown_synthesis_model'], # Use model from GPT_CONFIG
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": combined_input}
@@ -343,7 +350,7 @@ def call_gpt_summarization(api_client, markdown_content, detail_level='standard'
         ]
 
         response = api_client.chat.completions.create(
-            model=SUMMARIZATION_MODEL, # Use configured model name
+            model=GPT_CONFIG['summarization_model'], # Use model from GPT_CONFIG
             messages=messages,
             tools=[GPT_TOOL_DEFINITION], # Use the copied tool definition
             tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}}, # Force tool use
