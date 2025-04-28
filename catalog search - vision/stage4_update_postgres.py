@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+c# -*- coding: utf-8 -*-
 """
 Stage 4: Update PostgreSQL Database
 
@@ -270,43 +270,30 @@ def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_
         else:
             print(f"   Inserting {len(catalog_entries)} catalog entries into '{DB_CATALOG_TABLE}'...")
             # Define DB columns in the order they should be inserted
-            # IMPORTANT: Verify this order and naming against your actual DB schema!
-            db_catalog_cols = [
+            # Define columns in the order they appear in the table (matching small variant)
+            catalog_cols = [
                 'document_source', 'document_type', 'document_name', 'document_description',
-                'document_usage', 'date_created', 'date_last_modified', 'file_size',
-                'file_path', 'file_link', 'processed_md_path'
-                # Removed potentially redundant file_name, file_type assuming document_name/type are sufficient
+                'document_usage', 'date_created', 'date_last_modified', 'file_name',
+                'file_type', 'file_size', 'file_path', 'file_link'
             ]
-            # Define corresponding keys expected in the JSON data from Stage 3
-            json_catalog_keys = [
-                'document_source', 'document_type', 'document_name', 'description', # Maps to document_description
-                'usage', # Maps to document_usage
-                'file_creation_date_utc', # Maps to date_created
-                'file_last_modified_date_utc', # Maps to date_last_modified
-                'file_size_bytes', # Maps to file_size
-                'nas_path', # Maps to file_path
-                'nas_link', # Maps to file_link
-                'processed_md_path'
-            ]
-
-            # Prepare data tuples using JSON keys in the order of DB columns
+            # Prepare data tuples, ensuring order matches catalog_cols (matching small variant)
+            # Assumes JSON keys directly match the column names in catalog_cols
             catalog_data = []
             for entry in catalog_entries:
-                 # Fetch data using JSON keys, maintaining order of DB columns for insertion
                  # Handle potential missing keys gracefully (e.g., default to None)
-                 data_tuple = tuple(entry.get(json_key) for json_key in json_catalog_keys)
+                 # Ensure date strings are valid ISO format or handle conversion if needed
+                 data_tuple = tuple(entry.get(col) for col in catalog_cols)
                  catalog_data.append(data_tuple)
 
             if catalog_data:
                 try:
                     with conn.cursor() as cur:
-                        # Construct query using .format() and DB column names
+                        # Construct query using .format() instead of f-string (matching small variant)
                         insert_query_template = "INSERT INTO {} ({}) VALUES %s;"
-                        # Use the list of actual DB column names for the INSERT statement
-                        insert_query = insert_query_template.format(DB_CATALOG_TABLE, ", ".join(db_catalog_cols))
+                        insert_query = insert_query_template.format(DB_CATALOG_TABLE, ", ".join(catalog_cols))
 
                         psycopg2.extras.execute_values(
-                            cur, insert_query, catalog_data, template=None, page_size=100 # Pass the data tuples
+                            cur, insert_query, catalog_data, template=None, page_size=100
                         )
                         inserted_catalog_count = cur.rowcount # execute_values might not return accurate count directly, this is often total affected
                         conn.commit()
