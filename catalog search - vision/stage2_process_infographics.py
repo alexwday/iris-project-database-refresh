@@ -11,19 +11,34 @@ import time
 from pathlib import Path
 import tempfile
 
+# ==============================================================================
 # --- Configuration ---
-# TODO: Externalize configuration
-NAS_BASE_INPUT_FOLDER = "//nas_ip/share/path/to/your/base_input_folder" # e.g., //192.168.1.100/share/documents
-NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
-DOCUMENT_SOURCE = "internal_cheatsheets" # Corrected document source
-SMB_USER = os.getenv("SMB_USER", "your_smb_user")
-SMB_PASSWORD = os.getenv("SMB_PASSWORD", "your_smb_password")
+# ==============================================================================
+# NOTE: For production, externalize these settings (e.g., config file, env vars)
 
+# --- NAS Configuration ---
+# Network attached storage connection parameters (matching Stage 1 format)
+NAS_PARAMS = {
+    "ip": "your_nas_ip",             # Replace with actual NAS IP
+    "share": "your_share_name",      # Replace with actual share name
+    "user": "your_smb_user",         # Replace with actual SMB username
+    "password": "your_smb_password"  # Replace with actual SMB password
+}
+# Base path on the NAS share containing the root folders for different document sources
+NAS_BASE_INPUT_FOLDER = "//nas_ip/share/path/to/your/base_input_folder" # e.g., //192.168.1.100/share/documents
+# Base path on the NAS share where output JSON files will be stored
+NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
+
+# --- Processing Configuration ---
+DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1 and DB
+
+# --- Vision Model Configuration ---
 VISION_API_URL = 'https://your-endpoint-url/v1/chat/completions' # Replace with your actual endpoint
 VISION_MODEL_NAME = 'qwen-2-vl' # Adjust if needed
 MAX_TOKENS = 1500 # Max tokens for vision model response
+IMAGE_DPI = 150 # DPI for converting PDF pages to images
 
-# Define the 6 CO-STAR prompts using XML structure
+# --- Vision Prompts (CO-STAR Format) ---
 VISION_PROMPTS = {
     "pass1_holistic": """<prompt>
 <Context>You are analyzing a single page from a potentially multi-page infographic document. This is the first pass, aiming for a high-level understanding.</Context>
@@ -80,16 +95,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- Helper Functions ---
 
-def register_smb_credentials():
-    """Registers SMB credentials if provided."""
-    if SMB_USER and SMB_PASSWORD:
-        try:
-            smbclient.ClientConfig(username=SMB_USER, password=SMB_PASSWORD)
-            logging.info("SMB credentials registered.")
-        except Exception as e:
-            logging.error(f"Failed to register SMB credentials: {e}")
-            # Decide if this is fatal or if anonymous access might work
-            # raise e # Uncomment to make it fatal
+def initialize_smb_client():
+    """Sets up smbclient credentials using configured NAS_PARAMS."""
+    try:
+        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+        logging.info("SMB client configured successfully.")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to configure SMB client: {e}")
+        return False
 
 def encode_image(image_path):
     """Encodes an image file to base64."""
@@ -150,9 +164,17 @@ def call_vision_api(image_path, prompt_text):
 
 # --- Main Processing Logic ---
 
+# ==============================================================================
+# --- Main Processing Logic ---
+# ==============================================================================
+
 def main():
     logging.info("--- Starting Stage 2: Process Infographics ---")
-    register_smb_credentials()
+    logging.info(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+
+    if not initialize_smb_client():
+        logging.error("Exiting due to SMB client initialization failure.")
+        sys.exit(1)
 
     source_output_dir_nas = os.path.join(NAS_BASE_OUTPUT_FOLDER, DOCUMENT_SOURCE)
     stage1_output_file = os.path.join(source_output_dir_nas, "1C_nas_files_to_process.json")
@@ -247,8 +269,8 @@ def main():
                     logging.info(f"Processing Page {page_index}/{num_pages}...")
                     page = pdf_document.load_page(page_num)
 
-                    # Convert page to JPEG
-                    pix = page.get_pixmap(dpi=150) # Adjust DPI as needed
+                    # Convert page to JPEG using configured DPI
+                    pix = page.get_pixmap(dpi=IMAGE_DPI)
                     img_bytes = pix.tobytes("jpeg")
                     local_page_jpeg_path = os.path.join(local_temp_dir, f"{Path(base_filename).stem}_page_{page_index}.jpg")
 

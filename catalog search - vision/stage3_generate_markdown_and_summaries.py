@@ -10,32 +10,45 @@ from openai import AzureOpenAI, RateLimitError, APIError, AuthenticationError
 from requests.exceptions import RequestException
 import backoff # For retry logic
 
+# ==============================================================================
 # --- Configuration ---
-# TODO: Externalize configuration
+# ==============================================================================
+# NOTE: For production, externalize these settings (e.g., config file, env vars)
+
+# --- NAS Configuration ---
+# Network attached storage connection parameters (matching Stage 1 format)
+NAS_PARAMS = {
+    "ip": "your_nas_ip",             # Replace with actual NAS IP
+    "share": "your_share_name",      # Replace with actual share name
+    "user": "your_smb_user",         # Replace with actual SMB username
+    "password": "your_smb_password"  # Replace with actual SMB password
+}
+# Base path on the NAS share where output JSON files will be stored
 NAS_BASE_OUTPUT_FOLDER = "//nas_ip/share/path/to/your/output_folder"   # e.g., //192.168.1.100/share/processed
-DOCUMENT_SOURCE = "internal_cheatsheets" # Corrected document source
-SMB_USER = os.getenv("SMB_USER", "your_smb_user")
-SMB_PASSWORD = os.getenv("SMB_PASSWORD", "your_smb_password")
 
-# Azure AD / OAuth Configuration for GPT API
-TENANT_ID = os.getenv("AZURE_TENANT_ID", "your_tenant_id")
-CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "your_client_id")
-CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "your_client_secret")
+# --- Processing Configuration ---
+DOCUMENT_SOURCE = "internal_cheatsheets" # Matches the source identifier used in Stage 1/2 and DB
+
+# --- Azure AD / OAuth Configuration for GPT API ---
+TENANT_ID = "your_tenant_id" # Replace with actual Tenant ID
+CLIENT_ID = "your_client_id" # Replace with actual Client ID
+CLIENT_SECRET = "your_client_secret" # Replace with actual Client Secret
 TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-SCOPE = "api://your_api_scope/.default" # e.g., api://your-guid/.default
+SCOPE = "api://your_api_scope/.default" # Replace with actual API scope, e.g., api://your-guid/.default
 
-# GPT API Configuration
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "https://your-aoai-endpoint.openai.azure.com/")
+# --- GPT API Configuration ---
+AZURE_OPENAI_ENDPOINT = "https://your-aoai-endpoint.openai.azure.com/" # Replace with actual AOAI endpoint
 API_VERSION = "2024-02-01" # Or your desired API version
 # Model for Markdown Synthesis (can be different from summarization model)
-MARKDOWN_SYNTHESIS_MODEL = os.getenv("MARKDOWN_SYNTHESIS_MODEL", "gpt-4o") # Or your preferred model
+MARKDOWN_SYNTHESIS_MODEL = "gpt-4o" # Or your preferred model
 # Model for Usage/Description Summarization (using tool calling)
-SUMMARIZATION_MODEL = os.getenv("SUMMARIZATION_MODEL", "gpt-4") # Or your preferred model
+SUMMARIZATION_MODEL = "gpt-4" # Or your preferred model
 
-# CA Bundle Configuration
+# --- CA Bundle Configuration ---
 CA_BUNDLE_NAS_PATH = os.path.join(NAS_BASE_OUTPUT_FOLDER, "rbc-ca-bundle.cer") # Path on NAS
 LOCAL_CA_BUNDLE_PATH = "rbc-ca-bundle.cer" # Local path to save the bundle
 
+# ==============================================================================
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -46,15 +59,15 @@ gpt_client = None
 
 # --- Helper Functions ---
 
-def register_smb_credentials():
-    """Registers SMB credentials if provided."""
-    if SMB_USER and SMB_PASSWORD:
-        try:
-            smbclient.ClientConfig(username=SMB_USER, password=SMB_PASSWORD)
-            logging.info("SMB credentials registered.")
-        except Exception as e:
-            logging.error(f"Failed to register SMB credentials: {e}")
-            raise e
+def initialize_smb_client():
+    """Sets up smbclient credentials using configured NAS_PARAMS."""
+    try:
+        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
+        logging.info("SMB client configured successfully.")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to configure SMB client: {e}")
+        return False
 
 def setup_ca_bundle():
     """Downloads CA bundle from NAS and sets environment variables."""
@@ -254,9 +267,17 @@ def call_gpt_summarization(full_markdown_content, filename):
 
 # --- Main Processing Logic ---
 
+# ==============================================================================
+# --- Main Processing Logic ---
+# ==============================================================================
+
 def main():
     logging.info("--- Starting Stage 3: Generate Markdown and Summaries ---")
-    register_smb_credentials()
+    logging.info(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+
+    if not initialize_smb_client():
+        logging.error("Exiting due to SMB client initialization failure.")
+        sys.exit(1)
 
     if not setup_ca_bundle():
         logging.error("Failed to set up CA bundle. Exiting.")
