@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+c# -*- coding: utf-8 -*-
 """
 Stage 2: Process Documents with Azure Document Intelligence (using pysmb)
 
@@ -31,7 +31,7 @@ from pypdf import PdfReader, PdfWriter # For PDF handling
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
-# Removed httpx import - relying on environment variables now
+import httpx # Import httpx
 
 # Removed unused psycopg2 import
 
@@ -566,7 +566,7 @@ if __name__ == "__main__":
     proxy_set_by_script = False # Flag to track if we set the proxy vars
 
     di_client = None # Initialize DI client
-    # http_transport = None # Removed explicit httpx transport
+    http_transport = None # Initialize httpx transport variable
     initialization_error = False # Flag to track if setup fails
     should_skip = False # Flag for skipping based on Stage 1 flag
 
@@ -625,21 +625,63 @@ if __name__ == "__main__":
         else:
             print("[2] Proxy configuration disabled. Skipping proxy setup.")
 
-        # --- Initialize DI Client (Relying on Env Vars) ---
-        print("[3] Initializing Document Intelligence Client...") # Renumbered
-        try:
-            # Initialize directly, attempting to disable SSL verification
-            # WARNING: Disabling SSL verification is insecure and should only be used for temporary diagnostics.
-            print("   [WARNING] Attempting to initialize DI client with SSL verification DISABLED.")
-            di_client = DocumentIntelligenceClient(
-                endpoint=AZURE_DI_ENDPOINT,
-                credential=AzureKeyCredential(AZURE_DI_KEY),
-                connection_verify=False # Attempt to disable SSL verification
-            )
-            print("   Document Intelligence client initialized (SSL verification disabled).")
+        # --- Initialize httpx Transport ---
+        print("[3] Initializing httpx Transport...")
+        httpx_proxies = None
+        if PROXY_CONFIG.get("use_proxy"):
+            proxy_url = PROXY_CONFIG.get("url")
+            if proxy_url:
+                # httpx expects a dictionary mapping URL schemes to proxy URLs
+                httpx_proxies = {
+                    "http://": proxy_url,
+                    "https://": proxy_url,
+                }
+                print(f"   Configuring httpx transport with proxy: {proxy_url}")
+            else:
+                 print("   [WARNING] Proxy enabled but URL missing, httpx transport will not use proxy.")
 
+        # Determine SSL verification settings for httpx
+        ssl_verify_setting = True # Default: enable SSL verification
+        if temp_cert_file_path:
+            ssl_verify_setting = temp_cert_file_path # Use custom CA bundle
+            print(f"   Configuring httpx transport to use CA bundle: {temp_cert_file_path}")
+        else:
+            print("   Configuring httpx transport with default system CA bundles.")
+
+        try:
+            http_transport = httpx.Client(
+                proxies=httpx_proxies,
+                verify=ssl_verify_setting,
+                timeout=60.0 # Set a reasonable timeout
+            )
+            print("   httpx transport initialized.")
         except Exception as e:
-            print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
+            print(f"[CRITICAL ERROR] Failed to initialize httpx transport: {e}")
+            initialization_error = True # Set flag
+
+        # --- Initialize DI Client (Using httpx Transport) ---
+        if not initialization_error:
+            print("[4] Initializing Document Intelligence Client...") # Renumbered
+            try:
+                # Initialize DI client using the configured httpx transport
+                # SSL verification is handled by the transport now
+                di_client = DocumentIntelligenceClient(
+                    endpoint=AZURE_DI_ENDPOINT,
+                    credential=AzureKeyCredential(AZURE_DI_KEY),
+                    transport=http_transport # Pass the configured httpx client
+                )
+                print("   Document Intelligence client initialized using httpx transport.")
+
+            except Exception as e:
+                print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
+                initialization_error = True # Set flag
+                # Don't exit yet, let finally block run
+
+        if not initialization_error: # Proceed only if DI client initialized
+            print("-" * 60)
+
+            # --- Define Paths (Relative to Share) ---
+            print("[5] Defining NAS Paths (Relative)...") # Renumbered
             initialization_error = True # Set flag
             # Don't exit yet, let finally block run
 
@@ -678,7 +720,7 @@ if __name__ == "__main__":
 
             if not initialization_error: # Proceed only if paths defined and dir ensured
                 # --- Check for Skip Flag from Stage 1 ---
-                print("[5] Checking for skip flag from Stage 1...") # Renumbered
+                print("[6] Checking for skip flag from Stage 1...") # Renumbered
                 skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
                 skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
                 print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
@@ -708,13 +750,13 @@ if __name__ == "__main__":
     finally:
         print("\n--- Cleaning up Stage 2 ---")
 
-        # # Close the httpx transport if it was created (No longer used)
-        # if http_transport:
-        #     try:
-        #         http_transport.close()
-        #         print("   Closed httpx transport.")
-        #     except Exception as e:
-        #         print(f"   [WARNING] Error closing httpx transport: {e}")
+        # Close the httpx transport if it was created
+        if http_transport:
+            try:
+                http_transport.close()
+                print("   Closed httpx transport.")
+            except Exception as e:
+                print(f"   [WARNING] Error closing httpx transport: {e}")
 
         # Clean up the temporary certificate file
         if temp_cert_file_path and os.path.exists(temp_cert_file_path):
