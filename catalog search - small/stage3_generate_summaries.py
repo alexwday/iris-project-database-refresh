@@ -152,7 +152,7 @@ STAGE1_METADATA_FILENAME = '1C_nas_files_to_process.json'
 STAGE2_OUTPUT_SUBFOLDER = '2A_processed_files'
 STAGE3_CATALOG_OUTPUT_FILENAME = '3A_catalog_entries.json' # Renamed for clarity
 STAGE3_CONTENT_OUTPUT_FILENAME = '3B_content_entries.json' # New output file
-STAGE3_ANONYMIZATION_REPORT_FILENAME = '3C_anonymization_report.jsonl' # New report file
+STAGE3_ANONYMIZATION_REPORT_FILENAME = '3C_anonymization_report.json' # New report file (standard JSON)
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename
 
 # ==============================================================================
@@ -539,6 +539,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
         print(f"[7] Loading existing Stage 3 results (if incremental mode)...") # Renumbered
         catalog_entries = []
         content_entries = []
+        report_entries = [] # Initialize list for report entries
         processed_md_files = set()
 
         if not is_full_refresh:
@@ -563,6 +564,17 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 print(f"[CRITICAL ERROR] Existing content entries file is not a list. Found type: {type(content_entries)}. Exiting.")
                 sys.exit(1)
             print(f"   Found {len(content_entries)} existing content entries.")
+
+            # Load Anonymization Report Entries
+            print(f"   Loading anonymization report entries from: {os.path.basename(stage3_anonymization_report_smb_path)}...")
+            report_entries = read_json_from_nas(stage3_anonymization_report_smb_path)
+            if report_entries is None:
+                print("[CRITICAL ERROR] Failed to load or initialize existing anonymization report entries. Exiting.")
+                sys.exit(1)
+            if not isinstance(report_entries, list):
+                print(f"[CRITICAL ERROR] Existing anonymization report file is not a list. Found type: {type(report_entries)}. Exiting.")
+                sys.exit(1)
+            print(f"   Found {len(report_entries)} existing anonymization report entries.")
 
             # Determine processed files based on catalog entries (assuming catalog is the primary indicator)
             processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
@@ -676,14 +688,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "processed_md_path": md_smb_path # For checkpointing
                 }
 
-                # Prepare Anonymization Report Entry
-                anonymization_entry = {
-                    "processed_md_path": md_smb_path, # Link back to the processed file
-                    "document_name": original_metadata.get('file_name', md_filename), # Use original name
-                    "anonymization_details": anonymization_data # Include the extracted data
-                }
-
-                # Create Content Entry
+                # Create Content Entry (before report entry)
                 content_entry = {
                     "document_source": doc_source,
                     "document_type": doc_type,
@@ -709,23 +714,33 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 if catalog_save_success and content_save_success:
                     print(f"   Successfully saved updated catalog ({len(catalog_entries)}) and content ({len(content_entries)}) entries to NAS.")
 
-                    # Append to Anonymization Report File (.jsonl)
-                    try:
-                        # Ensure the directory exists (should be created by write_json_to_nas already, but good practice)
-                        report_dir_path = os.path.dirname(stage3_anonymization_report_smb_path)
-                        if not smbclient.path.exists(report_dir_path):
-                             create_nas_directory(report_dir_path) # Use existing helper
+                    # Prepare Anonymization Report Entry (Copy catalog entry and add DLP fields)
+                    report_entry = catalog_entry.copy() # Create a copy
+                    report_entry['dlp_anonymized_or_flagged'] = anonymization_data.get('found_anonymized', False)
+                    report_entry['dlp_findings'] = []
+                    if report_entry['dlp_anonymized_or_flagged']:
+                        for entity in anonymization_data.get('entities', []):
+                            entity_type = entity.get('entity_type', 'UNKNOWN_TYPE')
+                            raw_string = entity.get('raw_string', 'UNKNOWN_VALUE')
+                            report_entry['dlp_findings'].append(f"ANONYMIZED: {entity_type} - {raw_string}")
+                    # TODO: Add processing for other potential flags (detection_results, content_filter_results) here if needed in the future
 
-                        with smbclient.open_file(stage3_anonymization_report_smb_path, mode='a', encoding='utf-8') as f_report:
-                            json.dump(anonymization_entry, f_report) # Write the dict as a JSON line
-                            f_report.write('\n') # Add newline for JSON Lines format
-                        print(f"   Successfully appended anonymization info to: {os.path.basename(stage3_anonymization_report_smb_path)}")
-                    except smbclient.SambaClientError as report_err:
-                        print(f"   [WARNING] SMB Error appending to anonymization report file {os.path.basename(stage3_anonymization_report_smb_path)}: {report_err}")
-                    except Exception as report_err:
-                        print(f"   [WARNING] Failed to append to anonymization report file {os.path.basename(stage3_anonymization_report_smb_path)}: {report_err}")
-                        # Decide if this failure should be critical or just logged
+                    # Append and Save Anonymization Report Entry (Standard JSON list)
+                    print(f"   Appending new report entry for: {doc_name}")
+                    report_entries.append(report_entry)
+                    report_save_success = write_json_to_nas(stage3_anonymization_report_smb_path, report_entries)
 
+                    if report_save_success:
+                        print(f"   Successfully saved updated anonymization report ({len(report_entries)}) entries to NAS.")
+                    else:
+                        # Log warning but don't necessarily stop the whole process? Or make it critical?
+                        # For now, log warning and rollback the append for consistency.
+                        print(f"   [WARNING] Failed to save anonymization report file to NAS after processing {md_filename}. Report may be out of sync.")
+                        report_entries.pop() # Rollback append
+
+                    # Only increment count and mark processed if all saves were successful
+                    # (or if report save failure is considered non-critical)
+                    # Assuming report save failure is non-critical for now:
                     new_entries_count += 1
                     processed_md_files.add(md_smb_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
                 else:
@@ -753,7 +768,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             print(f"   Errors encountered: {error_count}")
             print(f"   Total entries in '{STAGE3_CATALOG_OUTPUT_FILENAME}': {len(catalog_entries)}")
             print(f"   Total entries in '{STAGE3_CONTENT_OUTPUT_FILENAME}': {len(content_entries)}")
-            print(f"   Anonymization report entries appended to: '{STAGE3_ANONYMIZATION_REPORT_FILENAME}'") # Added report info
+            print(f"   Total entries in '{STAGE3_ANONYMIZATION_REPORT_FILENAME}': {len(report_entries)}") # Updated report info
             print("="*60 + "\n")
 
             if error_count > 0:
