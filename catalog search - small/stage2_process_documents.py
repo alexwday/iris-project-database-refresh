@@ -31,6 +31,7 @@ from pypdf import PdfReader, PdfWriter # For PDF handling
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
+import httpx # Import httpx for explicit transport configuration
 
 # Removed unused psycopg2 import
 
@@ -548,6 +549,7 @@ if __name__ == "__main__":
     proxy_set_by_script = False # Flag to track if we set the proxy vars
 
     di_client = None # Initialize DI client
+    http_transport = None # Initialize httpx transport
     initialization_error = False # Flag to track if setup fails
     should_skip = False # Flag for skipping based on Stage 1 flag
 
@@ -570,7 +572,7 @@ if __name__ == "__main__":
                 temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
                 print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
 
-            # Set the environment variables
+            # Set the environment variables (still useful for other libraries)
             os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
             os.environ['SSL_CERT_FILE'] = temp_cert_file_path
             print(f"   Set REQUESTS_CA_BUNDLE environment variable.")
@@ -578,9 +580,10 @@ if __name__ == "__main__":
         else:
             print(f"   [WARNING] CA Bundle file not found or could not be read from {share_name}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
 
-        # --- Set Proxy Environment Variables (if configured) ---
+        # --- Configure Proxy for httpx ---
+        proxies = None
         if PROXY_CONFIG.get("use_proxy"):
-            print("[2] Setting up Proxy Configuration...")
+            print("[2] Configuring Proxy for HTTPX...")
             proxy_url_base = PROXY_CONFIG.get("url")
             proxy_user = PROXY_CONFIG.get("username")
             proxy_pass = PROXY_CONFIG.get("password")
@@ -588,7 +591,6 @@ if __name__ == "__main__":
 
             if proxy_user and proxy_pass and proxy_url_base:
                 # Construct URL with authentication if user/pass provided
-                # Assumes URL format like http://host:port
                 protocol, rest = proxy_url_base.split("://", 1)
                 proxy_string = f"{protocol}://{proxy_user}:{proxy_pass}@{rest}"
                 print("   Configuring proxy with authentication.")
@@ -599,45 +601,39 @@ if __name__ == "__main__":
                 proxy_string = None
 
             if proxy_string:
+                # httpx expects a dictionary for proxies
+                proxies = {
+                    "http://": proxy_string,
+                    "https://": proxy_string,
+                }
+                print(f"   Proxy dictionary configured for httpx.")
+                # Also set environment variables for broader compatibility
                 os.environ['HTTP_PROXY'] = proxy_string
                 os.environ['HTTPS_PROXY'] = proxy_string
                 proxy_set_by_script = True
                 print(f"   Set HTTP_PROXY and HTTPS_PROXY environment variables.")
         else:
-            print("[2] Proxy configuration disabled. Skipping proxy setup.")
+            print("[2] Proxy configuration disabled.")
 
-        # --- Initialize DI Client (AFTER setting env vars) ---
+        # --- Initialize DI Client (using httpx transport) ---
         print("[3] Initializing Document Intelligence Client...") # Renumbered
         try:
-            # Determine the SSL verification setting
-            # Use the downloaded temp cert path if available, otherwise default to True (use system CAs)
+            # Determine the SSL verification setting for httpx
             ssl_verify_setting = temp_cert_file_path if temp_cert_file_path and os.path.exists(temp_cert_file_path) else True
-            print(f"   Using SSL verification setting: {ssl_verify_setting}")
+            print(f"   Using SSL verification setting for httpx: {ssl_verify_setting}")
 
-            # Attempt to pass the verify setting via kwargs
-            # This assumes the underlying transport layer (e.g., requests) accepts this
+            # Create httpx client with proxy and SSL settings
+            http_transport = httpx.Client(proxies=proxies, verify=ssl_verify_setting)
+            print(f"   Created httpx transport with proxy and verify settings.")
+
+            # Initialize DI client with the custom transport
             di_client = DocumentIntelligenceClient(
                 endpoint=AZURE_DI_ENDPOINT,
                 credential=AzureKeyCredential(AZURE_DI_KEY),
-                verify=ssl_verify_setting # Explicitly pass verify setting
+                transport=http_transport
             )
-            print("Document Intelligence client initialized successfully.")
-        except TypeError as te:
-             # Handle case where 'verify' is not an expected keyword argument
-             if 'unexpected keyword argument \'verify\'' in str(te):
-                 print("   [WARNING] DocumentIntelligenceClient does not accept 'verify' kwarg directly. Attempting initialization without it (relying on env vars).")
-                 try:
-                     di_client = DocumentIntelligenceClient(
-                         endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
-                     )
-                     print("   Document Intelligence client initialized successfully (without explicit verify kwarg).")
-                 except Exception as e_fallback:
-                     print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client (fallback attempt): {e_fallback}")
-                     initialization_error = True # Set flag
-             else:
-                 # Re-raise other TypeErrors
-                 print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client (TypeError): {te}")
-                 initialization_error = True # Set flag
+            print("Document Intelligence client initialized successfully using custom transport.")
+
         except Exception as e:
             print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
             initialization_error = True # Set flag
@@ -707,6 +703,15 @@ if __name__ == "__main__":
     # --- Cleanup (Executes regardless of success/failure in the try block) ---
     finally:
         print("\n--- Cleaning up Stage 2 ---")
+
+        # Close the httpx transport if it was created
+        if http_transport:
+            try:
+                http_transport.close()
+                print("   Closed httpx transport.")
+            except Exception as e:
+                print(f"   [WARNING] Error closing httpx transport: {e}")
+
         # Clean up the temporary certificate file
         if temp_cert_file_path and os.path.exists(temp_cert_file_path):
             try:
