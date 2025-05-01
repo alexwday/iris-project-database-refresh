@@ -650,7 +650,7 @@ if __name__ == "__main__":
 
         try:
             http_transport = httpx.Client(
-                proxies=httpx_proxies,
+                proxy=httpx_proxies, # Corrected keyword argument
                 verify=ssl_verify_setting,
                 timeout=60.0 # Set a reasonable timeout
             )
