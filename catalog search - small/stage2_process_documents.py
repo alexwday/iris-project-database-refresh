@@ -31,7 +31,7 @@ from pypdf import PdfReader, PdfWriter # For PDF handling
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
-import httpx # Import httpx
+# Removed httpx import
 
 # Removed unused psycopg2 import
 
@@ -566,7 +566,7 @@ if __name__ == "__main__":
     proxy_set_by_script = False # Flag to track if we set the proxy vars
 
     di_client = None # Initialize DI client
-    http_transport = None # Initialize httpx transport variable
+    # http_transport = None # Removed httpx transport variable
     initialization_error = False # Flag to track if setup fails
     should_skip = False # Flag for skipping based on Stage 1 flag
 
@@ -616,8 +616,8 @@ if __name__ == "__main__":
                 print("   [WARNING] Proxy use enabled but proxy URL is not configured. Skipping proxy setup.")
                 proxy_string = None
 
+            # Restore setting environment variables
             if proxy_string:
-                # Set environment variables for libraries like requests to pick up
                 os.environ['HTTP_PROXY'] = proxy_string
                 os.environ['HTTPS_PROXY'] = proxy_string
                 proxy_set_by_script = True
@@ -625,57 +625,25 @@ if __name__ == "__main__":
         else:
             print("[2] Proxy configuration disabled. Skipping proxy setup.")
 
-        # --- Initialize httpx Transport ---
-        print("[3] Initializing httpx Transport...")
-        httpx_proxies = None
-        if PROXY_CONFIG.get("use_proxy"):
-            proxy_url = PROXY_CONFIG.get("url")
-            if proxy_url:
-                # httpx expects a dictionary mapping URL schemes to proxy URLs
-                httpx_proxies = {
-                    "http://": proxy_url,
-                    "https://": proxy_url,
-                }
-                print(f"   Configuring httpx transport with proxy: {proxy_url}")
-            else:
-                 print("   [WARNING] Proxy enabled but URL missing, httpx transport will not use proxy.")
-
-        # Determine SSL verification settings for httpx
-        ssl_verify_setting = True # Default: enable SSL verification
-        if temp_cert_file_path:
-            ssl_verify_setting = temp_cert_file_path # Use custom CA bundle
-            print(f"   Configuring httpx transport to use CA bundle: {temp_cert_file_path}")
-        else:
-            print("   Configuring httpx transport with default system CA bundles.")
-
+        # --- Initialize DI Client (Relying on Environment Variables) ---
+        # Removed explicit httpx transport initialization
+        print("[3] Initializing Document Intelligence Client...") # Renumbered
         try:
-            http_transport = httpx.Client(
-                proxy=httpx_proxies, # Corrected keyword argument
-                verify=ssl_verify_setting,
-                timeout=60.0 # Set a reasonable timeout
+            # Initialize DI client directly. It should pick up the proxy and CA bundle
+            # environment variables set earlier (HTTPS_PROXY, SSL_CERT_FILE/REQUESTS_CA_BUNDLE).
+            # Do NOT disable SSL verification here (remove connection_verify=False).
+            di_client = DocumentIntelligenceClient(
+                endpoint=AZURE_DI_ENDPOINT,
+                credential=AzureKeyCredential(AZURE_DI_KEY)
+                # No transport argument, let the SDK handle it.
+                # No connection_verify=False, let it use the CA bundle from env vars.
             )
-            print("   httpx transport initialized.")
+            print("   Document Intelligence client initialized (relying on environment variables for proxy/CA).")
+
         except Exception as e:
-            print(f"[CRITICAL ERROR] Failed to initialize httpx transport: {e}")
+            print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
             initialization_error = True # Set flag
-
-        # --- Initialize DI Client (Using httpx Transport) ---
-        if not initialization_error:
-            print("[4] Initializing Document Intelligence Client...") # Renumbered
-            try:
-                # Initialize DI client using the configured httpx transport
-                # SSL verification is handled by the transport now
-                di_client = DocumentIntelligenceClient(
-                    endpoint=AZURE_DI_ENDPOINT,
-                    credential=AzureKeyCredential(AZURE_DI_KEY),
-                    transport=http_transport # Pass the configured httpx client
-                )
-                print("   Document Intelligence client initialized using httpx transport.")
-
-            except Exception as e:
-                print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
-                initialization_error = True # Set flag
-                # Don't exit yet, let finally block run
+            # Don't exit yet, let finally block run
 
         if not initialization_error: # Proceed only if DI client initialized
             print("-" * 60)
@@ -750,13 +718,13 @@ if __name__ == "__main__":
     finally:
         print("\n--- Cleaning up Stage 2 ---")
 
-        # Close the httpx transport if it was created
-        if http_transport:
-            try:
-                http_transport.close()
-                print("   Closed httpx transport.")
-            except Exception as e:
-                print(f"   [WARNING] Error closing httpx transport: {e}")
+        # Close the httpx transport - No longer needed as transport is not explicitly created
+        # if http_transport:
+        #     try:
+        #         http_transport.close()
+        #         print("   Closed httpx transport.")
+        #     except Exception as e:
+        #         print(f"   [WARNING] Error closing httpx transport: {e}")
 
         # Clean up the temporary certificate file
         if temp_cert_file_path and os.path.exists(temp_cert_file_path):
