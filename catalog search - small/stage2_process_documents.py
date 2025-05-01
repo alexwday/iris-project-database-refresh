@@ -568,10 +568,35 @@ if __name__ == "__main__":
         # --- Initialize DI Client (AFTER setting env vars) ---
         print("[2] Initializing Document Intelligence Client...")
         try:
+            # Determine the SSL verification setting
+            # Use the downloaded temp cert path if available, otherwise default to True (use system CAs)
+            ssl_verify_setting = temp_cert_file_path if temp_cert_file_path and os.path.exists(temp_cert_file_path) else True
+            print(f"   Using SSL verification setting: {ssl_verify_setting}")
+
+            # Attempt to pass the verify setting via kwargs
+            # This assumes the underlying transport layer (e.g., requests) accepts this
             di_client = DocumentIntelligenceClient(
-                endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
+                endpoint=AZURE_DI_ENDPOINT,
+                credential=AzureKeyCredential(AZURE_DI_KEY),
+                verify=ssl_verify_setting # Explicitly pass verify setting
             )
             print("Document Intelligence client initialized successfully.")
+        except TypeError as te:
+             # Handle case where 'verify' is not an expected keyword argument
+             if 'unexpected keyword argument \'verify\'' in str(te):
+                 print("   [WARNING] DocumentIntelligenceClient does not accept 'verify' kwarg directly. Attempting initialization without it (relying on env vars).")
+                 try:
+                     di_client = DocumentIntelligenceClient(
+                         endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
+                     )
+                     print("   Document Intelligence client initialized successfully (without explicit verify kwarg).")
+                 except Exception as e_fallback:
+                     print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client (fallback attempt): {e_fallback}")
+                     initialization_error = True # Set flag
+             else:
+                 # Re-raise other TypeErrors
+                 print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client (TypeError): {te}")
+                 initialization_error = True # Set flag
         except Exception as e:
             print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
             initialization_error = True # Set flag
