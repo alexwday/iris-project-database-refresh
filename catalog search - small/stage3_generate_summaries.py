@@ -152,6 +152,7 @@ STAGE1_METADATA_FILENAME = '1C_nas_files_to_process.json'
 STAGE2_OUTPUT_SUBFOLDER = '2A_processed_files'
 STAGE3_CATALOG_OUTPUT_FILENAME = '3A_catalog_entries.json' # Renamed for clarity
 STAGE3_CONTENT_OUTPUT_FILENAME = '3B_content_entries.json' # New output file
+STAGE3_ANONYMIZATION_REPORT_FILENAME = '3C_anonymization_report.jsonl' # New report file
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename
 
 # ==============================================================================
@@ -336,7 +337,7 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         document_source (str): The source identifier for context in the prompt.
 
     Returns:
-        tuple: (description, usage) strings, or (None, None) on failure.
+        tuple: (description, usage, analyzer_results_data) strings/dict, or (None, None, None) on failure.
     """
     print(f"   Calling GPT model for summarization (Detail Level: {detail_level})...")
     try:
@@ -369,9 +370,29 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
             tools=[GPT_TOOL_DEFINITION],
             tool_choice={"type": "function", "function": {"name": GPT_TOOL_DEFINITION['function']['name']}}, # Force tool use with updated name
             max_tokens=2048, # Add max_tokens
-            temperature=0.2  # Add temperature
+            temperature=0.2,  # Add temperature
+            extra_query={"is_stateful_dlp": True} # Enable entity detection/anonymization
             # Consider adjusting max_tokens based on detail_level if necessary (2048 should be sufficient for now)
         )
+
+        # --- Process analyzer_results if they exist ---
+        analyzer_results_data = {
+            'found_anonymized': False,
+            'entities': []
+        }
+        if hasattr(response, 'analyzer_results') and isinstance(response.analyzer_results, list):
+            print("   Processing analyzer_results...")
+            for result in response.analyzer_results:
+                if isinstance(result, dict) and result.get('anonymized', False): # Check type and value
+                    analyzer_results_data['found_anonymized'] = True
+                    analyzer_results_data['entities'].append({
+                        'entity_type': result.get('entity_type'),
+                        'raw_string': result.get('raw_string')
+                    })
+            print(f"   Anonymized Entities Found: {analyzer_results_data['found_anonymized']}")
+        else:
+            print("   No analyzer_results found or not in expected format.")
+        # --- End of analyzer_results processing ---
 
         # --- Process Response ---
         response_message = response.choices[0].message
@@ -390,33 +411,33 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
 
                     if description is not None and usage is not None: # Check for presence, even if empty string is valid
                         print("   GPT successfully returned summaries via tool call.")
-                        # Return in the order: description, usage
-                        return description, usage
+                        # Return in the order: description, usage, and anonymization data
+                        return description, usage, analyzer_results_data
                     else:
                         # Use updated keys in error message
                         print(f"   [ERROR] GPT tool call arguments missing 'usage' or 'description'. Arguments: {arguments}")
-                        return None, None
+                        return None, None, None
                 except json.JSONDecodeError as e:
                     print(f"   [ERROR] Failed to parse GPT tool call arguments JSON: {e}. Arguments: {tool_call.function.arguments}")
-                    return None, None
+                    return None, None, None
                 except Exception as e:
                     print(f"   [ERROR] Unexpected error processing GPT tool call arguments: {e}")
-                    return None, None
+                    return None, None, None
             else:
                 # Use updated tool name in error message
                 print(f"   [ERROR] GPT called unexpected tool: {tool_call.function.name}")
-                return None, None
+                return None, None, None
         else:
             # Handle case where the model didn't use the tool (e.g., replied directly)
             print(f"   [ERROR] GPT did not use the required tool. Response content: {response_message.content}")
             # Potentially try to extract from content if fallback is desired, but tool use was requested.
-            return None, None
+            return None, None, None
 
     except Exception as e:
         # Catch potential API errors (authentication, connection, rate limits, etc.)
         print(f"   [ERROR] Failed to call GPT model: {type(e).__name__} - {e}")
         # Consider more specific error handling based on openai library exceptions if needed
-        return None, None
+        return None, None, None
 
 # ==============================================================================
 # --- Main Processing Function ---
@@ -424,7 +445,8 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
 
 def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                            stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                           ca_bundle_smb_path, refresh_flag_smb_path): # Added refresh_flag_smb_path
+                           stage3_anonymization_report_smb_path, # Added report path
+                           ca_bundle_smb_path, refresh_flag_smb_path):
     """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
     print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
@@ -472,7 +494,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 is_full_refresh = True
                 # Delete existing Stage 3 output files
                 print("   Deleting existing Stage 3 output files (if they exist)...")
-                for file_path in [stage3_catalog_output_smb_path, stage3_content_output_smb_path]:
+                for file_path in [stage3_catalog_output_smb_path, stage3_content_output_smb_path, stage3_anonymization_report_smb_path]: # Added report path
                     try:
                         if smbclient.path.exists(file_path):
                             smbclient.remove(file_path)
@@ -609,11 +631,11 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 # --- Call GPT Summarizer (with detail level and source) ---
                 # Set detail level based on document source
                 current_detail_level = 'standard'
-                description, usage = call_gpt_summarizer(client, markdown_content, current_detail_level, DOCUMENT_SOURCE)
+                description, usage, anonymization_data = call_gpt_summarizer(client, markdown_content, current_detail_level, DOCUMENT_SOURCE)
 
                 # Check if None was returned (indicates an error in call_gpt_summarizer)
-                if description is None or usage is None:
-                    print(f"   [ERROR] Failed to get summaries from GPT for {md_smb_path} (check logs from call_gpt_summarizer). Skipping file.")
+                if description is None or usage is None or anonymization_data is None:
+                    print(f"   [ERROR] Failed to get summaries or anonymization data from GPT for {md_smb_path}. Skipping file.")
                     error_count += 1
                     continue # Skip if summarization fails
 
@@ -654,6 +676,13 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "processed_md_path": md_smb_path # For checkpointing
                 }
 
+                # Prepare Anonymization Report Entry
+                anonymization_entry = {
+                    "processed_md_path": md_smb_path, # Link back to the processed file
+                    "document_name": original_metadata.get('file_name', md_filename), # Use original name
+                    "anonymization_details": anonymization_data # Include the extracted data
+                }
+
                 # Create Content Entry
                 content_entry = {
                     "document_source": doc_source,
@@ -679,10 +708,28 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
 
                 if catalog_save_success and content_save_success:
                     print(f"   Successfully saved updated catalog ({len(catalog_entries)}) and content ({len(content_entries)}) entries to NAS.")
+
+                    # Append to Anonymization Report File (.jsonl)
+                    try:
+                        # Ensure the directory exists (should be created by write_json_to_nas already, but good practice)
+                        report_dir_path = os.path.dirname(stage3_anonymization_report_smb_path)
+                        if not smbclient.path.exists(report_dir_path):
+                             create_nas_directory(report_dir_path) # Use existing helper
+
+                        with smbclient.open_file(stage3_anonymization_report_smb_path, mode='a', encoding='utf-8') as f_report:
+                            json.dump(anonymization_entry, f_report) # Write the dict as a JSON line
+                            f_report.write('\n') # Add newline for JSON Lines format
+                        print(f"   Successfully appended anonymization info to: {os.path.basename(stage3_anonymization_report_smb_path)}")
+                    except smbclient.SambaClientError as report_err:
+                        print(f"   [WARNING] SMB Error appending to anonymization report file {os.path.basename(stage3_anonymization_report_smb_path)}: {report_err}")
+                    except Exception as report_err:
+                        print(f"   [WARNING] Failed to append to anonymization report file {os.path.basename(stage3_anonymization_report_smb_path)}: {report_err}")
+                        # Decide if this failure should be critical or just logged
+
                     new_entries_count += 1
-                    processed_md_files.add(md_smb_path) # Mark as processed only if both saved
+                    processed_md_files.add(md_smb_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
                 else:
-                    print(f"   [CRITICAL ERROR] Failed to save one or both output files to NAS after processing {md_filename}. Stopping.")
+                    print(f"   [CRITICAL ERROR] Failed to save one or both primary output files (catalog/content) to NAS after processing {md_filename}. Stopping.")
                     error_count += 1
                     # Rollback the appends for consistency before exiting
                     catalog_entries.pop()
@@ -706,6 +753,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             print(f"   Errors encountered: {error_count}")
             print(f"   Total entries in '{STAGE3_CATALOG_OUTPUT_FILENAME}': {len(catalog_entries)}")
             print(f"   Total entries in '{STAGE3_CONTENT_OUTPUT_FILENAME}': {len(content_entries)}")
+            print(f"   Anonymization report entries appended to: '{STAGE3_ANONYMIZATION_REPORT_FILENAME}'") # Added report info
             print("="*60 + "\n")
 
             if error_count > 0:
@@ -781,6 +829,7 @@ if __name__ == "__main__":
     stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
     stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Updated path
     stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # New path
+    stage3_anonymization_report_smb_path = os.path.join(source_base_dir_smb, STAGE3_ANONYMIZATION_REPORT_FILENAME).replace('\\', '/') # New report path
     ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
 
     print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
@@ -788,6 +837,7 @@ if __name__ == "__main__":
     print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
     print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
     print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
+    print(f"   Stage 3 Anonymization Report (SMB): {stage3_anonymization_report_smb_path}") # New print
     print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
     # Add Refresh Flag Path
     refresh_flag_file_name = '_FULL_REFRESH.flag'
@@ -826,6 +876,7 @@ if __name__ == "__main__":
         # Call the main processing function only if not skipping
         main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                                stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                               ca_bundle_smb_path, refresh_flag_smb_path) # Pass refresh flag path
+                               stage3_anonymization_report_smb_path, # Pass new report path
+                               ca_bundle_smb_path, refresh_flag_smb_path)
 
     # Script ends naturally here if skipped or after main_processing completes
