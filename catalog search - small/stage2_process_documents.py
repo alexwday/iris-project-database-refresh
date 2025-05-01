@@ -210,20 +210,22 @@ def check_nas_path_exists(share_name, nas_path_relative):
         if not conn:
             return False # Cannot check if connection failed
 
-        # listPath will raise exception if path doesn't exist
-        conn.listPath(share_name, nas_path_relative)
+        # Use getAttributes to check existence - works for files and dirs
+        # It will raise an OperationFailure exception if the path does not exist.
+        conn.getAttributes(share_name, nas_path_relative)
         # print(f"   Path exists: {share_name}/{nas_path_relative}") # Verbose
-        return True
+        return True # Path exists if no exception was raised
     except Exception as e:
-        # Check if the error indicates "No such file" or similar (pysmb exceptions can vary)
-        # This is not perfectly reliable but a common pattern
+        # Check if the error message indicates "No such file" or similar
+        # pysmb often raises OperationFailure with specific NTSTATUS codes.
+        # STATUS_OBJECT_NAME_NOT_FOUND (0xC0000034) is common.
         err_str = str(e).lower()
-        if "no such file" in err_str or "object_name_not_found" in err_str or "does not exist" in err_str:
+        if "no such file" in err_str or "object_name_not_found" in err_str or "0xc0000034" in err_str:
             # print(f"   Path does not exist: {share_name}/{nas_path_relative}") # Verbose
-            return False
+            return False # Expected outcome if the file/path doesn't exist
         else:
-            # Log other errors but might cautiously return False or True depending on desired behavior
-            print(f"   [WARNING] Error checking existence of NAS path '{share_name}/{nas_path_relative}': {e}")
+            # Log other unexpected errors during the check
+            print(f"   [WARNING] Unexpected error checking existence of NAS path '{share_name}/{nas_path_relative}': {type(e).__name__} - {e}")
             return False # Assume not found on other errors
     finally:
         if conn:
