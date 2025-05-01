@@ -243,24 +243,41 @@ def check_nas_path_exists(share_name, nas_path_relative):
 
 # --- Other Helper Functions (Unchanged) ---
 
-def analyze_document_with_di(di_client, local_file_path, output_format=DocumentContentFormat.MARKDOWN):
-    """Analyzes a local document using Azure Document Intelligence layout model."""
+def analyze_document_with_di(di_client, local_file_path, output_format=DocumentContentFormat.MARKDOWN, max_retries=3, retry_delay=5):
+    """
+    Analyzes a local document using Azure Document Intelligence layout model,
+    with retry logic for transient errors like SSLEOFError.
+    """
     print(f"   Analyzing local file with DI: {local_file_path}")
-    try:
-        with open(local_file_path, "rb") as f:
-            document_bytes = f.read()
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            print(f"      DI Analysis Attempt {attempt + 1}/{max_retries}...")
+            with open(local_file_path, "rb") as f:
+                document_bytes = f.read()
 
-        poller = di_client.begin_analyze_document(
-            "prebuilt-layout",
-            document_bytes,
-            output_content_format=output_format
-        )
-        result = poller.result()
-        print(f"   DI analysis successful.")
-        return result
-    except Exception as e:
-        print(f"   [ERROR] Document Intelligence analysis failed for {local_file_path}: {type(e).__name__} - {e}")
-        return None
+            poller = di_client.begin_analyze_document(
+                "prebuilt-layout",
+                document_bytes,
+                output_content_format=output_format
+            )
+            result = poller.result() # This is where the network call happens and might fail
+            print(f"   DI analysis successful on attempt {attempt + 1}.")
+            return result
+        except Exception as e:
+            last_exception = e
+            print(f"   [Attempt {attempt + 1} ERROR] DI analysis failed for {local_file_path}: {type(e).__name__} - {e}")
+            # Check if it's the last attempt
+            if attempt < max_retries - 1:
+                print(f"      Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(f"   [ERROR] DI analysis failed after {max_retries} attempts.")
+                break # Exit loop after final attempt fails
+
+    # If loop finishes without returning, it means all retries failed
+    return None
+
 
 def split_pdf(local_pdf_path, chunk_size, temp_dir):
     """Splits a PDF into chunks of a specified size."""
@@ -611,12 +628,15 @@ if __name__ == "__main__":
         # --- Initialize DI Client (Relying on Env Vars) ---
         print("[3] Initializing Document Intelligence Client...") # Renumbered
         try:
-            # Initialize directly, assuming SDK respects env vars for proxy/SSL
+            # Initialize directly, attempting to disable SSL verification
+            # WARNING: Disabling SSL verification is insecure and should only be used for temporary diagnostics.
+            print("   [WARNING] Attempting to initialize DI client with SSL verification DISABLED.")
             di_client = DocumentIntelligenceClient(
                 endpoint=AZURE_DI_ENDPOINT,
-                credential=AzureKeyCredential(AZURE_DI_KEY)
+                credential=AzureKeyCredential(AZURE_DI_KEY),
+                connection_verify=False # Attempt to disable SSL verification
             )
-            print("Document Intelligence client initialized successfully (using default transport).")
+            print("   Document Intelligence client initialized (SSL verification disabled).")
 
         except Exception as e:
             print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
