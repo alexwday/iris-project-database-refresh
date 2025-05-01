@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Stage 2: Process Documents with Azure Document Intelligence
+Stage 2: Process Documents with Azure Document Intelligence (using pysmb)
 
 This script takes the list of files identified in Stage 1
 (from '1C_nas_files_to_process.json') and processes each file
@@ -12,7 +12,7 @@ It handles large PDF files (>2000 pages) by splitting them into
 recombining the Markdown output.
 
 Outputs for each processed file (Markdown and full analysis JSON)
-are stored in a structured directory on the NAS.
+are stored in a structured directory on the NAS using pysmb.
 """
 
 import os
@@ -21,11 +21,18 @@ import json
 import tempfile
 import time
 from datetime import datetime, timezone
-import smbclient
+# --- Use pysmb instead of smbclient ---
+from smb.SMBConnection import SMBConnection
+from smb import smb_structs
+import io # For reading/writing strings/bytes to NAS
+import socket # For gethostname
+# --- End pysmb import ---
 from pypdf import PdfReader, PdfWriter # For PDF handling
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat # Corrected import
+from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, DocumentContentFormat
+
+# Removed unused psycopg2 import
 
 # ==============================================================================
 # --- Configuration ---
@@ -42,99 +49,201 @@ NAS_PARAMS = {
     "ip": "your_nas_ip",
     "share": "your_share_name",
     "user": "your_nas_user",
-    "password": "your_nas_password"
+    "password": "your_nas_password",
+    "port": 445 # Default SMB port (can be 139)
 }
 # Base path on the NAS share where Stage 1 output files were stored
-NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
+NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # Relative path from share root
 
 # --- Processing Configuration (Should match Stage 1) ---
 # Define the specific document source processed in Stage 1.
 DOCUMENT_SOURCE = 'internal_esg' # From Stage 1
-DB_TABLE_NAME = 'apg_catalog'    # From Stage 1 (Potentially needed for context, maybe not)
+# DB_TABLE_NAME = 'apg_catalog'    # From Stage 1 (Not used in Stage 2)
 
 # PDF Processing Configuration
 PDF_PAGE_LIMIT = 2000
 PDF_CHUNK_SIZE = 1000
 
+# --- pysmb Configuration ---
+# Increase timeout for potentially slow NAS operations
+smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
+smb_structs.MAX_PAYLOAD_SIZE = 65536 # Can sometimes help with large directories
+CLIENT_HOSTNAME = socket.gethostname() # Get local machine name for SMB connection
+
 # ==============================================================================
-# --- Helper Functions ---
+# --- Helper Functions (pysmb versions) ---
 # ==============================================================================
 
-def initialize_smb_client():
-    """Sets up smbclient credentials."""
+def create_nas_connection():
+    """Creates and returns an authenticated SMBConnection object."""
     try:
-        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        print("SMB client configured successfully.")
-        return True
+        conn = SMBConnection(
+            NAS_PARAMS["user"],
+            NAS_PARAMS["password"],
+            CLIENT_HOSTNAME, # Local machine name
+            NAS_PARAMS["ip"], # Remote server name (can be IP)
+            use_ntlm_v2=True,
+            is_direct_tcp=(NAS_PARAMS["port"] == 445) # Use direct TCP if port 445
+        )
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60) # Increased timeout
+        if not connected:
+            print("   [ERROR] Failed to connect to NAS.")
+            return None
+        # print(f"   Successfully connected to NAS: {NAS_PARAMS['ip']}:{NAS_PARAMS['port']} on share '{NAS_PARAMS['share']}'") # Reduce verbosity
+        return conn
     except Exception as e:
-        print(f"[ERROR] Failed to configure SMB client: {e}")
-        return False
-
-def create_nas_directory(smb_dir_path):
-    """Creates a directory on the NAS if it doesn't exist."""
-    try:
-        if not smbclient.path.exists(smb_dir_path):
-            print(f"   Creating NAS directory: {smb_dir_path}")
-            smbclient.makedirs(smb_dir_path, exist_ok=True)
-            print(f"   Successfully created directory.")
-        else:
-            # print(f"   NAS directory already exists: {smb_dir_path}") # Optional: reduce verbosity
-            pass
-        return True
-    except Exception as e: # General exception will catch SMB errors too
-        print(f"   [ERROR] Unexpected error creating/accessing NAS directory '{smb_dir_path}': {e}")
-        return False
-
-def write_to_nas(smb_path, content_bytes):
-    """Writes bytes to a file path on the NAS using smbclient."""
-    print(f"   Attempting to write to NAS path: {smb_path}")
-    try:
-        # Ensure the directory exists first (redundant if create_nas_directory called before, but safe)
-        dir_path = os.path.dirname(smb_path)
-        if not create_nas_directory(dir_path):
-            return False # Failed to create directory
-
-        with smbclient.open_file(smb_path, mode='wb') as f: # Write in binary mode
-            f.write(content_bytes)
-        print(f"   Successfully wrote {len(content_bytes)} bytes to: {smb_path}")
-        return True
-    except Exception as e: # General exception will catch SMB errors too
-        print(f"   [ERROR] Unexpected error writing to NAS '{smb_path}': {e}")
-        return False
-
-def download_from_nas(smb_path, local_temp_dir):
-    """Downloads a file from NAS to a local temporary directory."""
-    local_file_path = os.path.join(local_temp_dir, os.path.basename(smb_path))
-    print(f"   Attempting to download from NAS: {smb_path} to {local_file_path}")
-    try:
-        with smbclient.open_file(smb_path, mode='rb') as nas_f:
-            with open(local_file_path, 'wb') as local_f:
-                local_f.write(nas_f.read())
-        print(f"   Successfully downloaded to: {local_file_path}")
-        return local_file_path
-    except Exception as e: # General exception will catch SMB errors too
-        print(f"   [ERROR] Unexpected error downloading from NAS '{smb_path}': {e}")
+        print(f"   [ERROR] Exception creating NAS connection: {e}")
         return None
 
-def analyze_document_with_di(di_client, local_file_path, output_format=DocumentContentFormat.MARKDOWN): # Corrected usage
+def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
+    """Ensures a directory exists on the NAS, creating it if necessary."""
+    if not conn:
+        print("   [ERROR] Cannot ensure NAS directory: No connection.")
+        return False
+    
+    # pysmb needs paths relative to the share, using '/' as separator
+    path_parts = dir_path_relative.strip('/').split('/')
+    current_path = ''
+    try:
+        for part in path_parts:
+            if not part: continue
+            current_path = os.path.join(current_path, part).replace('\\', '/')
+            try:
+                # Check if it exists by trying to list it
+                conn.listPath(share_name, current_path)
+                # print(f"      Directory exists: {current_path}") # Reduce verbosity
+            except Exception: # If listPath fails, assume it doesn't exist
+                print(f"      Creating directory on NAS: {share_name}/{current_path}")
+                conn.createDirectory(share_name, current_path)
+        return True
+    except Exception as e:
+        print(f"   [ERROR] Failed to ensure/create NAS directory '{share_name}/{dir_path_relative}': {e}")
+        return False
+
+def write_to_nas(share_name, nas_path_relative, content_bytes):
+    """Writes bytes to a file path on the NAS using pysmb."""
+    conn = None
+    print(f"   Attempting to write to NAS path: {share_name}/{nas_path_relative}")
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False
+
+        # Ensure the directory exists before writing the file
+        dir_path = os.path.dirname(nas_path_relative).replace('\\', '/')
+        if dir_path and not ensure_nas_dir_exists(conn, share_name, dir_path):
+             print(f"   [ERROR] Failed to ensure output directory exists: {dir_path}")
+             return False
+
+        # Use BytesIO for pysmb storeFile
+        file_obj = io.BytesIO(content_bytes)
+
+        # Store the file
+        bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
+        print(f"   Successfully wrote {bytes_written} bytes to: {share_name}/{nas_path_relative}")
+        return True
+    except Exception as e:
+        print(f"   [ERROR] Unexpected error writing to NAS '{share_name}/{nas_path_relative}': {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def read_from_nas(share_name, nas_path_relative):
+    """Reads content (as bytes) from a file path on the NAS using pysmb."""
+    conn = None
+    print(f"   Attempting to read from NAS path: {share_name}/{nas_path_relative}")
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return None
+
+        file_obj = io.BytesIO()
+        file_attributes, filesize = conn.retrieveFile(share_name, nas_path_relative, file_obj)
+        file_obj.seek(0)
+        content_bytes = file_obj.read()
+        print(f"   Successfully read {filesize} bytes from: {share_name}/{nas_path_relative}")
+        return content_bytes
+    except Exception as e:
+        print(f"   [ERROR] Unexpected error reading from NAS '{share_name}/{nas_path_relative}': {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def download_from_nas(share_name, nas_path_relative, local_temp_dir):
+    """Downloads a file from NAS to a local temporary directory using pysmb."""
+    local_file_path = os.path.join(local_temp_dir, os.path.basename(nas_path_relative))
+    print(f"   Attempting to download from NAS: {share_name}/{nas_path_relative} to {local_file_path}")
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return None
+
+        with open(local_file_path, 'wb') as local_f:
+            file_attributes, filesize = conn.retrieveFile(share_name, nas_path_relative, local_f)
+        print(f"   Successfully downloaded {filesize} bytes to: {local_file_path}")
+        return local_file_path
+    except Exception as e:
+        print(f"   [ERROR] Unexpected error downloading from NAS '{share_name}/{nas_path_relative}': {e}")
+        # Clean up potentially partially downloaded file
+        if os.path.exists(local_file_path):
+            try:
+                os.remove(local_file_path)
+            except OSError:
+                pass
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def check_nas_path_exists(share_name, nas_path_relative):
+    """Checks if a file or directory exists on the NAS using pysmb."""
+    conn = None
+    # print(f"   Checking existence of NAS path: {share_name}/{nas_path_relative}") # Verbose
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False # Cannot check if connection failed
+
+        # listPath will raise exception if path doesn't exist
+        conn.listPath(share_name, nas_path_relative)
+        # print(f"   Path exists: {share_name}/{nas_path_relative}") # Verbose
+        return True
+    except Exception as e:
+        # Check if the error indicates "No such file" or similar (pysmb exceptions can vary)
+        # This is not perfectly reliable but a common pattern
+        err_str = str(e).lower()
+        if "no such file" in err_str or "object_name_not_found" in err_str or "does not exist" in err_str:
+            # print(f"   Path does not exist: {share_name}/{nas_path_relative}") # Verbose
+            return False
+        else:
+            # Log other errors but might cautiously return False or True depending on desired behavior
+            print(f"   [WARNING] Error checking existence of NAS path '{share_name}/{nas_path_relative}': {e}")
+            return False # Assume not found on other errors
+    finally:
+        if conn:
+            conn.close()
+
+# --- Other Helper Functions (Unchanged) ---
+
+def analyze_document_with_di(di_client, local_file_path, output_format=DocumentContentFormat.MARKDOWN):
     """Analyzes a local document using Azure Document Intelligence layout model."""
     print(f"   Analyzing local file with DI: {local_file_path}")
     try:
-        # Read the file content first
         with open(local_file_path, "rb") as f:
-            document_bytes = f.read() # Read bytes only once
+            document_bytes = f.read()
 
-        # Try passing bytes directly as the second argument, as allowed by the SDK signature.
         poller = di_client.begin_analyze_document(
-            "prebuilt-layout",       # model_id (positional)
-            document_bytes,          # analyze_request (positional, as bytes)
-            output_content_format=output_format # kwargs
+            "prebuilt-layout",
+            document_bytes,
+            output_content_format=output_format
         )
         result = poller.result()
         print(f"   DI analysis successful.")
         return result
     except Exception as e:
-        # Print the specific error type for better debugging
         print(f"   [ERROR] Document Intelligence analysis failed for {local_file_path}: {type(e).__name__} - {e}")
         return None
 
@@ -164,22 +273,28 @@ def split_pdf(local_pdf_path, chunk_size, temp_dir):
         return chunk_paths
     except Exception as e:
         print(f"   [ERROR] Failed to split PDF {local_pdf_path}: {e}")
-        return [] # Return empty list on failure
+        return []
 
 # ==============================================================================
 # --- Main Processing Function ---
 # ==============================================================================
 
-def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_dir_smb):
-    """Loads input files, processes them with DI, and saves results."""
+def main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative):
+    """Loads input files, processes them with DI, and saves results using pysmb."""
     print(f"--- Starting Main Processing for Stage 2 ---")
+    share_name = NAS_PARAMS["share"] # Convenience variable
+
     # --- Load Files to Process List ---
-    print(f"[4] Loading list of files to process from: {os.path.basename(files_to_process_json_smb)}...")
+    print(f"[4] Loading list of files to process from: {share_name}/{files_to_process_json_relative}...")
     files_to_process = []
     try:
-        # Read the JSON file content from NAS
-        with smbclient.open_file(files_to_process_json_smb, mode='r', encoding='utf-8') as f:
-            files_to_process = json.load(f)
+        # Read the JSON file content from NAS using pysmb helper
+        json_bytes = read_from_nas(share_name, files_to_process_json_relative)
+        if json_bytes is None:
+             print(f"   [CRITICAL ERROR] Failed to read '{files_to_process_json_relative}' from NAS.")
+             sys.exit(1)
+
+        files_to_process = json.loads(json_bytes.decode('utf-8'))
         print(f"   Successfully loaded {len(files_to_process)} file entries.")
         if not files_to_process:
              print("   List is empty. No files to process in Stage 2.")
@@ -188,11 +303,11 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
              print("="*60 + "\n")
              return # Exit this function early
     except json.JSONDecodeError as e:
-        print(f"   [CRITICAL ERROR] Failed to parse JSON from '{files_to_process_json_smb}': {e}")
-        sys.exit(1) # Exit script if critical file cannot be read/parsed
+        print(f"   [CRITICAL ERROR] Failed to parse JSON from '{files_to_process_json_relative}': {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"   [CRITICAL ERROR] Unexpected error reading or parsing '{files_to_process_json_smb}': {e}")
-        sys.exit(1) # Exit script if critical file cannot be read/parsed
+        print(f"   [CRITICAL ERROR] Unexpected error reading or parsing '{files_to_process_json_relative}': {e}")
+        sys.exit(1)
     print("-" * 60)
 
     # --- Process Each File ---
@@ -207,40 +322,52 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
         for i, file_info in enumerate(files_to_process):
             start_time = time.time()
             file_has_error = False
+            local_file_path = None # Ensure defined in outer scope for finally block
+            local_chunk_paths = [] # Ensure defined in outer scope for finally block
+
             print(f"\n--- Processing file {i+1}/{len(files_to_process)} ---")
             try:
                 file_name = file_info.get('file_name')
-                file_path_relative = file_info.get('file_path') # Path relative to share root
+                # This path is relative to the *base input path* from Stage 1 config
+                file_path_from_base = file_info.get('file_path')
 
-                if not file_name or not file_path_relative:
+                if not file_name or not file_path_from_base:
                     print("   [ERROR] Skipping entry due to missing 'file_name' or 'file_path'.")
                     error_count += 1
                     continue
 
+                # Construct the full path relative to the *share root* for pysmb
+                input_file_relative_path = file_path_from_base # Path from Stage 1 JSON is already relative to share
+
                 print(f"   File Name: {file_name}")
-                print(f"   Relative NAS Path: {file_path_relative}")
+                print(f"   Relative NAS Input Path: {share_name}/{input_file_relative_path}")
 
-                # Construct full SMB path for the input file
-                input_file_smb_path = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{file_path_relative}"
-
-                # Construct output paths
+                # Construct output paths (relative to share)
                 file_name_base = os.path.splitext(file_name)[0]
-                file_output_subfolder_smb = os.path.join(stage2_output_dir_smb, file_name_base).replace('\\', '/')
-                output_md_smb_path = os.path.join(file_output_subfolder_smb, f"{file_name_base}.md").replace('\\', '/')
-                output_json_smb_path = os.path.join(file_output_subfolder_smb, f"{file_name_base}.json").replace('\\', '/') # Base name for non-chunked
+                # Output subfolder relative to share
+                file_output_subfolder_relative = os.path.join(stage2_output_dir_relative, file_name_base).replace('\\', '/')
+                output_md_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}.md").replace('\\', '/')
+                output_json_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}.json").replace('\\', '/') # Base name for non-chunked
 
-                print(f"   Output Subfolder (SMB): {file_output_subfolder_smb}")
-                print(f"   Output Markdown Path (SMB): {output_md_smb_path}")
-                print(f"   Output JSON Path (SMB): {output_json_smb_path}")
+                print(f"   Output Subfolder (Relative): {share_name}/{file_output_subfolder_relative}")
+                print(f"   Output Markdown Path (Relative): {share_name}/{output_md_relative_path}")
+                print(f"   Output JSON Path (Relative): {share_name}/{output_json_relative_path}")
 
-                # Ensure the specific output subfolder exists for this file
-                if not create_nas_directory(file_output_subfolder_smb):
+                # Ensure the specific output subfolder exists for this file (needs connection)
+                conn_output_check = create_nas_connection()
+                if not conn_output_check:
+                     print(f"   [ERROR] Failed to connect to NAS to create output subfolder for {file_name}. Skipping.")
+                     error_count += 1
+                     continue
+                if not ensure_nas_dir_exists(conn_output_check, share_name, file_output_subfolder_relative):
                     print(f"   [ERROR] Failed to create output subfolder for {file_name}. Skipping.")
                     error_count += 1
+                    conn_output_check.close() # Close connection
                     continue
+                conn_output_check.close() # Close connection after check/create
 
-                # Download file from NAS to temporary local directory
-                local_file_path = download_from_nas(input_file_smb_path, temp_dir)
+                # Download file from NAS to temporary local directory using pysmb helper
+                local_file_path = download_from_nas(share_name, input_file_relative_path, temp_dir)
                 if not local_file_path:
                     print(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
                     error_count += 1
@@ -254,7 +381,6 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                 is_pdf = file_name.lower().endswith('.pdf')
                 needs_splitting = False
                 page_count = 0
-                local_chunk_paths = []
 
                 if is_pdf:
                     try:
@@ -284,32 +410,15 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                             analyze_result = analyze_document_with_di(di_client, chunk_path)
                             if analyze_result and analyze_result.content:
                                 combined_markdown += analyze_result.content + "\n\n" # Add separator between chunks
-                                # Manually create dictionary from AnalyzeResult, mirroring example structure
-                                result_dict = {'content': analyze_result.content, 'pages': []}
-                                if hasattr(analyze_result, 'pages'):
-                                    for page in analyze_result.pages:
-                                        page_data = {
-                                            'page_number': page.page_number,
-                                            'width': page.width if hasattr(page, 'width') else None,
-                                            'height': page.height if hasattr(page, 'height') else None,
-                                            'unit': page.unit if hasattr(page, 'unit') else None,
-                                            'angle': page.angle if hasattr(page, 'angle') else None
-                                            # Add other page attributes if needed
-                                        }
-                                        result_dict['pages'].append(page_data)
-                                if hasattr(analyze_result, 'tables') and analyze_result.tables:
-                                    result_dict['tables_count'] = len(analyze_result.tables)
-                                if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
-                                    result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
-                                # Add other relevant attributes if needed
+                                # Manually create dictionary from AnalyzeResult
+                                result_dict = {'content': analyze_result.content, 'pages': []} # Simplified structure
+                                # Add more details if needed, similar to original code
                                 results_json_list.append(result_dict)
                                 print(f"      Chunk {chunk_index + 1} processed successfully.")
                             else:
                                 print(f"      [ERROR] Failed to process chunk {chunk_index + 1} for {file_name}.")
                                 file_has_error = True
                                 all_chunks_processed = False
-                                # Decide whether to break or continue processing other chunks
-                                # break # Option: Stop processing this file if one chunk fails
                         if not all_chunks_processed:
                              print(f"   [ERROR] Not all chunks of {file_name} were processed successfully.")
                         else:
@@ -319,24 +428,9 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                     analyze_result = analyze_document_with_di(di_client, local_file_path)
                     if analyze_result and analyze_result.content:
                         combined_markdown = analyze_result.content
-                        # Manually create dictionary from AnalyzeResult, mirroring example structure
-                        result_dict = {'content': analyze_result.content, 'pages': []}
-                        if hasattr(analyze_result, 'pages'):
-                            for page in analyze_result.pages:
-                                page_data = {
-                                    'page_number': page.page_number,
-                                    'width': page.width if hasattr(page, 'width') else None,
-                                    'height': page.height if hasattr(page, 'height') else None,
-                                    'unit': page.unit if hasattr(page, 'unit') else None,
-                                    'angle': page.angle if hasattr(page, 'angle') else None
-                                    # Add other page attributes if needed
-                                }
-                                result_dict['pages'].append(page_data)
-                        if hasattr(analyze_result, 'tables') and analyze_result.tables:
-                            result_dict['tables_count'] = len(analyze_result.tables)
-                        if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
-                            result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
-                        # Add other relevant attributes if needed
+                        # Manually create dictionary from AnalyzeResult
+                        result_dict = {'content': analyze_result.content, 'pages': []} # Simplified structure
+                        # Add more details if needed, similar to original code
                         results_json_list.append(result_dict)
                     else:
                         print(f"   [ERROR] Failed to process document {file_name}.")
@@ -346,38 +440,36 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                 if combined_markdown and not file_has_error:
                     print(f"   Saving combined Markdown output to NAS...")
                     md_bytes = combined_markdown.encode('utf-8')
-                    if not write_to_nas(output_md_smb_path, md_bytes):
+                    if not write_to_nas(share_name, output_md_relative_path, md_bytes):
                         print(f"   [ERROR] Failed to write Markdown file for {file_name} to NAS.")
                         file_has_error = True # Mark error even if DI worked
 
                 if results_json_list and not file_has_error:
                     print(f"   Saving analysis JSON output(s) to NAS...")
+                    # Simple JSON serialization helper
+                    def json_serializer(obj):
+                        if isinstance(obj, (datetime, timezone)): # Example: handle datetime
+                            return obj.isoformat()
+                        # Add more type handlers if needed
+                        try:
+                            return str(obj) # Fallback to string representation
+                        except Exception:
+                            return None # Or some placeholder for unslizable objects
+
                     if needs_splitting:
                         # Save JSON for each chunk
                         for chunk_index, result_json in enumerate(results_json_list):
-                            chunk_json_smb_path = os.path.join(file_output_subfolder_smb, f"{file_name_base}_chunk_{chunk_index + 1}.json").replace('\\', '/')
-                            # Add handler for non-serializable objects
-                            def json_serializer(obj):
-                                if hasattr(obj, '__dict__'):
-                                    return obj.__dict__
-                                return str(obj)
-                            
+                            chunk_json_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}_chunk_{chunk_index + 1}.json").replace('\\', '/')
                             json_bytes = json.dumps(result_json, indent=4, default=json_serializer).encode('utf-8')
-                            if not write_to_nas(chunk_json_smb_path, json_bytes):
+                            if not write_to_nas(share_name, chunk_json_relative_path, json_bytes):
                                 print(f"   [ERROR] Failed to write JSON chunk {chunk_index + 1} for {file_name} to NAS.")
-                                # Don't necessarily mark file_has_error, maybe just log warning?
+                                # Decide if this constitutes a full file error
                     else:
                         # Save single JSON for non-split files
-                        # Add handler for non-serializable objects
-                        def json_serializer(obj):
-                            if hasattr(obj, '__dict__'):
-                                return obj.__dict__
-                            return str(obj)
-                        
                         json_bytes = json.dumps(results_json_list[0], indent=4, default=json_serializer).encode('utf-8')
-                        if not write_to_nas(output_json_smb_path, json_bytes):
+                        if not write_to_nas(share_name, output_json_relative_path, json_bytes):
                             print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
-                            # Don't necessarily mark file_has_error, maybe just log warning?
+                            # Decide if this constitutes a full file error
 
             except Exception as e:
                 print(f"   [ERROR] Unexpected error processing file {file_info.get('file_name', 'N/A')}: {e}")
@@ -387,7 +479,6 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                 if local_file_path and os.path.exists(local_file_path):
                     try:
                         os.remove(local_file_path)
-                        # print(f"   Cleaned up temporary file: {local_file_path}") # Optional verbosity
                     except OSError as e:
                         print(f"   [WARNING] Failed to remove temporary file {local_file_path}: {e}")
                 if local_chunk_paths:
@@ -395,7 +486,6 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
                          if os.path.exists(chunk_path):
                             try:
                                 os.remove(chunk_path)
-                                # print(f"   Cleaned up temporary chunk: {chunk_path}") # Optional verbosity
                             except OSError as e:
                                 print(f"   [WARNING] Failed to remove temporary chunk {chunk_path}: {e}")
 
@@ -420,8 +510,6 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
 
     if error_count > 0:
         print(f"[WARNING] {error_count} files encountered errors during processing. Check logs above.")
-        # Optionally exit with error code if any file failed
-        # sys.exit(1)
 
     print(f"--- Stage 2 Completed ---")
     print(f"--- End of Main Processing for Stage 2 ---")
@@ -432,16 +520,13 @@ def main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_d
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print(f"--- Running Stage 2: Process Documents with Document Intelligence ---")
+    print(f"--- Running Stage 2: Process Documents with Document Intelligence (using pysmb) ---")
     print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
 
-    # --- Initialize Clients ---
-    print("[1] Initializing Clients...")
-    if not initialize_smb_client():
-        sys.exit(1) # Exit if SMB client fails
-
-    di_client = None # Initialize to None
+    # --- Initialize DI Client ---
+    print("[1] Initializing Document Intelligence Client...")
+    di_client = None
     try:
         di_client = DocumentIntelligenceClient(
             endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
@@ -449,47 +534,53 @@ if __name__ == "__main__":
         print("Document Intelligence client initialized successfully.")
     except Exception as e:
         print(f"[ERROR] Failed to initialize Document Intelligence client: {e}")
-        sys.exit(1) # Exit if DI client fails
+        sys.exit(1)
     print("-" * 60)
 
-    # --- Define Paths ---
-    print("[2] Defining NAS Paths...")
-    # Base output directory from Stage 1
+    # --- Define Paths (Relative to Share) ---
+    print("[2] Defining NAS Paths (Relative)...")
+    share_name = NAS_PARAMS["share"]
+    # Base output directory from Stage 1 (relative to share)
     stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    stage1_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage1_output_dir_relative}"
-    # Input JSON file from Stage 1
-    files_to_process_json_smb = os.path.join(stage1_output_dir_smb, '1C_nas_files_to_process.json').replace('\\', '/')
-    # Base output directory for Stage 2 results
+    # Input JSON file from Stage 1 (relative to share)
+    files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
+    # Base output directory for Stage 2 results (relative to share)
     stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
-    stage2_output_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{stage2_output_dir_relative}"
 
-    print(f"   Stage 1 Output Dir (SMB): {stage1_output_dir_smb}")
-    print(f"   Input JSON File (SMB): {files_to_process_json_smb}")
-    print(f"   Stage 2 Output Base Dir (SMB): {stage2_output_dir_smb}")
+    print(f"   Stage 1 Output Dir (Relative): {share_name}/{stage1_output_dir_relative}")
+    print(f"   Input JSON File (Relative): {share_name}/{files_to_process_json_relative}")
+    print(f"   Stage 2 Output Base Dir (Relative): {share_name}/{stage2_output_dir_relative}")
 
-    # Ensure base Stage 2 output directory exists
-    if not create_nas_directory(stage2_output_dir_smb):
+    # Ensure base Stage 2 output directory exists using pysmb helper
+    conn_base_check = create_nas_connection()
+    if not conn_base_check:
+         print("[CRITICAL ERROR] Failed to connect to NAS to check/create base Stage 2 output directory. Exiting.")
+         sys.exit(1)
+    if not ensure_nas_dir_exists(conn_base_check, share_name, stage2_output_dir_relative):
         print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS. Exiting.")
+        conn_base_check.close()
         sys.exit(1)
+    conn_base_check.close() # Close connection after check/create
+    print(f"   Base Stage 2 output directory ensured.")
     print("-" * 60)
 
     # --- Check for Skip Flag from Stage 1 ---
     print("[3] Checking for skip flag from Stage 1...")
     skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_smb_path = os.path.join(stage1_output_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
     should_skip = False
     try:
-        # Ensure SMB client is configured (should be from step [1])
-        if smbclient.path.exists(skip_flag_smb_path):
+        # Use pysmb helper to check existence
+        if check_nas_path_exists(share_name, skip_flag_relative_path):
             print(f"   Skip flag file found. Stage 1 indicated no files to process.")
             should_skip = True
         else:
             print(f"   Skip flag file not found. Proceeding with Stage 2.")
     except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 2.")
-        # Continue execution if flag check fails
+        # check_nas_path_exists already logs warnings for non-"not found" errors
+        print(f"   Proceeding with Stage 2 despite potential error checking skip flag.")
+        # Continue execution if flag check fails unexpectedly
     print("-" * 60)
 
     # --- Execute Main Processing if Not Skipped ---
@@ -499,6 +590,6 @@ if __name__ == "__main__":
         print("="*60 + "\n")
     else:
         # Call the main processing function only if not skipping
-        main_processing_stage2(di_client, files_to_process_json_smb, stage2_output_dir_smb)
+        main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative)
 
     # Script ends naturally here if skipped or after main_processing completes
