@@ -70,7 +70,7 @@ CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this
 
 # --- Proxy Configuration (Fill in if needed) ---
 PROXY_CONFIG = {
-    "use_proxy": False, # Set to True to enable proxy settings
+    "use_proxy": True, # Set to True to enable proxy settings
     "url": "http://your_proxy_server:port", # e.g., http://proxy.example.com:8080
     "username": "YOUR_PROXY_USERNAME", # Set to None if no authentication needed
     "password": "YOUR_PROXY_PASSWORD"  # Set to None if no authentication needed
