@@ -64,6 +64,9 @@ DOCUMENT_SOURCE = 'internal_esg' # From Stage 1
 PDF_PAGE_LIMIT = 2000
 PDF_CHUNK_SIZE = 1000
 
+# --- CA Bundle Configuration ---
+CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this exists on NAS)
+
 # --- pysmb Configuration ---
 # Increase timeout for potentially slow NAS operations
 smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
@@ -292,7 +295,7 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
         json_bytes = read_from_nas(share_name, files_to_process_json_relative)
         if json_bytes is None:
              print(f"   [CRITICAL ERROR] Failed to read '{files_to_process_json_relative}' from NAS.")
-             sys.exit(1)
+             sys.exit(1) # Exit if critical file cannot be read
 
         files_to_process = json.loads(json_bytes.decode('utf-8'))
         print(f"   Successfully loaded {len(files_to_process)} file entries.")
@@ -304,14 +307,14 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
              return # Exit this function early
     except json.JSONDecodeError as e:
         print(f"   [CRITICAL ERROR] Failed to parse JSON from '{files_to_process_json_relative}': {e}")
-        sys.exit(1)
+        sys.exit(1) # Exit if critical file cannot be parsed
     except Exception as e:
         print(f"   [CRITICAL ERROR] Unexpected error reading or parsing '{files_to_process_json_relative}': {e}")
-        sys.exit(1)
+        sys.exit(1) # Exit on other unexpected errors
     print("-" * 60)
 
     # --- Process Each File ---
-    print(f"[4] Processing {len(files_to_process)} files...")
+    print(f"[5] Processing {len(files_to_process)} files...") # Renumbered step
     processed_count = 0
     error_count = 0
 
@@ -359,12 +362,13 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                      print(f"   [ERROR] Failed to connect to NAS to create output subfolder for {file_name}. Skipping.")
                      error_count += 1
                      continue
-                if not ensure_nas_dir_exists(conn_output_check, share_name, file_output_subfolder_relative):
-                    print(f"   [ERROR] Failed to create output subfolder for {file_name}. Skipping.")
-                    error_count += 1
-                    conn_output_check.close() # Close connection
-                    continue
-                conn_output_check.close() # Close connection after check/create
+                try: # Wrap ensure_nas_dir_exists in try/finally to ensure connection close
+                    if not ensure_nas_dir_exists(conn_output_check, share_name, file_output_subfolder_relative):
+                        print(f"   [ERROR] Failed to create output subfolder for {file_name}. Skipping.")
+                        error_count += 1
+                        continue # Skip to next file
+                finally:
+                    conn_output_check.close() # Close connection after check/create
 
                 # Download file from NAS to temporary local directory using pysmb helper
                 local_file_path = download_from_nas(share_name, input_file_relative_path, temp_dir)
@@ -524,72 +528,158 @@ if __name__ == "__main__":
     print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
 
-    # --- Initialize DI Client ---
-    print("[1] Initializing Document Intelligence Client...")
-    di_client = None
+    # --- Setup Custom CA Bundle and Initialize Clients ---
+    temp_cert_file_path = None # Store path instead of file object
+    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
+    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
+    di_client = None # Initialize DI client
+    initialization_error = False # Flag to track if setup fails
+    should_skip = False # Flag for skipping based on Stage 1 flag
+
     try:
-        di_client = DocumentIntelligenceClient(
-            endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
-        )
-        print("Document Intelligence client initialized successfully.")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize Document Intelligence client: {e}")
-        sys.exit(1)
-    print("-" * 60)
+        # --- Download and Set Custom CA Bundle ---
+        print("[1] Setting up Custom CA Bundle...")
+        share_name = NAS_PARAMS["share"]
+        # Construct relative path to CA bundle within the NAS_OUTPUT_FOLDER_PATH
+        # Assuming bundle is at the root of NAS_OUTPUT_FOLDER_PATH, adjust if needed
+        ca_bundle_relative_path = os.path.join(NAS_OUTPUT_FOLDER_PATH, CA_BUNDLE_FILENAME).replace('\\', '/')
+        print(f"   Looking for CA bundle at: {share_name}/{ca_bundle_relative_path}")
 
-    # --- Define Paths (Relative to Share) ---
-    print("[2] Defining NAS Paths (Relative)...")
-    share_name = NAS_PARAMS["share"]
-    # Base output directory from Stage 1 (relative to share)
-    stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    # Input JSON file from Stage 1 (relative to share)
-    files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
-    # Base output directory for Stage 2 results (relative to share)
-    stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
+        # Read CA bundle content from NAS using pysmb helper
+        ca_bundle_bytes = read_from_nas(share_name, ca_bundle_relative_path)
 
-    print(f"   Stage 1 Output Dir (Relative): {share_name}/{stage1_output_dir_relative}")
-    print(f"   Input JSON File (Relative): {share_name}/{files_to_process_json_relative}")
-    print(f"   Stage 2 Output Base Dir (Relative): {share_name}/{stage2_output_dir_relative}")
+        if ca_bundle_bytes:
+            # Create a temporary file to store the certificate
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".cer", mode='wb') as temp_cert_file:
+                temp_cert_file.write(ca_bundle_bytes)
+                temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
+                print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
 
-    # Ensure base Stage 2 output directory exists using pysmb helper
-    conn_base_check = create_nas_connection()
-    if not conn_base_check:
-         print("[CRITICAL ERROR] Failed to connect to NAS to check/create base Stage 2 output directory. Exiting.")
-         sys.exit(1)
-    if not ensure_nas_dir_exists(conn_base_check, share_name, stage2_output_dir_relative):
-        print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS. Exiting.")
-        conn_base_check.close()
-        sys.exit(1)
-    conn_base_check.close() # Close connection after check/create
-    print(f"   Base Stage 2 output directory ensured.")
-    print("-" * 60)
-
-    # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
-    should_skip = False
-    try:
-        # Use pysmb helper to check existence
-        if check_nas_path_exists(share_name, skip_flag_relative_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            should_skip = True
+            # Set the environment variables
+            os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
+            os.environ['SSL_CERT_FILE'] = temp_cert_file_path
+            print(f"   Set REQUESTS_CA_BUNDLE environment variable.")
+            print(f"   Set SSL_CERT_FILE environment variable.")
         else:
-            print(f"   Skip flag file not found. Proceeding with Stage 2.")
-    except Exception as e:
-        # check_nas_path_exists already logs warnings for non-"not found" errors
-        print(f"   Proceeding with Stage 2 despite potential error checking skip flag.")
-        # Continue execution if flag check fails unexpectedly
-    print("-" * 60)
+            print(f"   [WARNING] CA Bundle file not found or could not be read from {share_name}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
 
-    # --- Execute Main Processing if Not Skipped ---
-    if should_skip:
-        print("\n" + "="*60)
-        print(f"--- Stage 2 Skipped (No files to process from Stage 1) ---")
-        print("="*60 + "\n")
-    else:
-        # Call the main processing function only if not skipping
-        main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative)
+        # --- Initialize DI Client (AFTER setting env vars) ---
+        print("[2] Initializing Document Intelligence Client...")
+        try:
+            di_client = DocumentIntelligenceClient(
+                endpoint=AZURE_DI_ENDPOINT, credential=AzureKeyCredential(AZURE_DI_KEY)
+            )
+            print("Document Intelligence client initialized successfully.")
+        except Exception as e:
+            print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
+            initialization_error = True # Set flag
+            # Don't exit yet, let finally block run
 
-    # Script ends naturally here if skipped or after main_processing completes
+        if not initialization_error: # Proceed only if DI client initialized
+            print("-" * 60)
+
+            # --- Define Paths (Relative to Share) ---
+            print("[3] Defining NAS Paths (Relative)...") # Renumbered
+            # share_name is already defined
+            # Base output directory from Stage 1 (relative to share)
+            stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+            # Input JSON file from Stage 1 (relative to share)
+            files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
+            # Base output directory for Stage 2 results (relative to share)
+            stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
+
+            print(f"   Stage 1 Output Dir (Relative): {share_name}/{stage1_output_dir_relative}")
+            print(f"   Input JSON File (Relative): {share_name}/{files_to_process_json_relative}")
+            print(f"   Stage 2 Output Base Dir (Relative): {share_name}/{stage2_output_dir_relative}")
+
+            # Ensure base Stage 2 output directory exists using pysmb helper
+            conn_base_check = create_nas_connection()
+            if not conn_base_check:
+                 print("[CRITICAL ERROR] Failed to connect to NAS to check/create base Stage 2 output directory.")
+                 initialization_error = True # Set flag
+            else:
+                try:
+                    if not ensure_nas_dir_exists(conn_base_check, share_name, stage2_output_dir_relative):
+                        print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS.")
+                        initialization_error = True # Set flag
+                    else:
+                        print(f"   Base Stage 2 output directory ensured.")
+                finally:
+                    conn_base_check.close() # Ensure connection is closed
+            print("-" * 60)
+
+            if not initialization_error: # Proceed only if paths defined and dir ensured
+                # --- Check for Skip Flag from Stage 1 ---
+                print("[4] Checking for skip flag from Stage 1...") # Renumbered
+                skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+                skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
+                print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
+                try:
+                    # Use pysmb helper to check existence
+                    if check_nas_path_exists(share_name, skip_flag_relative_path):
+                        print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+                        should_skip = True
+                    else:
+                        print(f"   Skip flag file not found. Proceeding with Stage 2.")
+                except Exception as e:
+                    # check_nas_path_exists already logs warnings for non-"not found" errors
+                    print(f"   Proceeding with Stage 2 despite potential error checking skip flag.")
+                    # Continue execution if flag check fails unexpectedly
+                print("-" * 60)
+
+                # --- Execute Main Processing if Not Skipped ---
+                if should_skip:
+                    print("\n" + "="*60)
+                    print(f"--- Stage 2 Skipped (No files to process from Stage 1) ---")
+                    print("="*60 + "\n")
+                else:
+                    # Call the main processing function only if not skipping and DI client is valid
+                    main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative)
+
+    # --- Cleanup (Executes regardless of success/failure in the try block) ---
+    finally:
+        print("\n--- Cleaning up Stage 2 ---")
+        # Clean up the temporary certificate file
+        if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+            try:
+                os.remove(temp_cert_file_path)
+                print(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
+            except OSError as e:
+                 print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
+
+        # Restore original environment variables
+        # Restore REQUESTS_CA_BUNDLE
+        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+        if original_requests_ca_bundle is None:
+            # If it didn't exist originally, remove it if we set it
+            if current_requests_bundle == temp_cert_file_path:
+                 print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
+                 if 'REQUESTS_CA_BUNDLE' in os.environ:
+                     del os.environ['REQUESTS_CA_BUNDLE']
+        else:
+            # If it existed originally, restore its value if it changed
+            if current_requests_bundle != original_requests_ca_bundle:
+                 print(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
+                 os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
+
+        # Restore SSL_CERT_FILE
+        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
+        if original_ssl_cert_file is None:
+            # If it didn't exist originally, remove it if we set it
+            if current_ssl_cert == temp_cert_file_path:
+                 print("   Unsetting SSL_CERT_FILE environment variable.")
+                 if 'SSL_CERT_FILE' in os.environ:
+                     del os.environ['SSL_CERT_FILE']
+        else:
+            # If it existed originally, restore its value if it changed
+            if current_ssl_cert != original_ssl_cert_file:
+                 print(f"   Restoring original SSL_CERT_FILE environment variable.")
+                 os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+
+        print("--- Cleanup Complete ---")
+
+    # Exit with error code if initialization failed
+    if initialization_error:
+        sys.exit(1)
+
+    # Script ends after finally block
