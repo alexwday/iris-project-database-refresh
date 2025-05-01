@@ -88,17 +88,18 @@ def write_json_to_nas(smb_path, data_string):
     try:
         # Ensure the directory exists before writing the file
         dir_path = os.path.dirname(smb_path)
-        if not smbclient.path.exists(dir_path):
+        # Pass credentials directly
+        nas_user = NAS_PARAMS.get("user") # Get credentials from global config
+        nas_pass = NAS_PARAMS.get("password")
+        if not smbclient.path.exists(dir_path, username=nas_user, password=nas_pass):
              print(f"   Creating directory on NAS: {dir_path}")
-             smbclient.makedirs(dir_path, exist_ok=True)
+             smbclient.makedirs(dir_path, exist_ok=True, username=nas_user, password=nas_pass)
 
-        with smbclient.open_file(smb_path, mode='w', encoding='utf-8') as f:
+        with smbclient.open_file(smb_path, mode='w', encoding='utf-8', username=nas_user, password=nas_pass) as f:
             f.write(data_string)
         print(f"   Successfully wrote to: {smb_path}")
         return True
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error writing to '{smb_path}': {e}")
-        return False
+    # Removed specific smbclient.SambaClientError catch
     except Exception as e:
         print(f"   [ERROR] Unexpected error writing to NAS '{smb_path}': {e}")
         return False
@@ -128,26 +129,18 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
     smb_base_path = f"//{nas_ip}/{share_name}/{base_folder_path}"
     share_prefix = f"//{nas_ip}/{share_name}/" # Used to calculate relative path
 
-    print(f" -> Configuring SMB client for user '{username}'...")
-    try:
-        # Set credentials globally for this smbclient instance/session
-        smbclient.ClientConfig(username=username, password=password)
-        print(f" -> Attempting to connect and list files from NAS path: {smb_base_path}")
-    except Exception as e:
-        # Catch potential config errors, though less common
-        print(f"   [ERROR] Error setting SMB client config: {e}")
-        # Allow execution to continue to the path check/walk, which will likely fail
-        pass
+    # Removed ClientConfig call - credentials passed directly to functions below
+    print(f" -> Attempting to connect and list files from NAS path: {smb_base_path} using user '{username}'...")
 
     try:
-        # Check if the base path exists before attempting to walk
-        if not smbclient.path.exists(smb_base_path):
+        # Check if the base path exists before attempting to walk, passing credentials
+        if not smbclient.path.exists(smb_base_path, username=username, password=password):
              print(f"   [ERROR] Base NAS path does not exist or is inaccessible: {smb_base_path}")
              return None # Critical error, cannot proceed
 
         print(f" -> Walking directory tree: {smb_base_path} ...")
-        # Recursively walk the directory structure
-        for dirpath, dirnames, filenames in smbclient.walk(smb_base_path):
+        # Recursively walk the directory structure, passing credentials
+        for dirpath, dirnames, filenames in smbclient.walk(smb_base_path, username=username, password=password):
             for filename in filenames:
                 # Skip common temporary or system files
                 if filename == '.DS_Store' or filename.startswith('~$') or filename.startswith('.'):
@@ -158,8 +151,8 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                 full_smb_path = os.path.join(dirpath, filename).replace('\\', '/')
 
                 try:
-                    # Get file metadata (stat)
-                    stat_info = smbclient.stat(full_smb_path)
+                    # Get file metadata (stat), passing credentials
+                    stat_info = smbclient.stat(full_smb_path, username=username, password=password)
                     # Convert modification time to timezone-aware UTC datetime
                     last_modified_dt = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
 
@@ -195,8 +188,7 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
                         'date_last_modified': last_modified_dt,
                         'date_created': created_dt # Add the determined creation date
                     })
-                except smbclient.SambaClientError as stat_err:
-                     print(f"      [WARNING] SMB Error getting stats for file '{full_smb_path}': {stat_err}. Skipping file.")
+                # Removed specific smbclient.SambaClientError catch for stat
                 except Exception as e:
                     # Catch other potential errors during stat or path processing
                     print(f"      [WARNING] Could not process file '{full_smb_path}': {e}. Skipping file.")
@@ -204,9 +196,7 @@ def get_nas_files(nas_ip, share_name, base_folder_path, username, password):
         print(f" <- Successfully listed {len(files_list)} files from NAS.")
         return files_list
 
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error listing files from '{smb_base_path}': {e}")
-        return None # Indicate failure
+    # Removed specific smbclient.SambaClientError catch for walk/listing
     except Exception as e:
         # Catch unexpected errors during the walk process
         print(f"   [ERROR] Unexpected error listing NAS files from '{smb_base_path}': {e}")
@@ -251,17 +241,16 @@ if __name__ == "__main__":
     # --- Ensure NAS Output Directory Exists ---
     print("[2] Ensuring NAS Output Directory Exists...")
     try:
-        # Configure credentials (needed again if write_json_to_nas hasn't run yet or in case of separate process)
-        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        if not smbclient.path.exists(nas_output_dir_smb_path):
+        # Removed ClientConfig call - pass credentials directly
+        nas_user = NAS_PARAMS.get("user")
+        nas_pass = NAS_PARAMS.get("password")
+        if not smbclient.path.exists(nas_output_dir_smb_path, username=nas_user, password=nas_pass):
             print(f"   Directory not found. Creating NAS output directory: '{nas_output_dir_smb_path}'")
-            smbclient.makedirs(nas_output_dir_smb_path, exist_ok=True) # exist_ok=True prevents error if created between check and make
+            smbclient.makedirs(nas_output_dir_smb_path, exist_ok=True, username=nas_user, password=nas_pass) # exist_ok=True prevents error if created between check and make
             print(f"   Successfully created directory.")
         else:
             print(f"   NAS output directory already exists: '{nas_output_dir_smb_path}'")
-    except smbclient.SambaClientError as e:
-        print(f"   [CRITICAL ERROR] SMB Error creating/accessing directory '{nas_output_dir_smb_path}': {e}")
-        sys.exit(1) # Cannot proceed without output directory
+    # Removed specific smbclient.SambaClientError catch
     except Exception as e:
         print(f"   [CRITICAL ERROR] Unexpected error creating/accessing NAS directory '{nas_output_dir_smb_path}': {e}")
         sys.exit(1) # Cannot proceed
@@ -324,9 +313,7 @@ if __name__ == "__main__":
              print("   [CRITICAL ERROR] Failed to write DB catalog JSON to NAS. Exiting.")
              sys.exit(1) # Exit if saving fails
 
-    except psycopg2.Error as db_err:
-        print(f"   [CRITICAL ERROR] Database error: {db_err}")
-        sys.exit(1) # Exit on database errors
+    # Removed specific psycopg2.Error catch
     except Exception as e:
         print(f"   [CRITICAL ERROR] An unexpected error occurred during DB operations: {e}")
         sys.exit(1) # Exit on other unexpected errors
@@ -673,24 +660,25 @@ if __name__ == "__main__":
         print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
         # Create an empty file as a flag
         try:
-            # Ensure credentials are set for smbclient
-            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-            with smbclient.open_file(skip_flag_smb_path, mode='w', encoding='utf-8') as f:
+            # Removed ClientConfig call - pass credentials directly
+            nas_user = NAS_PARAMS.get("user")
+            nas_pass = NAS_PARAMS.get("password")
+            with smbclient.open_file(skip_flag_smb_path, mode='w', encoding='utf-8', username=nas_user, password=nas_pass) as f:
                 f.write('') # Write empty content
             print(f"   Successfully created skip flag file: {skip_flag_smb_path}")
-        except smbclient.SambaClientError as e:
-            print(f"   [WARNING] SMB Error creating skip flag file '{skip_flag_smb_path}': {e}")
+        # Removed specific smbclient.SambaClientError catch
         except Exception as e:
             print(f"   [WARNING] Unexpected error creating skip flag file '{skip_flag_smb_path}': {e}")
     else:
         print(f"   Files found for processing ({len(files_to_process)}). Ensuring skip flag does not exist.")
         try:
-            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-            if smbclient.path.exists(skip_flag_smb_path):
+            # Removed ClientConfig call - pass credentials directly
+            nas_user = NAS_PARAMS.get("user")
+            nas_pass = NAS_PARAMS.get("password")
+            if smbclient.path.exists(skip_flag_smb_path, username=nas_user, password=nas_pass):
                 print(f"   Removing existing skip flag file: {skip_flag_smb_path}")
-                smbclient.remove(skip_flag_smb_path)
-        except smbclient.SambaClientError as e:
-            print(f"   [INFO] Could not remove potentially existing skip flag file (may not exist or permissions issue): {e}")
+                smbclient.remove(skip_flag_smb_path, username=nas_user, password=nas_pass)
+        # Removed specific smbclient.SambaClientError catch
         except Exception as e:
             print(f"   [INFO] Error checking/removing existing skip flag file: {e}")
 
@@ -698,23 +686,25 @@ if __name__ == "__main__":
     if FULL_REFRESH:
         print(f"   Full refresh mode enabled. Creating refresh flag file: '{refresh_flag_file_name}'")
         try:
-            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-            with smbclient.open_file(refresh_flag_smb_path, mode='w', encoding='utf-8') as f:
+            # Removed ClientConfig call - pass credentials directly
+            nas_user = NAS_PARAMS.get("user")
+            nas_pass = NAS_PARAMS.get("password")
+            with smbclient.open_file(refresh_flag_smb_path, mode='w', encoding='utf-8', username=nas_user, password=nas_pass) as f:
                 f.write('') # Create empty flag file
             print(f"   Successfully created refresh flag file: {refresh_flag_smb_path}")
-        except smbclient.SambaClientError as e:
-            print(f"   [WARNING] SMB Error creating refresh flag file '{refresh_flag_smb_path}': {e}")
+        # Removed specific smbclient.SambaClientError catch
         except Exception as e:
             print(f"   [WARNING] Unexpected error creating refresh flag file '{refresh_flag_smb_path}': {e}")
     else:
         print(f"   Incremental mode. Ensuring refresh flag does not exist.")
         try:
-            smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-            if smbclient.path.exists(refresh_flag_smb_path):
+            # Removed ClientConfig call - pass credentials directly
+            nas_user = NAS_PARAMS.get("user")
+            nas_pass = NAS_PARAMS.get("password")
+            if smbclient.path.exists(refresh_flag_smb_path, username=nas_user, password=nas_pass):
                 print(f"   Removing existing refresh flag file: {refresh_flag_smb_path}")
-                smbclient.remove(refresh_flag_smb_path)
-        except smbclient.SambaClientError as e:
-            print(f"   [INFO] Could not remove potentially existing refresh flag file (may not exist or permissions issue): {e}")
+                smbclient.remove(refresh_flag_smb_path, username=nas_user, password=nas_pass)
+        # Removed specific smbclient.SambaClientError catch
         except Exception as e:
             print(f"   [INFO] Error checking/removing existing refresh flag file: {e}")
 
