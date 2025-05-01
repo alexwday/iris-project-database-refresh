@@ -67,6 +67,14 @@ PDF_CHUNK_SIZE = 1000
 # --- CA Bundle Configuration ---
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this exists on NAS)
 
+# --- Proxy Configuration (Fill in if needed) ---
+PROXY_CONFIG = {
+    "use_proxy": False, # Set to True to enable proxy settings
+    "url": "http://your_proxy_server:port", # e.g., http://proxy.example.com:8080
+    "username": "YOUR_PROXY_USERNAME", # Set to None if no authentication needed
+    "password": "YOUR_PROXY_PASSWORD"  # Set to None if no authentication needed
+}
+
 # --- pysmb Configuration ---
 # Increase timeout for potentially slow NAS operations
 smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
@@ -77,6 +85,7 @@ CLIENT_HOSTNAME = socket.gethostname() # Get local machine name for SMB connecti
 # --- Helper Functions (pysmb versions) ---
 # ==============================================================================
 
+# ... (Helper functions remain unchanged) ...
 def create_nas_connection():
     """Creates and returns an authenticated SMBConnection object."""
     try:
@@ -534,6 +543,10 @@ if __name__ == "__main__":
     temp_cert_file_path = None # Store path instead of file object
     original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
     original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
+    original_http_proxy = os.environ.get('HTTP_PROXY') # Store original proxy values
+    original_https_proxy = os.environ.get('HTTPS_PROXY')
+    proxy_set_by_script = False # Flag to track if we set the proxy vars
+
     di_client = None # Initialize DI client
     initialization_error = False # Flag to track if setup fails
     should_skip = False # Flag for skipping based on Stage 1 flag
@@ -565,8 +578,36 @@ if __name__ == "__main__":
         else:
             print(f"   [WARNING] CA Bundle file not found or could not be read from {share_name}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
 
+        # --- Set Proxy Environment Variables (if configured) ---
+        if PROXY_CONFIG.get("use_proxy"):
+            print("[2] Setting up Proxy Configuration...")
+            proxy_url_base = PROXY_CONFIG.get("url")
+            proxy_user = PROXY_CONFIG.get("username")
+            proxy_pass = PROXY_CONFIG.get("password")
+            proxy_string = proxy_url_base # Start with base URL
+
+            if proxy_user and proxy_pass and proxy_url_base:
+                # Construct URL with authentication if user/pass provided
+                # Assumes URL format like http://host:port
+                protocol, rest = proxy_url_base.split("://", 1)
+                proxy_string = f"{protocol}://{proxy_user}:{proxy_pass}@{rest}"
+                print("   Configuring proxy with authentication.")
+            elif proxy_url_base:
+                print("   Configuring proxy without authentication.")
+            else:
+                print("   [WARNING] Proxy use enabled but proxy URL is not configured. Skipping proxy setup.")
+                proxy_string = None
+
+            if proxy_string:
+                os.environ['HTTP_PROXY'] = proxy_string
+                os.environ['HTTPS_PROXY'] = proxy_string
+                proxy_set_by_script = True
+                print(f"   Set HTTP_PROXY and HTTPS_PROXY environment variables.")
+        else:
+            print("[2] Proxy configuration disabled. Skipping proxy setup.")
+
         # --- Initialize DI Client (AFTER setting env vars) ---
-        print("[2] Initializing Document Intelligence Client...")
+        print("[3] Initializing Document Intelligence Client...") # Renumbered
         try:
             # Determine the SSL verification setting
             # Use the downloaded temp cert path if available, otherwise default to True (use system CAs)
@@ -606,7 +647,7 @@ if __name__ == "__main__":
             print("-" * 60)
 
             # --- Define Paths (Relative to Share) ---
-            print("[3] Defining NAS Paths (Relative)...") # Renumbered
+            print("[4] Defining NAS Paths (Relative)...") # Renumbered
             # share_name is already defined
             # Base output directory from Stage 1 (relative to share)
             stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
@@ -637,7 +678,7 @@ if __name__ == "__main__":
 
             if not initialization_error: # Proceed only if paths defined and dir ensured
                 # --- Check for Skip Flag from Stage 1 ---
-                print("[4] Checking for skip flag from Stage 1...") # Renumbered
+                print("[5] Checking for skip flag from Stage 1...") # Renumbered
                 skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
                 skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
                 print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
@@ -702,6 +743,26 @@ if __name__ == "__main__":
             if current_ssl_cert != original_ssl_cert_file:
                  print(f"   Restoring original SSL_CERT_FILE environment variable.")
                  os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+
+        # Restore Proxy Variables if they were set by the script
+        if proxy_set_by_script:
+            print("   Restoring original proxy environment variables...")
+            # Restore HTTP_PROXY
+            if original_http_proxy is None:
+                if 'HTTP_PROXY' in os.environ:
+                    del os.environ['HTTP_PROXY']
+                    print("   Unset HTTP_PROXY.")
+            else:
+                os.environ['HTTP_PROXY'] = original_http_proxy
+                print("   Restored original HTTP_PROXY.")
+            # Restore HTTPS_PROXY
+            if original_https_proxy is None:
+                if 'HTTPS_PROXY' in os.environ:
+                    del os.environ['HTTPS_PROXY']
+                    print("   Unset HTTPS_PROXY.")
+            else:
+                os.environ['HTTPS_PROXY'] = original_https_proxy
+                print("   Restored original HTTPS_PROXY.")
 
         print("--- Cleanup Complete ---")
 
