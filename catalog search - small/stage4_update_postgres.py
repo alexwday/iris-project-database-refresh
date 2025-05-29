@@ -272,7 +272,8 @@ def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_
             # Define columns in the order they appear in the table
             catalog_cols = [
                 'document_source', 'document_type', 'document_name', 'document_description',
-                'document_usage', 'date_created', 'date_last_modified', 'file_name',
+                'document_usage', 'document_usage_embedding', 'document_description_embedding',  # Added embedding fields
+                'date_created', 'date_last_modified', 'file_name',
                 'file_type', 'file_size', 'file_path', 'file_link'
                 # Add 'processed_md_path' if it exists in the table, otherwise omit
             ]
@@ -323,12 +324,12 @@ def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_
             # Define DB columns for insertion (matching apg_content schema, excluding id, created_at)
             content_cols_db = [
                 'document_source', 'document_type', 'document_name',
-                'section_id', 'section_name', 'section_summary', 'section_content' # Correct DB columns
+                'section_id', 'section_name', 'section_summary', 'section_content', 'page_number' # Added page_number
             ]
             # Define corresponding keys expected in the JSON data from Stage 3, in the same order as DB columns
             content_cols_json = [
                 'document_source', 'document_type', 'document_name',
-                'section_id', 'section_name', 'section_summary', 'content' # Correct JSON keys ('content' maps to 'section_content')
+                'section_id', 'section_name', 'section_summary', 'section_content', 'page_number' # Updated to match new structure
             ]
             # Prepare data tuples using JSON keys in the order of DB columns
             content_data = []

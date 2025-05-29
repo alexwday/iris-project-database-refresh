@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import time
+import re  # For regex page splitting
 import requests # For OAuth token request
 import smbclient
 import pandas as pd
@@ -62,6 +63,13 @@ GPT_CONFIG = {
     "base_url": "YOUR_CUSTOM_GPT_API_BASE_URL",
     "model_name": "your-gpt-model-deployment-name",
     "api_version": "2024-02-01"
+}
+
+# --- Embedding Configuration ---
+# Embedding model configuration
+EMBEDDING_CONFIG = {
+    "model_name": "text-embedding-3-large",
+    "dimensions": 2000
 }
 
 # --- New System Prompt Template ---
@@ -439,6 +447,149 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         # Consider more specific error handling based on openai library exceptions if needed
         return None, None, None
 
+def split_content_by_pages_using_json(markdown_content, json_data):
+    """
+    Splits markdown content by pages using Azure DI JSON response spans.
+    
+    The JSON response contains page information with spans (offset and length)
+    that specify exactly which portion of the content belongs to each page.
+    
+    Args:
+        markdown_content: The full markdown content
+        json_data: The JSON response from Azure DI containing page spans
+                  Can be a single dict or a list of dicts (for chunked files)
+        
+    Returns:
+        list: List of tuples (page_number, content)
+    """
+    print("   Splitting content by pages using JSON spans...")
+    
+    pages = []
+    
+    # Handle both single JSON and list of JSONs (chunked files)
+    json_list = json_data if isinstance(json_data, list) else [json_data]
+    
+    current_offset = 0  # Track offset for chunked files
+    
+    for json_chunk in json_list:
+        # Check if JSON has pages information
+        if json_chunk and 'pages' in json_chunk and json_chunk['pages']:
+            chunk_content = json_chunk.get('content', '')
+            
+            print(f"   Processing chunk with {len(json_chunk['pages'])} pages")
+            
+            for page_info in json_chunk['pages']:
+                page_num = page_info.get('page_number', len(pages) + 1)
+                
+                # Get spans for this page
+                if 'spans' in page_info and page_info['spans']:
+                    # Combine all spans for this page (usually just one)
+                    page_content = ""
+                    for span in page_info['spans']:
+                        offset = span.get('offset', 0)
+                        length = span.get('length', 0)
+                        
+                        if offset is not None and length is not None:
+                            # For chunked files, use the chunk's content
+                            if len(json_list) > 1:
+                                span_content = chunk_content[offset:offset + length]
+                            else:
+                                # For single files, use the main markdown content
+                                span_content = markdown_content[offset:offset + length]
+                            page_content += span_content
+                    
+                    if page_content.strip():
+                        pages.append((page_num, page_content.strip()))
+                else:
+                    print(f"   Warning: No spans found for page {page_num}")
+    
+    if pages:
+        print(f"   Successfully split into {len(pages)} pages using spans")
+        return pages
+    
+    # Fallback to regex-based splitting if JSON doesn't have page information
+    print("   No page information in JSON, falling back to regex-based splitting")
+    return split_content_by_pages_regex(markdown_content)
+
+
+def split_content_by_pages_regex(markdown_content):
+    """
+    Fallback method: Splits markdown content by page breaks using regex.
+    
+    Azure Document Intelligence v4 API uses:
+    - <!-- PageBreak --> as the page separator
+    
+    Returns:
+        list: List of tuples (page_number, content)
+    """
+    print("   Using regex-based page splitting...")
+    
+    # Azure DI v4 API page break pattern
+    page_break_pattern = r'<!-- ?PageBreak ?-->'
+    
+    # Check if page breaks exist
+    if re.search(page_break_pattern, markdown_content, re.IGNORECASE):
+        print(f"   Found page break markers")
+        
+        # Split content by page breaks
+        parts = re.split(page_break_pattern, markdown_content, flags=re.IGNORECASE)
+        
+        pages = []
+        for i, part in enumerate(parts):
+            if part.strip():  # Skip empty parts
+                page_num = i + 1  # Page numbers start at 1
+                pages.append((page_num, part.strip()))
+        
+        print(f"   Split into {len(pages)} pages")
+        return pages
+    
+    # If no page markers found, treat entire content as single page
+    print("   No page markers found. Treating as single page.")
+    return [(1, markdown_content)]
+
+def generate_embeddings(texts, client, max_batch_size=50):
+    """
+    Generates embeddings for a list of texts using OpenAI API.
+    
+    Args:
+        texts: List of strings to embed
+        client: OpenAI client instance
+        max_batch_size: Maximum number of texts to process in one API call
+        
+    Returns:
+        list: List of embedding vectors (lists of floats)
+    """
+    print(f"   Generating embeddings for {len(texts)} texts...")
+    
+    all_embeddings = []
+    
+    # Process in batches
+    for i in range(0, len(texts), max_batch_size):
+        batch = texts[i:i + max_batch_size]
+        print(f"   Processing batch {i//max_batch_size + 1}/{(len(texts) + max_batch_size - 1)//max_batch_size}")
+        
+        try:
+            # Handle empty texts
+            processed_batch = [text if text.strip() else " " for text in batch]
+            
+            response = client.embeddings.create(
+                input=processed_batch,
+                model=EMBEDDING_CONFIG["model_name"],
+                dimensions=EMBEDDING_CONFIG["dimensions"]
+            )
+            
+            # Extract embeddings from response
+            batch_embeddings = [data.embedding for data in response.data]
+            all_embeddings.extend(batch_embeddings)
+            
+        except Exception as e:
+            print(f"   [ERROR] Failed to generate embeddings for batch: {e}")
+            # Return None embeddings for failed batch
+            all_embeddings.extend([None] * len(batch))
+    
+    print(f"   Successfully generated {len([e for e in all_embeddings if e is not None])} embeddings")
+    return all_embeddings
+
 # ==============================================================================
 # --- Main Processing Function ---
 # ==============================================================================
@@ -670,13 +821,80 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 doc_source = DOCUMENT_SOURCE # Use configured source
                 doc_type = DOCUMENT_TYPE   # Use configured type
 
-                # Create Catalog Entry
+                # --- Load corresponding JSON file(s) for page spans ---
+                json_data = None
+                
+                # Check if this is a chunked file
+                if '_chunk_' in original_base_name:
+                    # For chunked files, we need to load all chunk JSONs
+                    print(f"   Detected chunked file. Loading all chunk JSONs...")
+                    json_data = []
+                    
+                    # Get the base directory and original file name without chunk suffix
+                    base_dir = os.path.dirname(md_smb_path)
+                    base_name_without_chunk = original_base_name.split('_chunk_')[0]
+                    
+                    # Look for all chunk JSON files
+                    chunk_index = 1
+                    while True:
+                        chunk_json_name = f"{base_name_without_chunk}_chunk_{chunk_index}.json"
+                        chunk_json_path = os.path.join(base_dir, chunk_json_name).replace('\\', '/')
+                        
+                        try:
+                            chunk_json = read_json_from_nas(chunk_json_path)
+                            if chunk_json:
+                                json_data.append(chunk_json)
+                                print(f"   Loaded chunk {chunk_index} JSON")
+                                chunk_index += 1
+                            else:
+                                break  # No more chunks
+                        except:
+                            break  # No more chunks
+                    
+                    if not json_data:
+                        print(f"   [WARNING] No chunk JSON files found, will use regex fallback")
+                        json_data = None
+                else:
+                    # Single file - load single JSON
+                    json_smb_path = md_smb_path.replace('.md', '.json')
+                    print(f"   Looking for JSON file: {os.path.basename(json_smb_path)}")
+                    
+                    try:
+                        json_data = read_json_from_nas(json_smb_path)
+                        if json_data:
+                            print(f"   Successfully loaded JSON data for page extraction")
+                        else:
+                            print(f"   [WARNING] Failed to load JSON data, will use regex fallback")
+                    except Exception as e:
+                        print(f"   [WARNING] Error loading JSON file: {e}, will use regex fallback")
+
+                # --- Split content by pages ---
+                if json_data:
+                    page_contents = split_content_by_pages_using_json(markdown_content, json_data)
+                else:
+                    page_contents = split_content_by_pages_regex(markdown_content)
+                
+                # --- Generate embeddings for document_usage and document_description ---
+                print("   Generating embeddings for catalog entry...")
+                catalog_embeddings = generate_embeddings([usage, description], client)
+                
+                if len(catalog_embeddings) >= 2:
+                    usage_embedding = catalog_embeddings[0]
+                    description_embedding = catalog_embeddings[1]
+                else:
+                    print("   [WARNING] Failed to generate catalog embeddings. Using None.")
+                    usage_embedding = None
+                    description_embedding = None
+                
+                # Create Catalog Entry (with embeddings)
                 catalog_entry = {
                     "document_source": doc_source,
                     "document_type": doc_type,
                     "document_name": doc_name,
                     "document_description": description, # Use the returned description
                     "document_usage": usage, # Use the returned usage
+                    "document_usage_embedding": usage_embedding,  # Add embedding
+                    "document_description_embedding": description_embedding,  # Add embedding
                     # Use date_created from Stage 1 metadata (original creation or fallback to modified)
                     "date_created": original_metadata.get('date_created'),
                     "date_last_modified": original_metadata.get('date_last_modified'),
@@ -688,23 +906,27 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "processed_md_path": md_smb_path # For checkpointing
                 }
 
-                # Create Content Entry (before report entry)
-                content_entry = {
-                    "document_source": doc_source,
-                    "document_type": doc_type,
-                    "document_name": doc_name,
-                    "section_id": 0, # As requested
-                    "section_name": doc_base_name, # Use base name without extension
-                    "section_summary": usage, # Use the AI-generated usage summary here
-                    "content": markdown_content, # Use the full markdown content read from the file
-                    "date_created": datetime.now(timezone.utc).isoformat() # Add creation date
-                }
-
+                # Create Content Entries (one per page)
+                new_content_entries = []
+                for page_num, page_content in page_contents:
+                    content_entry = {
+                        "document_source": doc_source,
+                        "document_type": doc_type,
+                        "document_name": doc_name,
+                        "section_id": page_num,  # Use page number as section_id
+                        "section_name": f"{doc_base_name}_page_{page_num}",  # Include page number in section name
+                        "section_summary": f"Page {page_num} of {doc_name}",  # Simple page summary
+                        "section_content": page_content,  # Page-specific content
+                        "page_number": page_num,  # Explicit page number field
+                        "date_created": datetime.now(timezone.utc).isoformat()  # Add creation date
+                    }
+                    new_content_entries.append(content_entry)
+                
                 # --- Append and Save Both Entries (Atomic-like operation for checkpointing) ---
                 print(f"   Appending new catalog entry for: {doc_name}")
                 catalog_entries.append(catalog_entry)
-                print(f"   Appending new content entry for: {doc_name}")
-                content_entries.append(content_entry)
+                print(f"   Appending {len(new_content_entries)} content entries for: {doc_name}")
+                content_entries.extend(new_content_entries)
 
                 # Save Catalog Entries
                 catalog_save_success = write_json_to_nas(stage3_catalog_output_smb_path, catalog_entries)

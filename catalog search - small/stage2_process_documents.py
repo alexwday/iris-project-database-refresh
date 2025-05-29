@@ -443,9 +443,32 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                             analyze_result = analyze_document_with_di(di_client, chunk_path)
                             if analyze_result and analyze_result.content:
                                 combined_markdown += analyze_result.content + "\n\n" # Add separator between chunks
-                                # Manually create dictionary from AnalyzeResult
-                                result_dict = {'content': analyze_result.content, 'pages': []} # Simplified structure
-                                # Add more details if needed, similar to original code
+                                # Manually create dictionary from AnalyzeResult, mirroring example structure
+                                result_dict = {'content': analyze_result.content, 'pages': []}
+                                if hasattr(analyze_result, 'pages'):
+                                    for page in analyze_result.pages:
+                                        page_data = {
+                                            'page_number': page.page_number,
+                                            'width': page.width if hasattr(page, 'width') else None,
+                                            'height': page.height if hasattr(page, 'height') else None,
+                                            'unit': page.unit if hasattr(page, 'unit') else None,
+                                            'angle': page.angle if hasattr(page, 'angle') else None,
+                                            'spans': []  # Add spans information
+                                        }
+                                        # Extract spans information if available
+                                        if hasattr(page, 'spans') and page.spans:
+                                            for span in page.spans:
+                                                span_data = {
+                                                    'offset': span.offset if hasattr(span, 'offset') else None,
+                                                    'length': span.length if hasattr(span, 'length') else None
+                                                }
+                                                page_data['spans'].append(span_data)
+                                        result_dict['pages'].append(page_data)
+                                if hasattr(analyze_result, 'tables') and analyze_result.tables:
+                                    result_dict['tables_count'] = len(analyze_result.tables)
+                                if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
+                                    result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
+                                # Add other relevant attributes if needed
                                 results_json_list.append(result_dict)
                                 print(f"      Chunk {chunk_index + 1} processed successfully.")
                             else:
@@ -461,9 +484,32 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                     analyze_result = analyze_document_with_di(di_client, local_file_path)
                     if analyze_result and analyze_result.content:
                         combined_markdown = analyze_result.content
-                        # Manually create dictionary from AnalyzeResult
-                        result_dict = {'content': analyze_result.content, 'pages': []} # Simplified structure
-                        # Add more details if needed, similar to original code
+                        # Manually create dictionary from AnalyzeResult, mirroring example structure
+                        result_dict = {'content': analyze_result.content, 'pages': []}
+                        if hasattr(analyze_result, 'pages'):
+                            for page in analyze_result.pages:
+                                page_data = {
+                                    'page_number': page.page_number,
+                                    'width': page.width if hasattr(page, 'width') else None,
+                                    'height': page.height if hasattr(page, 'height') else None,
+                                    'unit': page.unit if hasattr(page, 'unit') else None,
+                                    'angle': page.angle if hasattr(page, 'angle') else None,
+                                    'spans': []  # Add spans information
+                                }
+                                # Extract spans information if available
+                                if hasattr(page, 'spans') and page.spans:
+                                    for span in page.spans:
+                                        span_data = {
+                                            'offset': span.offset if hasattr(span, 'offset') else None,
+                                            'length': span.length if hasattr(span, 'length') else None
+                                        }
+                                        page_data['spans'].append(span_data)
+                                result_dict['pages'].append(page_data)
+                        if hasattr(analyze_result, 'tables') and analyze_result.tables:
+                            result_dict['tables_count'] = len(analyze_result.tables)
+                        if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
+                            result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
+                        # Add other relevant attributes if needed
                         results_json_list.append(result_dict)
                     else:
                         print(f"   [ERROR] Failed to process document {file_name}.")
