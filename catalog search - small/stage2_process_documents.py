@@ -695,14 +695,6 @@ if __name__ == "__main__":
             print("-" * 60)
 
             # --- Define Paths (Relative to Share) ---
-            print("[5] Defining NAS Paths (Relative)...") # Renumbered
-            initialization_error = True # Set flag
-            # Don't exit yet, let finally block run
-
-        if not initialization_error: # Proceed only if DI client initialized
-            print("-" * 60)
-
-            # --- Define Paths (Relative to Share) ---
             print("[4] Defining NAS Paths (Relative)...") # Renumbered
             # share_name is already defined
             # Base output directory from Stage 1 (relative to share)
@@ -734,7 +726,7 @@ if __name__ == "__main__":
 
             if not initialization_error: # Proceed only if paths defined and dir ensured
                 # --- Check for Skip Flag from Stage 1 ---
-                print("[6] Checking for skip flag from Stage 1...") # Renumbered
+                print("[5] Checking for skip flag from Stage 1...") # Renumbered
                 skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
                 skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
                 print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
