@@ -379,6 +379,7 @@ def find_md_files(nas_dir_relative):
 
         # Use pysmb to walk the directory tree
         def walk_directory(path_relative):
+            local_md_files = []
             try:
                 entries = conn.listPath(NAS_PARAMS["share"], path_relative)
                 for entry in entries:
@@ -389,13 +390,16 @@ def find_md_files(nas_dir_relative):
                     
                     if entry.isDirectory:
                         # Recursively search subdirectories
-                        md_files_list.extend(walk_directory(entry_path))
+                        subdirectory_files = walk_directory(entry_path)
+                        if subdirectory_files:  # Only extend if not None
+                            local_md_files.extend(subdirectory_files)
                     elif entry.filename.lower().endswith('.md'):
-                        md_files_list.append(entry_path)
+                        local_md_files.append(entry_path)
             except Exception as e:
                 print(f"   [WARNING] Error walking directory {path_relative}: {e}")
+            return local_md_files
 
-        walk_directory(nas_dir_relative)
+        md_files_list = walk_directory(nas_dir_relative)
         print(f" <- Found {len(md_files_list)} .md files.")
         return md_files_list
 
