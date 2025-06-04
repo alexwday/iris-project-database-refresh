@@ -21,7 +21,12 @@ import json
 import time
 import re  # For regex page splitting
 import requests # For OAuth token request
-import smbclient
+# --- Use pysmb instead of smbclient ---
+from smb.SMBConnection import SMBConnection
+from smb import smb_structs
+import io # For reading/writing strings/bytes to NAS
+import socket # For gethostname
+# --- End pysmb import ---
 import pandas as pd
 import tempfile # Added for temporary certificate file
 from datetime import datetime, timezone
@@ -37,10 +42,17 @@ NAS_PARAMS = {
     "ip": "your_nas_ip",
     "share": "your_share_name",
     "user": "your_nas_user",
-    "password": "your_nas_password"
+    "password": "your_nas_password",
+    "port": 445 # Default SMB port (can be 139)
 }
 # Base path on the NAS share where Stage 1/2 output files were stored
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
+
+# --- pysmb Configuration ---
+# Increase timeout for potentially slow NAS operations
+smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
+smb_structs.MAX_PAYLOAD_SIZE = 65536 # Can sometimes help with large directories
+CLIENT_HOSTNAME = socket.gethostname() # Get local machine name for SMB connection
 
 # --- Processing Configuration (Should match Stage 1/2) ---
 # Define the specific document source processed in previous stages.
@@ -167,137 +179,232 @@ CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename
 # --- Helper Functions ---
 # ==============================================================================
 
-def initialize_smb_client():
-    """Sets up smbclient credentials."""
+def create_nas_connection():
+    """Creates and returns an authenticated SMBConnection object."""
     try:
-        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        print("SMB client configured successfully.")
+        conn = SMBConnection(
+            NAS_PARAMS["user"],
+            NAS_PARAMS["password"],
+            CLIENT_HOSTNAME, # Local machine name
+            NAS_PARAMS["ip"], # Remote server name (can be IP)
+            use_ntlm_v2=True,
+            is_direct_tcp=(NAS_PARAMS["port"] == 445) # Use direct TCP if port 445
+        )
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60) # Increased timeout
+        if not connected:
+            print("   [ERROR] Failed to connect to NAS.")
+            return None
+        return conn
+    except Exception as e:
+        print(f"   [ERROR] Exception creating NAS connection: {e}")
+        return None
+
+def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
+    """Ensures a directory exists on the NAS, creating it if necessary."""
+    if not conn:
+        print("   [ERROR] Cannot ensure NAS directory: No connection.")
+        return False
+    
+    # pysmb needs paths relative to the share, using '/' as separator
+    path_parts = dir_path_relative.strip('/').split('/')
+    current_path = ''
+    try:
+        for part in path_parts:
+            if not part: continue
+            current_path = os.path.join(current_path, part).replace('\\', '/')
+            try:
+                # Check if it exists by trying to list it
+                conn.listPath(share_name, current_path)
+            except Exception: # If listPath fails, assume it doesn't exist
+                print(f"      Creating directory on NAS: {share_name}/{current_path}")
+                conn.createDirectory(share_name, current_path)
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to configure SMB client: {e}")
+        print(f"   [ERROR] Failed to ensure/create NAS directory '{share_name}/{dir_path_relative}': {e}")
         return False
 
-def create_nas_directory(smb_dir_path):
-    """Creates a directory on the NAS if it doesn't exist."""
+def write_to_nas(share_name, nas_path_relative, content_bytes):
+    """Writes bytes to a file path on the NAS using pysmb."""
+    conn = None
+    print(f"   Attempting to write to NAS path: {share_name}/{nas_path_relative}")
     try:
-        if not smbclient.path.exists(smb_dir_path):
-            print(f"   Creating NAS directory: {smb_dir_path}")
-            smbclient.makedirs(smb_dir_path, exist_ok=True)
-            print(f"   Successfully created directory.")
-        # else: # Optional: reduce verbosity
-            # print(f"   NAS directory already exists: {smb_dir_path}")
-        return True
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error creating/accessing directory '{smb_dir_path}': {e}")
-        return False
-    except Exception as e:
-        print(f"   [ERROR] Unexpected error creating/accessing NAS directory '{smb_dir_path}': {e}")
-        return False
+        conn = create_nas_connection()
+        if not conn:
+            return False
 
-def read_json_from_nas(smb_path):
+        # Ensure the directory exists before writing the file
+        dir_path = os.path.dirname(nas_path_relative).replace('\\', '/')
+        if dir_path and not ensure_nas_dir_exists(conn, share_name, dir_path):
+             print(f"   [ERROR] Failed to ensure output directory exists: {dir_path}")
+             return False
+
+        # Use BytesIO for pysmb storeFile
+        file_obj = io.BytesIO(content_bytes)
+
+        # Store the file
+        bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
+        print(f"   Successfully wrote {bytes_written} bytes to: {share_name}/{nas_path_relative}")
+        return True
+    except Exception as e:
+        print(f"   [ERROR] Unexpected error writing to NAS '{share_name}/{nas_path_relative}': {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def read_from_nas(share_name, nas_path_relative):
+    """Reads content (as bytes) from a file path on the NAS using pysmb."""
+    conn = None
+    print(f"   Attempting to read from NAS path: {share_name}/{nas_path_relative}")
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return None
+
+        file_obj = io.BytesIO()
+        file_attributes, filesize = conn.retrieveFile(share_name, nas_path_relative, file_obj)
+        file_obj.seek(0)
+        content_bytes = file_obj.read()
+        print(f"   Successfully read {filesize} bytes from: {share_name}/{nas_path_relative}")
+        return content_bytes
+    except Exception as e:
+        print(f"   [ERROR] Unexpected error reading from NAS '{share_name}/{nas_path_relative}': {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def check_nas_path_exists(share_name, nas_path_relative):
+    """Checks if a file or directory exists on the NAS using pysmb."""
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False # Cannot check if connection failed
+
+        # Use getAttributes to check existence - works for files and dirs
+        conn.getAttributes(share_name, nas_path_relative)
+        return True # Path exists if no exception was raised
+    except Exception as e:
+        # Check if the error message indicates "No such file" or similar
+        err_str = str(e).lower()
+        if "no such file" in err_str or "object_name_not_found" in err_str or "0xc0000034" in err_str:
+            return False # Expected outcome if the file/path doesn't exist
+        else:
+            print(f"   [WARNING] Unexpected error checking existence of NAS path '{share_name}/{nas_path_relative}': {type(e).__name__} - {e}")
+            return False # Assume not found on other errors
+    finally:
+        if conn:
+            conn.close()
+
+def read_json_from_nas(nas_path_relative):
     """Reads and parses JSON data from a file path on the NAS."""
-    print(f"   Attempting to read JSON from NAS path: {smb_path}")
+    print(f"   Attempting to read JSON from NAS path: {NAS_PARAMS['share']}/{nas_path_relative}")
     try:
-        if not smbclient.path.exists(smb_path):
-            print(f"   JSON file not found at: {smb_path}. Returning empty list.")
+        if not check_nas_path_exists(NAS_PARAMS["share"], nas_path_relative):
+            print(f"   JSON file not found at: {NAS_PARAMS['share']}/{nas_path_relative}. Returning empty list.")
             # Return empty list for results files (catalog or content)
-            # Check against both possible output filenames
-            if STAGE3_CATALOG_OUTPUT_FILENAME in smb_path or STAGE3_CONTENT_OUTPUT_FILENAME in smb_path:
+            if STAGE3_CATALOG_OUTPUT_FILENAME in nas_path_relative or STAGE3_CONTENT_OUTPUT_FILENAME in nas_path_relative:
                 return [] # Assume results file
             # Handle metadata file case (though it should usually exist)
-            elif STAGE1_METADATA_FILENAME in smb_path:
+            elif STAGE1_METADATA_FILENAME in nas_path_relative:
                  print(f"   [WARNING] Metadata file {STAGE1_METADATA_FILENAME} not found. Returning empty list.")
                  return [] # Return list as metadata is expected to be a list of dicts
             else:
-                 # Fallback for unexpected files, maybe return None or raise error?
-                 print(f"   [WARNING] Unrecognized file type for not found handling: {smb_path}. Returning empty list.")
+                 print(f"   [WARNING] Unrecognized file type for not found handling: {nas_path_relative}. Returning empty list.")
                  return []
 
-        with smbclient.open_file(smb_path, mode='r', encoding='utf-8') as f:
-            data = json.load(f)
-        print(f"   Successfully read and parsed JSON from: {smb_path}")
+        json_bytes = read_from_nas(NAS_PARAMS["share"], nas_path_relative)
+        if json_bytes is None:
+            return None
+        
+        data = json.loads(json_bytes.decode('utf-8'))
+        print(f"   Successfully read and parsed JSON from: {NAS_PARAMS['share']}/{nas_path_relative}")
         return data
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error reading JSON from '{smb_path}': {e}")
-        return None # Indicate failure
     except json.JSONDecodeError as e:
-        print(f"   [ERROR] Failed to parse JSON from '{smb_path}': {e}")
+        print(f"   [ERROR] Failed to parse JSON from '{nas_path_relative}': {e}")
         return None # Indicate failure
     except Exception as e:
-        print(f"   [ERROR] Unexpected error reading JSON from NAS '{smb_path}': {e}")
+        print(f"   [ERROR] Unexpected error reading JSON from NAS '{nas_path_relative}': {e}")
         return None # Indicate failure
 
-def write_json_to_nas(smb_path, data):
+def write_json_to_nas(nas_path_relative, data):
     """Writes Python data (list/dict) as JSON to a file path on the NAS."""
-    print(f"   Attempting to write JSON to NAS path: {smb_path}")
+    print(f"   Attempting to write JSON to NAS path: {NAS_PARAMS['share']}/{nas_path_relative}")
     try:
-        # Ensure the directory exists first
-        dir_path = os.path.dirname(smb_path)
-        if not create_nas_directory(dir_path):
-             return False # Failed to create directory
-
         # Convert Python object to JSON string with specific formatting
-        # Use default=str for potential datetime objects or other non-serializables
         json_string = json.dumps(data, indent=4, default=str)
-
-        with smbclient.open_file(smb_path, mode='w', encoding='utf-8') as f:
-            f.write(json_string)
-        print(f"   Successfully wrote JSON to: {smb_path}")
-        return True
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error writing JSON to '{smb_path}': {e}")
-        return False
+        json_bytes = json_string.encode('utf-8')
+        
+        return write_to_nas(NAS_PARAMS["share"], nas_path_relative, json_bytes)
     except TypeError as e:
         print(f"   [ERROR] Failed to serialize data to JSON: {e}")
         return False
     except Exception as e:
-        print(f"   [ERROR] Unexpected error writing JSON to NAS '{smb_path}': {e}")
+        print(f"   [ERROR] Unexpected error preparing JSON for NAS write '{nas_path_relative}': {e}")
         return False
 
-def read_text_from_nas(smb_path):
+def read_text_from_nas(nas_path_relative):
     """Reads text content from a file path on the NAS."""
-    print(f"   Attempting to read text from NAS path: {smb_path}")
+    print(f"   Attempting to read text from NAS path: {NAS_PARAMS['share']}/{nas_path_relative}")
     try:
-        if not smbclient.path.exists(smb_path):
-            print(f"   [ERROR] Text file not found at: {smb_path}")
+        if not check_nas_path_exists(NAS_PARAMS["share"], nas_path_relative):
+            print(f"   [ERROR] Text file not found at: {NAS_PARAMS['share']}/{nas_path_relative}")
             return None
 
-        with smbclient.open_file(smb_path, mode='r', encoding='utf-8') as f:
-            content = f.read()
-        # print(f"   Successfully read text from: {smb_path}") # Reduce verbosity
+        text_bytes = read_from_nas(NAS_PARAMS["share"], nas_path_relative)
+        if text_bytes is None:
+            return None
+        
+        content = text_bytes.decode('utf-8')
         return content
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error reading text from '{smb_path}': {e}")
-        return None
     except Exception as e:
-        print(f"   [ERROR] Unexpected error reading text from NAS '{smb_path}': {e}")
+        print(f"   [ERROR] Unexpected error reading text from NAS '{nas_path_relative}': {e}")
         return None
 
-def find_md_files(smb_start_path):
+def find_md_files(nas_dir_relative):
     """Recursively finds all .md files within a given NAS directory."""
     md_files_list = []
-    print(f" -> Searching for .md files in: {smb_start_path}")
+    print(f" -> Searching for .md files in: {NAS_PARAMS['share']}/{nas_dir_relative}")
+    conn = None
     try:
-        if not smbclient.path.exists(smb_start_path):
-             print(f"   [ERROR] Base search path does not exist: {smb_start_path}")
+        conn = create_nas_connection()
+        if not conn:
+            print(f"   [ERROR] Failed to create connection for directory search")
+            return []
+
+        if not check_nas_path_exists(NAS_PARAMS["share"], nas_dir_relative):
+             print(f"   [ERROR] Base search path does not exist: {NAS_PARAMS['share']}/{nas_dir_relative}")
              return []
 
-        for dirpath, dirnames, filenames in smbclient.walk(smb_start_path):
-            for filename in filenames:
-                if filename.lower().endswith('.md'):
-                    full_smb_path = os.path.join(dirpath, filename).replace('\\', '/')
-                    md_files_list.append(full_smb_path)
-                    # print(f"      Found: {full_smb_path}") # Optional verbosity
+        # Use pysmb to walk the directory tree
+        def walk_directory(path_relative):
+            try:
+                entries = conn.listPath(NAS_PARAMS["share"], path_relative)
+                for entry in entries:
+                    if entry.filename in ['.', '..']:
+                        continue
+                    
+                    entry_path = os.path.join(path_relative, entry.filename).replace('\\', '/')
+                    
+                    if entry.isDirectory:
+                        # Recursively search subdirectories
+                        md_files_list.extend(walk_directory(entry_path))
+                    elif entry.filename.lower().endswith('.md'):
+                        md_files_list.append(entry_path)
+            except Exception as e:
+                print(f"   [WARNING] Error walking directory {path_relative}: {e}")
 
+        walk_directory(nas_dir_relative)
         print(f" <- Found {len(md_files_list)} .md files.")
         return md_files_list
 
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error walking directory '{smb_start_path}': {e}")
-        return [] # Return empty list on error
     except Exception as e:
-        print(f"   [ERROR] Unexpected error walking NAS directory '{smb_start_path}': {e}")
+        print(f"   [ERROR] Unexpected error walking NAS directory '{nas_dir_relative}': {e}")
         return [] # Return empty list on error
+    finally:
+        if conn:
+            conn.close()
 
 def get_oauth_token():
     """Retrieves an OAuth access token using client credentials flow."""
@@ -547,6 +654,201 @@ def split_content_by_pages_regex(markdown_content):
     print("   No page markers found. Treating as single page.")
     return [(1, markdown_content)]
 
+def split_page_into_sections(page_content, min_sections=2):
+    """
+    Splits a page's content into sections based on natural boundaries.
+    Falls back to force-splitting if needed to ensure minimum sections.
+    
+    Args:
+        page_content: The text content of a single page
+        min_sections: Minimum number of sections required (default: 2)
+        
+    Returns:
+        list: List of tuples (section_id, section_content) where section_id starts at 1
+    """
+    if not page_content or not page_content.strip():
+        return [(1, "")]
+    
+    # First, try to split by natural boundaries
+    sections = detect_natural_boundaries(page_content)
+    
+    # If we have enough sections, return them
+    if len(sections) >= min_sections:
+        return [(i+1, section) for i, section in enumerate(sections)]
+    
+    # Otherwise, force split to meet minimum requirement
+    if len(sections) == 1:
+        # We have one big section, split it
+        return force_split_content(sections[0], min_sections)
+    else:
+        # We have some sections but not enough
+        # Keep existing sections and split the largest one
+        result = []
+        largest_idx = 0
+        largest_len = 0
+        
+        # Find the largest section
+        for i, section in enumerate(sections):
+            if len(section) > largest_len:
+                largest_len = len(section)
+                largest_idx = i
+        
+        # Process all sections
+        section_counter = 1
+        for i, section in enumerate(sections):
+            if i == largest_idx and len(sections) < min_sections:
+                # Split the largest section into enough parts
+                splits_needed = min_sections - len(sections) + 1
+                split_sections = force_split_content(section, splits_needed)
+                for _, split_content in split_sections:
+                    result.append((section_counter, split_content))
+                    section_counter += 1
+            else:
+                result.append((section_counter, section))
+                section_counter += 1
+        
+        return result
+
+
+def detect_natural_boundaries(content):
+    """
+    Detects natural paragraph boundaries in the content.
+    
+    Returns a list of non-empty sections based on:
+    - Double newlines (paragraphs)
+    - Markdown headers
+    - List items
+    - Significant indentation changes
+    """
+    if not content:
+        return []
+    
+    # Split by double newlines first (most common paragraph delimiter)
+    paragraphs = re.split(r'\n\s*\n', content)
+    
+    sections = []
+    current_section = []
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+            
+        # Check if this starts a new section (headers, lists, etc.)
+        lines = para.split('\n')
+        first_line = lines[0].strip() if lines else ""
+        
+        # Detect markdown headers
+        if re.match(r'^#+\s+', first_line):
+            # Save previous section if exists
+            if current_section:
+                sections.append('\n'.join(current_section))
+                current_section = []
+            # Start new section with header
+            current_section.append(para)
+        # Detect list starts
+        elif re.match(r'^(\d+\.|\-|\*|\•)\s+', first_line):
+            # If we already have content, this starts a new section
+            if current_section and not re.match(r'^(\d+\.|\-|\*|\•)\s+', current_section[-1].split('\n')[0]):
+                sections.append('\n'.join(current_section))
+                current_section = []
+            current_section.append(para)
+        # Tables (markdown tables often start with |)
+        elif first_line.startswith('|') and len(lines) > 1 and lines[1].strip().startswith('|'):
+            if current_section:
+                sections.append('\n'.join(current_section))
+                current_section = []
+            current_section.append(para)
+        else:
+            # Regular paragraph - check if it's substantially different
+            if current_section and len(para) > 200 and len('\n'.join(current_section)) > 300:
+                # Start new section if current is getting large
+                sections.append('\n'.join(current_section))
+                current_section = [para]
+            else:
+                current_section.append(para)
+    
+    # Don't forget the last section
+    if current_section:
+        sections.append('\n'.join(current_section))
+    
+    # Filter out empty sections and clean up
+    sections = [s.strip() for s in sections if s.strip()]
+    
+    # If no sections were created, return the whole content as one section
+    if not sections:
+        return [content.strip()]
+    
+    return sections
+
+
+def force_split_content(content, num_sections):
+    """
+    Force splits content into a specific number of sections.
+    Tries to split at sentence boundaries when possible.
+    
+    Args:
+        content: The text to split
+        num_sections: Number of sections to create
+        
+    Returns:
+        list: List of tuples (section_id, section_content)
+    """
+    if not content or num_sections <= 1:
+        return [(1, content)]
+    
+    # Try to split by sentences first
+    sentences = re.split(r'(?<=[.!?])\s+', content)
+    
+    if len(sentences) >= num_sections:
+        # We have enough sentences, distribute them evenly
+        sentences_per_section = len(sentences) // num_sections
+        extra_sentences = len(sentences) % num_sections
+        
+        sections = []
+        current_idx = 0
+        
+        for i in range(num_sections):
+            # Calculate how many sentences for this section
+            section_sentence_count = sentences_per_section
+            if i < extra_sentences:
+                section_sentence_count += 1
+            
+            # Extract sentences for this section
+            section_sentences = sentences[current_idx:current_idx + section_sentence_count]
+            section_content = ' '.join(section_sentences).strip()
+            
+            if section_content:
+                sections.append((i + 1, section_content))
+            
+            current_idx += section_sentence_count
+    else:
+        # Not enough sentences, split by character count
+        content_length = len(content)
+        section_length = content_length // num_sections
+        
+        sections = []
+        for i in range(num_sections):
+            start_idx = i * section_length
+            if i == num_sections - 1:
+                # Last section gets any remainder
+                end_idx = content_length
+            else:
+                end_idx = (i + 1) * section_length
+                # Try to find a good break point (space, newline)
+                search_start = max(start_idx, end_idx - 50)
+                for j in range(end_idx, search_start, -1):
+                    if content[j] in ' \n':
+                        end_idx = j
+                        break
+            
+            section_content = content[start_idx:end_idx].strip()
+            if section_content:
+                sections.append((i + 1, section_content))
+    
+    return sections
+
+
 def generate_embeddings(texts, client, max_batch_size=50):
     """
     Generates embeddings for a list of texts using OpenAI API.
@@ -594,10 +896,10 @@ def generate_embeddings(texts, client, max_batch_size=50):
 # --- Main Processing Function ---
 # ==============================================================================
 
-def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
-                           stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                           stage3_anonymization_report_smb_path, # Added report path
-                           ca_bundle_smb_path, refresh_flag_smb_path):
+def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative_path,
+                           stage3_catalog_output_relative_path, stage3_content_output_relative_path,
+                           stage3_anonymization_report_relative_path, # Added report path
+                           ca_bundle_relative_path, refresh_flag_relative_path):
     """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
     print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
@@ -607,28 +909,30 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
 
     try:
         # --- Download and Set Custom CA Bundle ---
-        print("[4] Setting up Custom CA Bundle...") # Renumbered step
+        print("[3] Setting up Custom CA Bundle...")
         try: # Inner try/except for CA bundle download/setup
-            if smbclient.path.exists(ca_bundle_smb_path):
-                # Create a temporary file to store the certificate
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".cer") as temp_cert_file:
-                    print(f"   Downloading to temporary file: {temp_cert_file.name}")
-                    with smbclient.open_file(ca_bundle_smb_path, mode='rb') as nas_f:
-                        temp_cert_file.write(nas_f.read())
-                    temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
+            if check_nas_path_exists(NAS_PARAMS["share"], ca_bundle_relative_path):
+                # Read CA bundle content from NAS
+                ca_bundle_bytes = read_from_nas(NAS_PARAMS["share"], ca_bundle_relative_path)
+                
+                if ca_bundle_bytes:
+                    # Create a temporary file to store the certificate
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".cer", mode='wb') as temp_cert_file:
+                        temp_cert_file.write(ca_bundle_bytes)
+                        temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
+                        print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
 
-                # Set the environment variables
-                if temp_cert_file_path: # Ensure path was obtained
+                    # Set the environment variables
                     os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
                     os.environ['SSL_CERT_FILE'] = temp_cert_file_path
-                    print(f"   Set REQUESTS_CA_BUNDLE environment variable to: {temp_cert_file_path}")
-                    print(f"   Set SSL_CERT_FILE environment variable to: {temp_cert_file_path}")
+                    print(f"   Set REQUESTS_CA_BUNDLE environment variable.")
+                    print(f"   Set SSL_CERT_FILE environment variable.")
+                else:
+                    print(f"   [WARNING] Failed to read CA bundle content. Proceeding without custom CA bundle.")
             else:
-                print(f"   [WARNING] CA Bundle file not found at {ca_bundle_smb_path}. Proceeding without custom CA bundle.")
-        except smbclient.SambaClientError as e:
-            print(f"   [ERROR] SMB Error during CA bundle handling '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
+                print(f"   [WARNING] CA Bundle file not found at {NAS_PARAMS['share']}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
         except Exception as e:
-            print(f"   [ERROR] Unexpected error during CA bundle handling '{ca_bundle_smb_path}': {e}. Proceeding without custom CA bundle.")
+            print(f"   [ERROR] Unexpected error during CA bundle handling '{ca_bundle_relative_path}': {e}. Proceeding without custom CA bundle.")
             # Cleanup potentially created temp file if error occurred after creation
             if temp_cert_file_path and os.path.exists(temp_cert_file_path):
                 try:
@@ -638,35 +942,36 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                 except OSError: pass # Ignore cleanup error
 
         # --- Check for Full Refresh Flag ---
-        print(f"[5] Checking for Full Refresh flag: {os.path.basename(refresh_flag_smb_path)}...") # Renumbered
+        print(f"[4] Checking for Full Refresh flag: {os.path.basename(refresh_flag_relative_path)}...")
         try:
-            if smbclient.path.exists(refresh_flag_smb_path):
+            if check_nas_path_exists(NAS_PARAMS["share"], refresh_flag_relative_path):
                 print("   *** FULL REFRESH MODE DETECTED ***")
                 is_full_refresh = True
                 # Delete existing Stage 3 output files
                 print("   Deleting existing Stage 3 output files (if they exist)...")
-                for file_path in [stage3_catalog_output_smb_path, stage3_content_output_smb_path, stage3_anonymization_report_smb_path]: # Added report path
+                for file_path in [stage3_catalog_output_relative_path, stage3_content_output_relative_path, stage3_anonymization_report_relative_path]: # Added report path
+                    conn = None
                     try:
-                        if smbclient.path.exists(file_path):
-                            smbclient.remove(file_path)
+                        conn = create_nas_connection()
+                        if conn and check_nas_path_exists(NAS_PARAMS["share"], file_path):
+                            conn.deleteFiles(NAS_PARAMS["share"], file_path)
                             print(f"      Deleted: {os.path.basename(file_path)}")
                         else:
                             print(f"      File not found (already deleted or never existed): {os.path.basename(file_path)}")
-                    except smbclient.SambaClientError as rm_err:
-                        print(f"      [WARNING] SMB Error deleting file {os.path.basename(file_path)}: {rm_err}")
                     except Exception as rm_err:
-                        print(f"      [WARNING] Unexpected error deleting file {os.path.basename(file_path)}: {rm_err}")
+                        print(f"      [WARNING] Error deleting file {os.path.basename(file_path)}: {rm_err}")
+                    finally:
+                        if conn:
+                            conn.close()
             else:
                 print("   Full Refresh flag not found. Running in incremental mode.")
-        except smbclient.SambaClientError as e:
-            print(f"   [WARNING] SMB Error checking for refresh flag file '{refresh_flag_smb_path}': {e}. Assuming incremental mode.")
         except Exception as e:
-            print(f"   [WARNING] Unexpected error checking for refresh flag file '{refresh_flag_smb_path}': {e}. Assuming incremental mode.")
+            print(f"   [WARNING] Unexpected error checking for refresh flag file '{refresh_flag_relative_path}': {e}. Assuming incremental mode.")
         print("-" * 60)
 
         # --- Load Stage 1 Metadata ---
-        print(f"[6] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_smb_path)}...") # Renumbered
-        stage1_metadata_list = read_json_from_nas(stage1_metadata_smb_path)
+        print(f"[5] Loading Stage 1 Metadata from: {os.path.basename(stage1_metadata_relative_path)}...")
+        stage1_metadata_list = read_json_from_nas(stage1_metadata_relative_path)
         if stage1_metadata_list is None:
             print("[CRITICAL ERROR] Failed to load Stage 1 metadata. Exiting.")
             sys.exit(1)
@@ -695,8 +1000,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
 
         if not is_full_refresh:
             # Load Catalog Entries
-            print(f"   Loading catalog entries from: {os.path.basename(stage3_catalog_output_smb_path)}...")
-            catalog_entries = read_json_from_nas(stage3_catalog_output_smb_path)
+            print(f"   Loading catalog entries from: {os.path.basename(stage3_catalog_output_relative_path)}...")
+            catalog_entries = read_json_from_nas(stage3_catalog_output_relative_path)
             if catalog_entries is None:
                 print("[CRITICAL ERROR] Failed to load or initialize existing catalog entries. Exiting.")
                 sys.exit(1)
@@ -706,8 +1011,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             print(f"   Found {len(catalog_entries)} existing catalog entries.")
 
             # Load Content Entries
-            print(f"   Loading content entries from: {os.path.basename(stage3_content_output_smb_path)}...")
-            content_entries = read_json_from_nas(stage3_content_output_smb_path)
+            print(f"   Loading content entries from: {os.path.basename(stage3_content_output_relative_path)}...")
+            content_entries = read_json_from_nas(stage3_content_output_relative_path)
             if content_entries is None:
                 print("[CRITICAL ERROR] Failed to load or initialize existing content entries. Exiting.")
                 sys.exit(1)
@@ -717,8 +1022,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             print(f"   Found {len(content_entries)} existing content entries.")
 
             # Load Anonymization Report Entries
-            print(f"   Loading anonymization report entries from: {os.path.basename(stage3_anonymization_report_smb_path)}...")
-            report_entries = read_json_from_nas(stage3_anonymization_report_smb_path)
+            print(f"   Loading anonymization report entries from: {os.path.basename(stage3_anonymization_report_relative_path)}...")
+            report_entries = read_json_from_nas(stage3_anonymization_report_relative_path)
             if report_entries is None:
                 print("[CRITICAL ERROR] Failed to load or initialize existing anonymization report entries. Exiting.")
                 sys.exit(1)
@@ -735,8 +1040,8 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
         print("-" * 60)
 
         # --- Find Markdown Files from Stage 2 ---
-        print(f"[8] Searching for Stage 2 Markdown files in: {stage2_md_dir_smb_path}...") # Renumbered
-        md_files_to_process = find_md_files(stage2_md_dir_smb_path)
+        print(f"[8] Searching for Stage 2 Markdown files in: {os.path.basename(stage2_md_dir_relative_path)}...") # Renumbered
+        md_files_to_process = find_md_files(stage2_md_dir_relative_path)
         if not md_files_to_process:
             print("   No Markdown files found to process.")
             print("\n" + "="*60)
@@ -754,13 +1059,13 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
             current_token = None
             token_expiry_time = time.time() # Initialize to ensure first token fetch
 
-            for i, md_smb_path in enumerate(md_files_to_process):
+            for i, md_relative_path in enumerate(md_files_to_process):
                 start_time = time.time()
                 print(f"\n--- Processing file {i+1}/{len(md_files_to_process)} ---")
-                print(f"   MD File Path (SMB): {md_smb_path}")
+                print(f"   MD File Path (Relative): {md_relative_path}")
 
                 # Skip if already processed (only in incremental mode)
-                if not is_full_refresh and md_smb_path in processed_md_files:
+                if not is_full_refresh and md_relative_path in processed_md_files:
                     print("   File already processed (found in existing results). Skipping.")
                     skipped_count += 1
                     continue
@@ -785,9 +1090,9 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     error_count += 1
                     continue
 
-                markdown_content = read_text_from_nas(md_smb_path)
+                markdown_content = read_text_from_nas(md_relative_path)
                 if not markdown_content:
-                    print(f"   [ERROR] Failed to read Markdown content from {md_smb_path}. Skipping file.")
+                    print(f"   [ERROR] Failed to read Markdown content from {md_relative_path}. Skipping file.")
                     error_count += 1
                     continue
 
@@ -798,12 +1103,12 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
 
                 # Check if None was returned (indicates an error in call_gpt_summarizer)
                 if description is None or usage is None or anonymization_data is None:
-                    print(f"   [ERROR] Failed to get summaries or anonymization data from GPT for {md_smb_path}. Skipping file.")
+                    print(f"   [ERROR] Failed to get summaries or anonymization data from GPT for {md_relative_path}. Skipping file.")
                     error_count += 1
                     continue # Skip if summarization fails
 
                 # --- Prepare Data for Output ---
-                md_filename = os.path.basename(md_smb_path)
+                md_filename = os.path.basename(md_relative_path)
                 original_base_name = os.path.splitext(md_filename)[0]
                 # Handle potential chunk suffixes added in Stage 2
                 if '_chunk_' in original_base_name:
@@ -831,7 +1136,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     json_data = []
                     
                     # Get the base directory and original file name without chunk suffix
-                    base_dir = os.path.dirname(md_smb_path)
+                    base_dir = os.path.dirname(md_relative_path)
                     base_name_without_chunk = original_base_name.split('_chunk_')[0]
                     
                     # Look for all chunk JSON files
@@ -856,11 +1161,11 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                         json_data = None
                 else:
                     # Single file - load single JSON
-                    json_smb_path = md_smb_path.replace('.md', '.json')
-                    print(f"   Looking for JSON file: {os.path.basename(json_smb_path)}")
+                    json_relative_path = md_relative_path.replace('.md', '.json')
+                    print(f"   Looking for JSON file: {os.path.basename(json_relative_path)}")
                     
                     try:
-                        json_data = read_json_from_nas(json_smb_path)
+                        json_data = read_json_from_nas(json_relative_path)
                         if json_data:
                             print(f"   Successfully loaded JSON data for page extraction")
                         else:
@@ -903,35 +1208,42 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     "file_size": original_metadata.get('file_size'),
                     "file_path": original_metadata.get('file_path'),
                     "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_metadata.get('file_path', '')}",
-                    "processed_md_path": md_smb_path # For checkpointing
+                    "processed_md_path": md_relative_path # For checkpointing
                 }
 
-                # Create Content Entries (one per page)
+                # Create Content Entries (multiple per page based on sections)
                 new_content_entries = []
+                print(f"   Splitting {len(page_contents)} pages into sections...")
                 for page_num, page_content in page_contents:
-                    content_entry = {
-                        "document_source": doc_source,
-                        "document_type": doc_type,
-                        "document_name": doc_name,
-                        "section_id": page_num,  # Use page number as section_id
-                        "section_name": f"{doc_base_name}_page_{page_num}",  # Include page number in section name
-                        "section_summary": f"Page {page_num} of {doc_name}",  # Simple page summary
-                        "section_content": page_content,  # Page-specific content
-                        "page_number": page_num,  # Explicit page number field
-                        "date_created": datetime.now(timezone.utc).isoformat()  # Add creation date
-                    }
-                    new_content_entries.append(content_entry)
+                    # Split each page into sections
+                    page_sections = split_page_into_sections(page_content, min_sections=2)
+                    print(f"      Page {page_num}: {len(page_sections)} sections")
+                    
+                    # Create entries for each section within the page
+                    for section_id, section_content in page_sections:
+                        content_entry = {
+                            "document_source": doc_source,
+                            "document_type": doc_type,
+                            "document_name": doc_name,
+                            "page_number": page_num,  # Page number from Azure DI
+                            "section_id": section_id,  # Section within the page (1, 2, 3...)
+                            "section_name": f"{doc_base_name}_page_{page_num}_section_{section_id}",  # Hierarchical naming
+                            "section_summary": f"Page {page_num}, Section {section_id} of {doc_name}",  # Hierarchical summary
+                            "section_content": section_content,  # Section-specific content
+                            "date_created": datetime.now(timezone.utc).isoformat()  # Add creation date
+                        }
+                        new_content_entries.append(content_entry)
                 
                 # --- Append and Save Both Entries (Atomic-like operation for checkpointing) ---
                 print(f"   Appending new catalog entry for: {doc_name}")
                 catalog_entries.append(catalog_entry)
-                print(f"   Appending {len(new_content_entries)} content entries for: {doc_name}")
+                print(f"   Appending {len(new_content_entries)} content entries (sections) for: {doc_name}")
                 content_entries.extend(new_content_entries)
 
                 # Save Catalog Entries
-                catalog_save_success = write_json_to_nas(stage3_catalog_output_smb_path, catalog_entries)
+                catalog_save_success = write_json_to_nas(stage3_catalog_output_relative_path, catalog_entries)
                 # Save Content Entries
-                content_save_success = write_json_to_nas(stage3_content_output_smb_path, content_entries)
+                content_save_success = write_json_to_nas(stage3_content_output_relative_path, content_entries)
 
                 if catalog_save_success and content_save_success:
                     print(f"   Successfully saved updated catalog ({len(catalog_entries)}) and content ({len(content_entries)}) entries to NAS.")
@@ -950,7 +1262,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     # Append and Save Anonymization Report Entry (Standard JSON list)
                     print(f"   Appending new report entry for: {doc_name}")
                     report_entries.append(report_entry)
-                    report_save_success = write_json_to_nas(stage3_anonymization_report_smb_path, report_entries)
+                    report_save_success = write_json_to_nas(stage3_anonymization_report_relative_path, report_entries)
 
                     if report_save_success:
                         print(f"   Successfully saved updated anonymization report ({len(report_entries)}) entries to NAS.")
@@ -964,7 +1276,7 @@ def main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
                     # (or if report save failure is considered non-critical)
                     # Assuming report save failure is non-critical for now:
                     new_entries_count += 1
-                    processed_md_files.add(md_smb_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
+                    processed_md_files.add(md_relative_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
                 else:
                     print(f"   [CRITICAL ERROR] Failed to save one or both primary output files (catalog/content) to NAS after processing {md_filename}. Stopping.")
                     error_count += 1
@@ -1052,54 +1364,44 @@ if __name__ == "__main__":
     print(f"--- Document Type: {DOCUMENT_TYPE} ---")
     print("="*60 + "\n")
 
-    # --- Initialize SMB Client ---
-    print("[1] Initializing SMB Client...")
-    if not initialize_smb_client():
-        sys.exit(1) # Exit if SMB client fails
-    print("-" * 60)
-
-    # --- Define Paths ---
-    print("[2] Defining NAS Paths...")
+    # --- Define Paths (Relative to Share) ---
+    print("[1] Defining NAS Paths (Relative)...")
+    share_name = NAS_PARAMS["share"]
     source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
-    stage1_metadata_smb_path = os.path.join(source_base_dir_smb, STAGE1_METADATA_FILENAME).replace('\\', '/')
-    stage2_md_dir_smb_path = os.path.join(source_base_dir_smb, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
-    stage3_catalog_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/') # Updated path
-    stage3_content_output_smb_path = os.path.join(source_base_dir_smb, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/') # New path
-    stage3_anonymization_report_smb_path = os.path.join(source_base_dir_smb, STAGE3_ANONYMIZATION_REPORT_FILENAME).replace('\\', '/') # New report path
-    ca_bundle_smb_path = os.path.join(f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{NAS_OUTPUT_FOLDER_PATH}", CA_BUNDLE_FILENAME).replace('\\', '/')
+    stage1_metadata_relative_path = os.path.join(source_base_dir_relative, STAGE1_METADATA_FILENAME).replace('\\', '/')
+    stage2_md_dir_relative_path = os.path.join(source_base_dir_relative, STAGE2_OUTPUT_SUBFOLDER).replace('\\', '/')
+    stage3_catalog_output_relative_path = os.path.join(source_base_dir_relative, STAGE3_CATALOG_OUTPUT_FILENAME).replace('\\', '/')
+    stage3_content_output_relative_path = os.path.join(source_base_dir_relative, STAGE3_CONTENT_OUTPUT_FILENAME).replace('\\', '/')
+    stage3_anonymization_report_relative_path = os.path.join(source_base_dir_relative, STAGE3_ANONYMIZATION_REPORT_FILENAME).replace('\\', '/')
+    ca_bundle_relative_path = os.path.join(NAS_OUTPUT_FOLDER_PATH, CA_BUNDLE_FILENAME).replace('\\', '/')
 
-    print(f"   Source Base Dir (SMB): {source_base_dir_smb}")
-    print(f"   Stage 1 Metadata File (SMB): {stage1_metadata_smb_path}")
-    print(f"   Stage 2 MD Files Dir (SMB): {stage2_md_dir_smb_path}")
-    print(f"   Stage 3 Catalog Output File (SMB): {stage3_catalog_output_smb_path}") # Updated print
-    print(f"   Stage 3 Content Output File (SMB): {stage3_content_output_smb_path}") # New print
-    print(f"   Stage 3 Anonymization Report (SMB): {stage3_anonymization_report_smb_path}") # New print
-    print(f"   CA Bundle File (SMB): {ca_bundle_smb_path}")
+    print(f"   Source Base Dir (Relative): {share_name}/{source_base_dir_relative}")
+    print(f"   Stage 1 Metadata File (Relative): {share_name}/{stage1_metadata_relative_path}")
+    print(f"   Stage 2 MD Files Dir (Relative): {share_name}/{stage2_md_dir_relative_path}")
+    print(f"   Stage 3 Catalog Output File (Relative): {share_name}/{stage3_catalog_output_relative_path}")
+    print(f"   Stage 3 Content Output File (Relative): {share_name}/{stage3_content_output_relative_path}")
+    print(f"   Stage 3 Anonymization Report (Relative): {share_name}/{stage3_anonymization_report_relative_path}")
+    print(f"   CA Bundle File (Relative): {share_name}/{ca_bundle_relative_path}")
     # Add Refresh Flag Path
     refresh_flag_file_name = '_FULL_REFRESH.flag'
-    refresh_flag_smb_path = os.path.join(source_base_dir_smb, refresh_flag_file_name).replace('\\', '/')
-    print(f"   Refresh Flag File (SMB): {refresh_flag_smb_path}")
+    refresh_flag_relative_path = os.path.join(source_base_dir_relative, refresh_flag_file_name).replace('\\', '/')
+    print(f"   Refresh Flag File (Relative): {share_name}/{refresh_flag_relative_path}")
     print("-" * 60)
 
     # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
+    print("[2] Checking for skip flag from Stage 1...")
     skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    skip_flag_relative_path = os.path.join(source_base_dir_relative, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
     should_skip = False
     try:
-        if smbclient.path.exists(skip_flag_smb_path):
+        if check_nas_path_exists(share_name, skip_flag_relative_path):
             print(f"   Skip flag file found. Stage 1 indicated no files to process.")
             should_skip = True
         else:
             print(f"   Skip flag file not found. Proceeding with Stage 3.")
-    except smbclient.SambaClientError as e:
-        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 3, but there might be an issue accessing NAS.")
-        # Continue execution, assuming no skip if flag check fails
     except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_relative_path}': {e}")
         print(f"   Proceeding with Stage 3.")
         # Continue execution
     print("-" * 60)
@@ -1111,9 +1413,9 @@ if __name__ == "__main__":
         print("="*60 + "\n")
     else:
         # Call the main processing function only if not skipping
-        main_processing_stage3(stage1_metadata_smb_path, stage2_md_dir_smb_path,
-                               stage3_catalog_output_smb_path, stage3_content_output_smb_path,
-                               stage3_anonymization_report_smb_path, # Pass new report path
-                               ca_bundle_smb_path, refresh_flag_smb_path)
+        main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative_path,
+                               stage3_catalog_output_relative_path, stage3_content_output_relative_path,
+                               stage3_anonymization_report_relative_path, # Pass new report path
+                               ca_bundle_relative_path, refresh_flag_relative_path)
 
     # Script ends naturally here if skipped or after main_processing completes

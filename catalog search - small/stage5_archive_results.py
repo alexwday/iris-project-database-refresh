@@ -20,7 +20,11 @@ Workflow:
 
 import os
 import sys
-import smbclient
+# --- Use pysmb instead of smbclient ---
+from smb.SMBConnection import SMBConnection
+from smb import smb_structs
+import socket # For gethostname
+# --- End pysmb import ---
 from datetime import datetime
 
 # ==============================================================================
@@ -33,10 +37,17 @@ NAS_PARAMS = {
     "ip": "your_nas_ip",
     "share": "your_share_name",
     "user": "your_nas_user",
-    "password": "your_nas_password"
+    "password": "your_nas_password",
+    "port": 445 # Default SMB port (can be 139)
 }
 # Base path on the NAS share where Stage 1-4 output files were stored
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
+
+# --- pysmb Configuration ---
+# Increase timeout for potentially slow NAS operations
+smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
+smb_structs.MAX_PAYLOAD_SIZE = 65536 # Can sometimes help with large directories
+CLIENT_HOSTNAME = socket.gethostname() # Get local machine name for SMB connection
 
 # --- Processing Configuration ---
 # Define the specific document source processed in previous stages.
@@ -47,33 +58,90 @@ ARCHIVE_SUBFOLDER_NAME = '_archive' # Name of the subfolder for archives
 # --- Helper Functions ---
 # ==============================================================================
 
-def initialize_smb_client():
-    """Sets up smbclient credentials."""
+def create_nas_connection():
+    """Creates and returns an authenticated SMBConnection object."""
     try:
-        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        print("SMB client configured successfully.")
+        conn = SMBConnection(
+            NAS_PARAMS["user"],
+            NAS_PARAMS["password"],
+            CLIENT_HOSTNAME, # Local machine name
+            NAS_PARAMS["ip"], # Remote server name (can be IP)
+            use_ntlm_v2=True,
+            is_direct_tcp=(NAS_PARAMS["port"] == 445) # Use direct TCP if port 445
+        )
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60) # Increased timeout
+        if not connected:
+            print("   [ERROR] Failed to connect to NAS.")
+            return None
+        return conn
+    except Exception as e:
+        print(f"   [ERROR] Exception creating NAS connection: {e}")
+        return None
+
+def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
+    """Ensures a directory exists on the NAS, creating it if necessary."""
+    if not conn:
+        print("   [ERROR] Cannot ensure NAS directory: No connection.")
+        return False
+    
+    # pysmb needs paths relative to the share, using '/' as separator
+    path_parts = dir_path_relative.strip('/').split('/')
+    current_path = ''
+    try:
+        for part in path_parts:
+            if not part: continue
+            current_path = os.path.join(current_path, part).replace('\\', '/')
+            try:
+                # Check if it exists by trying to list it
+                conn.listPath(share_name, current_path)
+            except Exception: # If listPath fails, assume it doesn't exist
+                print(f"      Creating directory on NAS: {share_name}/{current_path}")
+                conn.createDirectory(share_name, current_path)
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to configure SMB client: {e}")
+        print(f"   [ERROR] Failed to ensure/create NAS directory '{share_name}/{dir_path_relative}': {e}")
         return False
 
-def create_nas_directory(smb_dir_path):
-    """Creates a directory on the NAS if it doesn't exist."""
+def check_nas_path_exists(share_name, nas_path_relative):
+    """Checks if a file or directory exists on the NAS using pysmb."""
+    conn = None
     try:
-        if not smbclient.path.exists(smb_dir_path):
-            print(f"   Creating NAS directory: {smb_dir_path}")
-            smbclient.makedirs(smb_dir_path, exist_ok=True)
-            print(f"   Successfully created directory.")
-        else:
-            # Directory already exists
-            pass
-        return True
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error creating/accessing directory '{smb_dir_path}': {e}")
-        return False
+        conn = create_nas_connection()
+        if not conn:
+            return False # Cannot check if connection failed
+
+        # Use getAttributes to check existence - works for files and dirs
+        conn.getAttributes(share_name, nas_path_relative)
+        return True # Path exists if no exception was raised
     except Exception as e:
-        print(f"   [ERROR] Unexpected error creating/accessing NAS directory '{smb_dir_path}': {e}")
+        # Check if the error message indicates "No such file" or similar
+        err_str = str(e).lower()
+        if "no such file" in err_str or "object_name_not_found" in err_str or "0xc0000034" in err_str:
+            return False # Expected outcome if the file/path doesn't exist
+        else:
+            print(f"   [WARNING] Unexpected error checking existence of NAS path '{share_name}/{nas_path_relative}': {type(e).__name__} - {e}")
+            return False # Assume not found on other errors
+    finally:
+        if conn:
+            conn.close()
+
+def nas_rename_directory(share_name, old_path_relative, new_path_relative):
+    """Renames/moves a directory on the NAS using pysmb."""
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False
+
+        # Use pysmb rename operation
+        conn.rename(share_name, old_path_relative, new_path_relative)
+        return True
+    except Exception as e:
+        print(f"   [ERROR] Failed to rename directory from '{old_path_relative}' to '{new_path_relative}': {e}")
         return False
+    finally:
+        if conn:
+            conn.close()
 
 # ==============================================================================
 # --- Main Execution Logic ---
@@ -85,53 +153,51 @@ if __name__ == "__main__":
     print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
 
-    # --- Initialize SMB Client ---
-    print("[1] Initializing SMB Client...")
-    if not initialize_smb_client():
-        sys.exit(1)
-    print("-" * 60)
-
-    # --- Define NAS Paths ---
-    print("[2] Defining NAS Paths...")
+    # --- Define NAS Paths (Relative) ---
+    print("[1] Defining NAS Paths (Relative)...")
     # Original source directory containing results
     source_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    source_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_dir_relative}"
 
     # Target archive base directory
     archive_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, ARCHIVE_SUBFOLDER_NAME).replace('\\', '/')
-    archive_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{archive_base_dir_relative}"
 
     # Construct the new timestamped name and final destination path
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     new_folder_name = f"{DOCUMENT_SOURCE}_{timestamp}"
-    destination_dir_smb = os.path.join(archive_base_dir_smb, new_folder_name).replace('\\', '/')
+    destination_dir_relative = os.path.join(archive_base_dir_relative, new_folder_name).replace('\\', '/')
 
-    print(f"   Source Directory (SMB): {source_dir_smb}")
-    print(f"   Target Archive Directory (SMB): {archive_base_dir_smb}")
-    print(f"   Final Destination Path (SMB): {destination_dir_smb}")
+    print(f"   Source Directory (Relative): {NAS_PARAMS['share']}/{source_dir_relative}")
+    print(f"   Target Archive Directory (Relative): {NAS_PARAMS['share']}/{archive_base_dir_relative}")
+    print(f"   Final Destination Path (Relative): {NAS_PARAMS['share']}/{destination_dir_relative}")
     print("-" * 60)
 
     # --- Ensure Archive Directory Exists ---
-    print(f"[3] Ensuring Target Archive Directory Exists on NAS: {archive_base_dir_smb}")
-    if not create_nas_directory(archive_base_dir_smb):
-        print(f"[CRITICAL ERROR] Failed to create or access target archive directory. Exiting.")
+    print(f"[2] Ensuring Target Archive Directory Exists on NAS...")
+    conn_archive = create_nas_connection()
+    if not conn_archive:
+        print(f"[CRITICAL ERROR] Failed to connect to NAS to create archive directory. Exiting.")
         sys.exit(1)
+    
+    try:
+        if not ensure_nas_dir_exists(conn_archive, NAS_PARAMS["share"], archive_base_dir_relative):
+            print(f"[CRITICAL ERROR] Failed to create or access target archive directory. Exiting.")
+            sys.exit(1)
+        print(f"   Target archive directory ensured: {NAS_PARAMS['share']}/{archive_base_dir_relative}")
+    finally:
+        conn_archive.close()
     print("-" * 60)
 
     # --- Check if Source Directory Exists ---
-    print(f"[4] Checking if Source Directory Exists: {source_dir_smb}")
+    print(f"[3] Checking if Source Directory Exists...")
     source_exists = False
     try:
-        source_exists = smbclient.path.exists(source_dir_smb)
+        source_exists = check_nas_path_exists(NAS_PARAMS["share"], source_dir_relative)
         if not source_exists:
              print(f"   Source directory not found. Nothing to archive.")
              print("\n" + "="*60)
              print(f"--- Stage 5 Completed (Source directory not found) ---")
              print("="*60 + "\n")
              sys.exit(0) # Exit cleanly, nothing to do
-        elif not smbclient.path.isdir(source_dir_smb):
-             print(f"   [CRITICAL ERROR] Source path exists but is not a directory: {source_dir_smb}. Exiting.")
-             sys.exit(1)
         else:
              print(f"   Source directory found.")
     except Exception as e:
@@ -140,15 +206,15 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # --- Rename and Move Directory on NAS ---
-    print(f"[5] Moving and Renaming Source Directory to Archive...")
-    print(f"   From: {source_dir_smb}")
-    print(f"   To:   {destination_dir_smb}")
+    print(f"[4] Moving and Renaming Source Directory to Archive...")
+    print(f"   From: {NAS_PARAMS['share']}/{source_dir_relative}")
+    print(f"   To:   {NAS_PARAMS['share']}/{destination_dir_relative}")
     try:
-        smbclient.rename(source_dir_smb, destination_dir_smb)
-        print(f"   Successfully moved and renamed directory on NAS.")
-    except smbclient.SambaClientError as e:
-        print(f"   [CRITICAL ERROR] SMB Error moving/renaming directory: {e}")
-        sys.exit(1)
+        if nas_rename_directory(NAS_PARAMS["share"], source_dir_relative, destination_dir_relative):
+            print(f"   Successfully moved and renamed directory on NAS.")
+        else:
+            print(f"   [CRITICAL ERROR] Failed to move/rename directory. Exiting.")
+            sys.exit(1)
     except Exception as e:
         print(f"   [CRITICAL ERROR] Unexpected error moving/renaming directory: {e}")
         sys.exit(1)
@@ -156,5 +222,5 @@ if __name__ == "__main__":
 
     print("\n" + "="*60)
     print(f"--- Stage 5 Completed Successfully ---")
-    print(f"--- Results moved to: {destination_dir_smb} ---")
+    print(f"--- Results moved to: {NAS_PARAMS['share']}/{destination_dir_relative} ---")
     print("="*60 + "\n")

@@ -25,7 +25,12 @@ import psycopg2.extras # For execute_values
 import json
 import sys
 import os
-import smbclient
+# --- Use pysmb instead of smbclient ---
+from smb.SMBConnection import SMBConnection
+from smb import smb_structs
+import io # For reading/writing strings/bytes to NAS
+import socket # For gethostname
+# --- End pysmb import ---
 from datetime import datetime
 
 # ==============================================================================
@@ -50,10 +55,17 @@ NAS_PARAMS = {
     "ip": "your_nas_ip",
     "share": "your_share_name",
     "user": "your_nas_user",
-    "password": "your_nas_password"
+    "password": "your_nas_password",
+    "port": 445 # Default SMB port (can be 139)
 }
 # Base path on the NAS share where Stage 1/3 output files were stored
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
+
+# --- pysmb Configuration ---
+# Increase timeout for potentially slow NAS operations
+smb_structs.SUPPORT_SMB2 = True # Enable SMB2/3 support if available
+smb_structs.MAX_PAYLOAD_SIZE = 65536 # Can sometimes help with large directories
+CLIENT_HOSTNAME = socket.gethostname() # Get local machine name for SMB connection
 
 # --- Processing Configuration ---
 # Define the specific document source processed in previous stages.
@@ -68,36 +80,75 @@ CONTENT_ENTRIES_FILENAME = '3B_content_entries.json'
 # --- Helper Functions ---
 # ==============================================================================
 
-def initialize_smb_client():
-    """Sets up smbclient credentials."""
+def create_nas_connection():
+    """Creates and returns an authenticated SMBConnection object."""
     try:
-        smbclient.ClientConfig(username=NAS_PARAMS["user"], password=NAS_PARAMS["password"])
-        print("SMB client configured successfully.")
-        return True
+        conn = SMBConnection(
+            NAS_PARAMS["user"],
+            NAS_PARAMS["password"],
+            CLIENT_HOSTNAME, # Local machine name
+            NAS_PARAMS["ip"], # Remote server name (can be IP)
+            use_ntlm_v2=True,
+            is_direct_tcp=(NAS_PARAMS["port"] == 445) # Use direct TCP if port 445
+        )
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60) # Increased timeout
+        if not connected:
+            print("   [ERROR] Failed to connect to NAS.")
+            return None
+        return conn
     except Exception as e:
-        print(f"[ERROR] Failed to configure SMB client: {e}")
-        return False
+        print(f"   [ERROR] Exception creating NAS connection: {e}")
+        return None
 
-def read_json_from_nas(smb_path):
-    """Reads and parses JSON data from a file path on the NAS."""
-    print(f"   Attempting to read JSON from NAS path: {smb_path}")
+def check_nas_path_exists(share_name, nas_path_relative):
+    """Checks if a file or directory exists on the NAS using pysmb."""
+    conn = None
     try:
-        if not smbclient.path.exists(smb_path):
-            print(f"   [WARNING] JSON file not found at: {smb_path}. Returning empty list.")
+        conn = create_nas_connection()
+        if not conn:
+            return False # Cannot check if connection failed
+
+        # Use getAttributes to check existence - works for files and dirs
+        conn.getAttributes(share_name, nas_path_relative)
+        return True # Path exists if no exception was raised
+    except Exception as e:
+        # Check if the error message indicates "No such file" or similar
+        err_str = str(e).lower()
+        if "no such file" in err_str or "object_name_not_found" in err_str or "0xc0000034" in err_str:
+            return False # Expected outcome if the file/path doesn't exist
+        else:
+            print(f"   [WARNING] Unexpected error checking existence of NAS path '{share_name}/{nas_path_relative}': {type(e).__name__} - {e}")
+            return False # Assume not found on other errors
+    finally:
+        if conn:
+            conn.close()
+
+def read_json_from_nas(nas_path_relative):
+    """Reads and parses JSON data from a file path on the NAS."""
+    print(f"   Attempting to read JSON from NAS path: {NAS_PARAMS['share']}/{nas_path_relative}")
+    try:
+        if not check_nas_path_exists(NAS_PARAMS["share"], nas_path_relative):
+            print(f"   [WARNING] JSON file not found at: {NAS_PARAMS['share']}/{nas_path_relative}. Returning empty list.")
             return [] # Assume results file, return empty list
 
-        with smbclient.open_file(smb_path, mode='r', encoding='utf-8') as f:
-            data = json.load(f)
-        print(f"   Successfully read and parsed JSON from: {smb_path} ({len(data)} records)")
+        conn = create_nas_connection()
+        if not conn:
+            return None
+
+        file_obj = io.BytesIO()
+        file_attributes, filesize = conn.retrieveFile(NAS_PARAMS["share"], nas_path_relative, file_obj)
+        file_obj.seek(0)
+        content_bytes = file_obj.read()
+        conn.close()
+        
+        data = json.loads(content_bytes.decode('utf-8'))
+        print(f"   Successfully read and parsed JSON from: {NAS_PARAMS['share']}/{nas_path_relative} ({len(data)} records)")
         return data
-    except smbclient.SambaClientError as e:
-        print(f"   [ERROR] SMB Error reading JSON from '{smb_path}': {e}")
-        return None # Indicate failure
     except json.JSONDecodeError as e:
-        print(f"   [ERROR] Failed to parse JSON from '{smb_path}': {e}")
+        print(f"   [ERROR] Failed to parse JSON from '{nas_path_relative}': {e}")
         return None # Indicate failure
     except Exception as e:
-        print(f"   [ERROR] Unexpected error reading JSON from NAS '{smb_path}': {e}")
+        print(f"   [ERROR] Unexpected error reading JSON from NAS '{nas_path_relative}': {e}")
         return None # Indicate failure
 
 def get_db_connection():
@@ -133,15 +184,15 @@ def count_records(conn, table_name, document_source):
 # --- Main Processing Function ---
 # ==============================================================================
 
-def main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_list_smb_path):
+def main_processing_stage4(delete_list_relative_path, catalog_list_relative_path, content_list_relative_path):
     """Handles the core logic for Stage 4: reading inputs, DB operations."""
     print(f"--- Starting Main Processing for Stage 4 ---")
 
     # --- Read Input Files from NAS ---
     print("[4] Reading Input JSON Files from NAS...") # Renumbered step
-    files_to_delete = read_json_from_nas(delete_list_smb_path)
-    catalog_entries = read_json_from_nas(catalog_list_smb_path)
-    content_entries = read_json_from_nas(content_list_smb_path)
+    files_to_delete = read_json_from_nas(delete_list_relative_path)
+    catalog_entries = read_json_from_nas(catalog_list_relative_path)
+    content_entries = read_json_from_nas(content_list_relative_path)
 
     if files_to_delete is None or catalog_entries is None or content_entries is None:
         print("[CRITICAL ERROR] Failed to read one or more input JSON files from NAS. Exiting.")
@@ -426,46 +477,34 @@ if __name__ == "__main__":
     print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
 
-    # --- Initialize SMB Client ---
-    print("[1] Initializing SMB Client...")
-    if not initialize_smb_client():
-        sys.exit(1)
-    print("-" * 60)
-
-    # --- Define NAS Paths ---
-    print("[2] Defining NAS Input Paths...")
+    # --- Define NAS Paths (Relative) ---
+    print("[1] Defining NAS Input Paths (Relative)...")
     source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    source_base_dir_smb = f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{source_base_dir_relative}"
 
-    delete_list_smb_path = os.path.join(source_base_dir_smb, FILES_TO_DELETE_FILENAME).replace('\\', '/')
-    catalog_list_smb_path = os.path.join(source_base_dir_smb, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
-    content_list_smb_path = os.path.join(source_base_dir_smb, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
+    delete_list_relative_path = os.path.join(source_base_dir_relative, FILES_TO_DELETE_FILENAME).replace('\\', '/')
+    catalog_list_relative_path = os.path.join(source_base_dir_relative, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
+    content_list_relative_path = os.path.join(source_base_dir_relative, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
 
-    print(f"   Files to Delete List (SMB): {delete_list_smb_path}")
-    print(f"   Catalog Entries List (SMB): {catalog_list_smb_path}")
-    print(f"   Content Entries List (SMB): {content_list_smb_path}")
+    print(f"   Files to Delete List (Relative): {NAS_PARAMS['share']}/{delete_list_relative_path}")
+    print(f"   Catalog Entries List (Relative): {NAS_PARAMS['share']}/{catalog_list_relative_path}")
+    print(f"   Content Entries List (Relative): {NAS_PARAMS['share']}/{content_list_relative_path}")
     print("-" * 60)
 
     # --- Check for Skip Flag from Stage 1 ---
-    print("[3] Checking for skip flag from Stage 1...")
+    print("[2] Checking for skip flag from Stage 1...")
     skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
     # Flag file is in the base output dir for the source (same level as 1D*.json, 3A*.json etc.)
-    skip_flag_smb_path = os.path.join(source_base_dir_smb, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {skip_flag_smb_path}")
+    skip_flag_relative_path = os.path.join(source_base_dir_relative, skip_flag_file_name).replace('\\', '/')
+    print(f"   Checking for flag file: {NAS_PARAMS['share']}/{skip_flag_relative_path}")
     should_skip = False
     try:
-        # Ensure SMB client is configured (should be from step [1])
-        if smbclient.path.exists(skip_flag_smb_path):
+        if check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
             print(f"   Skip flag file found. Stage 1 indicated no files to process.")
             should_skip = True
         else:
             print(f"   Skip flag file not found. Proceeding with Stage 4.")
-    except smbclient.SambaClientError as e:
-        print(f"   [WARNING] SMB Error checking for skip flag file '{skip_flag_smb_path}': {e}")
-        print(f"   Proceeding with Stage 4, but there might be an issue accessing NAS.")
-        # Continue execution, assuming no skip if flag check fails
     except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file '{skip_flag_smb_path}': {e}")
+        print(f"   [WARNING] Unexpected error checking for skip flag file '{NAS_PARAMS['share']}/{skip_flag_relative_path}': {e}")
         print(f"   Proceeding with Stage 4.")
         # Continue execution
     print("-" * 60)
@@ -477,6 +516,6 @@ if __name__ == "__main__":
         print("="*60 + "\n")
     else:
         # Call the main processing function only if not skipping
-        main_processing_stage4(delete_list_smb_path, catalog_list_smb_path, content_list_smb_path)
+        main_processing_stage4(delete_list_relative_path, catalog_list_relative_path, content_list_relative_path)
 
     # Script ends naturally here if skipped or after main_processing completes
