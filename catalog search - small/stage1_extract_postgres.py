@@ -341,17 +341,17 @@ if __name__ == "__main__":
         print("   Engine created.")
 
         # SQL query to select relevant columns for the specified document source
-        # Use SQLAlchemy text for parameter binding with engines
-        query = sqlalchemy.text(f"""
+        # For pandas read_sql_query, we can use string formatting or bound parameters
+        query = f"""
             SELECT id, file_name, file_path, date_last_modified, file_size,
                    document_source, document_type, document_name
             FROM {DB_TABLE_NAME}
-            WHERE document_source = :source;
-        """)
+            WHERE document_source = %(source)s;
+        """
         print(f"   Executing query for document_source = '{DOCUMENT_SOURCE}'...")
 
         # Execute query and load results into a pandas DataFrame using the engine
-        # Pass parameters in a dictionary for SQLAlchemy's text() object
+        # Use params dict with %(name)s style placeholders for psycopg2
         db_df = pd.read_sql_query(query, db_engine, params={"source": DOCUMENT_SOURCE})
 
         # --- Timestamp Handling (Database) ---
