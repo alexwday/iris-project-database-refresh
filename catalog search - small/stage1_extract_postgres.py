@@ -32,9 +32,6 @@ from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 import io # For writing strings to NAS
 # --- End pysmb import ---
-# --- Add SQLAlchemy import ---
-import sqlalchemy
-# --- End SQLAlchemy import ---
 from datetime import datetime, timezone
 import socket # For gethostname
 
@@ -326,33 +323,28 @@ if __name__ == "__main__":
     print("-" * 60)
 
     # Initialize variables
-    db_engine = None # Changed from db_conn
+    db_conn = None
     db_df = pd.DataFrame() # Initialize as empty DataFrame
     nas_df = pd.DataFrame() # Initialize as empty DataFrame
 
-    # --- Get Data from PostgreSQL Catalog using SQLAlchemy ---
+    # --- Get Data from PostgreSQL Catalog ---
     print(f"[3] Fetching Data from PostgreSQL Table: '{DB_TABLE_NAME}'...")
     try:
-        # Construct database URL for SQLAlchemy
-        # Ensure password is handled correctly if it contains special characters (though create_engine usually handles this)
-        db_url = f"postgresql+psycopg2://{DB_PARAMS['user']}:{DB_PARAMS['password']}@{DB_PARAMS['host']}:{DB_PARAMS['port']}/{DB_PARAMS['dbname']}"
-        print(f"   Creating SQLAlchemy engine for database '{DB_PARAMS['dbname']}' on {DB_PARAMS['host']}...")
-        db_engine = sqlalchemy.create_engine(db_url)
-        print("   Engine created.")
+        print(f"   Connecting to database '{DB_PARAMS['dbname']}' on {DB_PARAMS['host']}...")
+        db_conn = psycopg2.connect(**DB_PARAMS)
+        print("   Connection successful.")
 
         # SQL query to select relevant columns for the specified document source
-        # For pandas read_sql_query, we can use string formatting or bound parameters
         query = f"""
             SELECT id, file_name, file_path, date_last_modified, file_size,
                    document_source, document_type, document_name
             FROM {DB_TABLE_NAME}
-            WHERE document_source = %(source)s;
+            WHERE document_source = %s;
         """
         print(f"   Executing query for document_source = '{DOCUMENT_SOURCE}'...")
 
-        # Execute query and load results into a pandas DataFrame using the engine
-        # Use params dict with %(name)s style placeholders for psycopg2
-        db_df = pd.read_sql_query(query, db_engine, params={"source": DOCUMENT_SOURCE})
+        # Execute query and load results into a pandas DataFrame
+        db_df = pd.read_sql_query(query, db_conn, params=(DOCUMENT_SOURCE,))
 
         # --- Timestamp Handling (Database) ---
         if not db_df.empty and 'date_last_modified' in db_df.columns and not db_df['date_last_modified'].isnull().all():
@@ -387,18 +379,17 @@ if __name__ == "__main__":
              print("   [CRITICAL ERROR] Failed to write DB catalog JSON to NAS. Exiting.")
              sys.exit(1) # Exit if saving fails
 
-    # Removed specific psycopg2.Error catch
+    except psycopg2.Error as db_err:
+        print(f"   [CRITICAL ERROR] Database error: {db_err}")
+        sys.exit(1) # Exit on database errors
     except Exception as e:
         print(f"   [CRITICAL ERROR] An unexpected error occurred during DB operations: {e}")
-        # Dispose the engine if it was created, releasing connection pool resources
-        if db_engine is not None:
-            db_engine.dispose()
         sys.exit(1) # Exit on other unexpected errors
     finally:
-        # Dispose the engine to close connections in the pool
-        if db_engine is not None:
-            db_engine.dispose()
-            print("\n   SQLAlchemy engine disposed.")
+        # Close the database connection
+        if db_conn is not None:
+            db_conn.close()
+            print("\n   Database connection closed.")
     print("-" * 60)
 
 
