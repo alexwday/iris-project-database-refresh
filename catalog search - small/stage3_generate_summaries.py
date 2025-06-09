@@ -19,7 +19,7 @@ import os
 import sys
 import json
 import time
-import re  # For regex page splitting
+import re  # For natural boundary detection in sections
 import requests # For OAuth token request
 # --- Use pysmb instead of smbclient ---
 from smb.SMBConnection import SMBConnection
@@ -362,10 +362,10 @@ def read_text_from_nas(nas_path_relative):
         print(f"   [ERROR] Unexpected error reading text from NAS '{nas_path_relative}': {e}")
         return None
 
-def find_md_files(nas_dir_relative):
-    """Recursively finds all .md files within a given NAS directory."""
-    md_files_list = []
-    print(f" -> Searching for .md files in: {NAS_PARAMS['share']}/{nas_dir_relative}")
+def find_structured_json_files(nas_dir_relative):
+    """Recursively finds all structured .json files within a given NAS directory."""
+    json_files_list = []
+    print(f" -> Searching for structured .json files in: {NAS_PARAMS['share']}/{nas_dir_relative}")
     conn = None
     try:
         conn = create_nas_connection()
@@ -379,7 +379,7 @@ def find_md_files(nas_dir_relative):
 
         # Use pysmb to walk the directory tree
         def walk_directory(path_relative):
-            local_md_files = []
+            local_json_files = []
             try:
                 entries = conn.listPath(NAS_PARAMS["share"], path_relative)
                 for entry in entries:
@@ -392,16 +392,16 @@ def find_md_files(nas_dir_relative):
                         # Recursively search subdirectories
                         subdirectory_files = walk_directory(entry_path)
                         if subdirectory_files:  # Only extend if not None
-                            local_md_files.extend(subdirectory_files)
-                    elif entry.filename.lower().endswith('.md'):
-                        local_md_files.append(entry_path)
+                            local_json_files.extend(subdirectory_files)
+                    elif entry.filename.lower().endswith('.json'):
+                        local_json_files.append(entry_path)
             except Exception as e:
                 print(f"   [WARNING] Error walking directory {path_relative}: {e}")
-            return local_md_files
+            return local_json_files
 
-        md_files_list = walk_directory(nas_dir_relative)
-        print(f" <- Found {len(md_files_list)} .md files.")
-        return md_files_list
+        json_files_list = walk_directory(nas_dir_relative)
+        print(f" <- Found {len(json_files_list)} .json files.")
+        return json_files_list
 
     except Exception as e:
         print(f"   [ERROR] Unexpected error walking NAS directory '{nas_dir_relative}': {e}")
@@ -409,6 +409,12 @@ def find_md_files(nas_dir_relative):
     finally:
         if conn:
             conn.close()
+
+def find_md_files(nas_dir_relative):
+    """Legacy function - kept for backwards compatibility."""
+    # This function is now deprecated in favor of find_structured_json_files
+    print(f"   [WARNING] find_md_files is deprecated. Use find_structured_json_files instead.")
+    return []
 
 def get_oauth_token():
     """Retrieves an OAuth access token using client credentials flow."""
@@ -558,105 +564,7 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         # Consider more specific error handling based on openai library exceptions if needed
         return None, None, None
 
-def split_content_by_pages_using_json(markdown_content, json_data):
-    """
-    Splits markdown content by pages using Azure DI JSON response spans.
-    
-    The JSON response contains page information with spans (offset and length)
-    that specify exactly which portion of the content belongs to each page.
-    
-    Args:
-        markdown_content: The full markdown content
-        json_data: The JSON response from Azure DI containing page spans
-                  Can be a single dict or a list of dicts (for chunked files)
-        
-    Returns:
-        list: List of tuples (page_number, content)
-    """
-    print("   Splitting content by pages using JSON spans...")
-    
-    pages = []
-    
-    # Handle both single JSON and list of JSONs (chunked files)
-    json_list = json_data if isinstance(json_data, list) else [json_data]
-    
-    current_offset = 0  # Track offset for chunked files
-    
-    for json_chunk in json_list:
-        # Check if JSON has pages information
-        if json_chunk and 'pages' in json_chunk and json_chunk['pages']:
-            chunk_content = json_chunk.get('content', '')
-            
-            print(f"   Processing chunk with {len(json_chunk['pages'])} pages")
-            
-            for page_info in json_chunk['pages']:
-                page_num = page_info.get('page_number', len(pages) + 1)
-                
-                # Get spans for this page
-                if 'spans' in page_info and page_info['spans']:
-                    # Combine all spans for this page (usually just one)
-                    page_content = ""
-                    for span in page_info['spans']:
-                        offset = span.get('offset', 0)
-                        length = span.get('length', 0)
-                        
-                        if offset is not None and length is not None:
-                            # For chunked files, use the chunk's content
-                            if len(json_list) > 1:
-                                span_content = chunk_content[offset:offset + length]
-                            else:
-                                # For single files, use the main markdown content
-                                span_content = markdown_content[offset:offset + length]
-                            page_content += span_content
-                    
-                    if page_content.strip():
-                        pages.append((page_num, page_content.strip()))
-                else:
-                    print(f"   Warning: No spans found for page {page_num}")
-    
-    if pages:
-        print(f"   Successfully split into {len(pages)} pages using spans")
-        return pages
-    
-    # Fallback to regex-based splitting if JSON doesn't have page information
-    print("   No page information in JSON, falling back to regex-based splitting")
-    return split_content_by_pages_regex(markdown_content)
-
-
-def split_content_by_pages_regex(markdown_content):
-    """
-    Fallback method: Splits markdown content by page breaks using regex.
-    
-    Azure Document Intelligence v4 API uses:
-    - <!-- PageBreak --> as the page separator
-    
-    Returns:
-        list: List of tuples (page_number, content)
-    """
-    print("   Using regex-based page splitting...")
-    
-    # Azure DI v4 API page break pattern
-    page_break_pattern = r'<!-- ?PageBreak ?-->'
-    
-    # Check if page breaks exist
-    if re.search(page_break_pattern, markdown_content, re.IGNORECASE):
-        print(f"   Found page break markers")
-        
-        # Split content by page breaks
-        parts = re.split(page_break_pattern, markdown_content, flags=re.IGNORECASE)
-        
-        pages = []
-        for i, part in enumerate(parts):
-            if part.strip():  # Skip empty parts
-                page_num = i + 1  # Page numbers start at 1
-                pages.append((page_num, part.strip()))
-        
-        print(f"   Split into {len(pages)} pages")
-        return pages
-    
-    # If no page markers found, treat entire content as single page
-    print("   No page markers found. Treating as single page.")
-    return [(1, markdown_content)]
+# Legacy page splitting functions removed - now using structured JSON data directly
 
 def split_page_into_sections(page_content, min_sections=2):
     """
@@ -1000,7 +908,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
         catalog_entries = []
         content_entries = []
         report_entries = [] # Initialize list for report entries
-        processed_md_files = set()
+        processed_json_files = set()
 
         if not is_full_refresh:
             # Load Catalog Entries
@@ -1036,40 +944,42 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                 sys.exit(1)
             print(f"   Found {len(report_entries)} existing anonymization report entries.")
 
-            # Determine processed files based on catalog entries (assuming catalog is the primary indicator)
-            processed_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
-            print(f"   Identified {len(processed_md_files)} already processed Markdown files (based on catalog).")
+            # Determine processed files based on catalog entries (now using JSON paths)
+            processed_json_files = set(entry.get('processed_json_path') for entry in catalog_entries if 'processed_json_path' in entry)
+            # Also check for legacy MD paths for backwards compatibility
+            legacy_md_files = set(entry.get('processed_md_path') for entry in catalog_entries if 'processed_md_path' in entry)
+            print(f"   Identified {len(processed_json_files)} already processed JSON files and {len(legacy_md_files)} legacy MD files (based on catalog).")
         else:
             print("   Full refresh mode: Initializing empty results lists and skipping checkpoint loading.")
         print("-" * 60)
 
-        # --- Find Markdown Files from Stage 2 ---
-        print(f"[8] Searching for Stage 2 Markdown files in: {os.path.basename(stage2_md_dir_relative_path)}...") # Renumbered
-        md_files_to_process = find_md_files(stage2_md_dir_relative_path)
-        if not md_files_to_process:
-            print("   No Markdown files found to process.")
+        # --- Find Structured JSON Files from Stage 2 ---
+        print(f"[8] Searching for Stage 2 structured JSON files in: {os.path.basename(stage2_md_dir_relative_path)}...") # Renumbered
+        json_files_to_process = find_structured_json_files(stage2_md_dir_relative_path)
+        if not json_files_to_process:
+            print("   No structured JSON files found to process.")
             print("\n" + "="*60)
-            print(f"--- Stage 3 Completed (No new Markdown files found) ---")
+            print(f"--- Stage 3 Completed (No new structured JSON files found) ---")
             print("="*60 + "\n")
             # No sys.exit(0) here, allow finally block to run
         else:
             print("-" * 60)
 
-            # --- Process Each Markdown File ---
-            print(f"[9] Processing {len(md_files_to_process)} Markdown files...") # Renumbered
+            # --- Process Each Structured JSON File ---
+            print(f"[9] Processing {len(json_files_to_process)} structured JSON files...") # Renumbered
             new_entries_count = 0
             skipped_count = 0
             error_count = 0
             current_token = None
             token_expiry_time = time.time() # Initialize to ensure first token fetch
 
-            for i, md_relative_path in enumerate(md_files_to_process):
+            for i, json_relative_path in enumerate(json_files_to_process):
                 start_time = time.time()
-                print(f"\n--- Processing file {i+1}/{len(md_files_to_process)} ---")
-                print(f"   MD File Path (Relative): {md_relative_path}")
+                print(f"\n--- Processing file {i+1}/{len(json_files_to_process)} ---")
+                print(f"   JSON File Path (Relative): {json_relative_path}")
 
                 # Skip if already processed (only in incremental mode)
-                if not is_full_refresh and md_relative_path in processed_md_files:
+                if not is_full_refresh and json_relative_path in processed_json_files:
                     print("   File already processed (found in existing results). Skipping.")
                     skipped_count += 1
                     continue
@@ -1094,94 +1004,73 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     error_count += 1
                     continue
 
-                markdown_content = read_text_from_nas(md_relative_path)
-                if not markdown_content:
-                    print(f"   [ERROR] Failed to read Markdown content from {md_relative_path}. Skipping file.")
+                # --- Load Structured JSON Data ---
+                structured_data = read_json_from_nas(json_relative_path)
+                if not structured_data:
+                    print(f"   [ERROR] Failed to read structured JSON from {json_relative_path}. Skipping file.")
+                    error_count += 1
+                    continue
+                
+                # Validate JSON structure
+                if not isinstance(structured_data, dict) or 'document_name' not in structured_data or 'pages' not in structured_data:
+                    print(f"   [ERROR] Invalid structured JSON format in {json_relative_path}. Skipping file.")
+                    error_count += 1
+                    continue
+                
+                document_name = structured_data['document_name']
+                pages_data = structured_data['pages']
+                total_pages = structured_data.get('total_pages', len(pages_data))
+                
+                print(f"   Document: {document_name} ({total_pages} pages)")
+                
+                # Combine all page content for GPT summarization
+                combined_markdown = ""
+                for page_data in pages_data:
+                    if page_data.get('markdown_content'):
+                        combined_markdown += page_data['markdown_content'] + "\n\n"
+                
+                if not combined_markdown.strip():
+                    print(f"   [ERROR] No valid markdown content found in {json_relative_path}. Skipping file.")
                     error_count += 1
                     continue
 
                 # --- Call GPT Summarizer (with detail level and source) ---
                 # Set detail level based on document source
                 current_detail_level = 'standard'
-                description, usage, anonymization_data = call_gpt_summarizer(client, markdown_content, current_detail_level, DOCUMENT_SOURCE)
+                description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, current_detail_level, DOCUMENT_SOURCE)
 
                 # Check if None was returned (indicates an error in call_gpt_summarizer)
                 if description is None or usage is None or anonymization_data is None:
-                    print(f"   [ERROR] Failed to get summaries or anonymization data from GPT for {md_relative_path}. Skipping file.")
+                    print(f"   [ERROR] Failed to get summaries or anonymization data from GPT for {json_relative_path}. Skipping file.")
                     error_count += 1
                     continue # Skip if summarization fails
 
                 # --- Prepare Data for Output ---
-                md_filename = os.path.basename(md_relative_path)
-                original_base_name = os.path.splitext(md_filename)[0]
-                # Handle potential chunk suffixes added in Stage 2
-                if '_chunk_' in original_base_name:
-                     original_base_name = original_base_name.split('_chunk_')[0]
-
+                json_filename = os.path.basename(json_relative_path)
+                original_base_name = os.path.splitext(json_filename)[0]
+                
                 original_metadata = metadata_lookup.get(original_base_name)
                 if not original_metadata:
-                    print(f"   [WARNING] Could not find original metadata for base name '{original_base_name}' derived from {md_filename}. Skipping file.")
+                    print(f"   [WARNING] Could not find original metadata for base name '{original_base_name}' derived from {json_filename}. Skipping file.")
                     error_count += 1
                     continue
 
                 # Extract key fields (ensure they exist in metadata)
-                doc_name = original_metadata.get('file_name', md_filename) # Fallback to md_filename if needed
+                doc_name = original_metadata.get('file_name', document_name) # Fallback to document_name if needed
                 doc_base_name = os.path.splitext(doc_name)[0] # Get filename without extension
                 doc_source = DOCUMENT_SOURCE # Use configured source
                 doc_type = DOCUMENT_TYPE   # Use configured type
 
-                # --- Load corresponding JSON file(s) for page spans ---
-                json_data = None
+                # --- Process Pages Directly from Structured Data ---
+                # No need for complex JSON loading or span parsing - we have clean page data
+                page_contents = []
+                for page_data in pages_data:
+                    page_num = page_data.get('page_number', 1)
+                    page_content = page_data.get('markdown_content', '')
+                    if page_content and page_content.strip():
+                        page_contents.append((page_num, page_content))
                 
-                # Check if this is a chunked file
-                if '_chunk_' in original_base_name:
-                    # For chunked files, we need to load all chunk JSONs
-                    print(f"   Detected chunked file. Loading all chunk JSONs...")
-                    json_data = []
-                    
-                    # Get the base directory and original file name without chunk suffix
-                    base_dir = os.path.dirname(md_relative_path)
-                    base_name_without_chunk = original_base_name.split('_chunk_')[0]
-                    
-                    # Look for all chunk JSON files
-                    chunk_index = 1
-                    while True:
-                        chunk_json_name = f"{base_name_without_chunk}_chunk_{chunk_index}.json"
-                        chunk_json_path = os.path.join(base_dir, chunk_json_name).replace('\\', '/')
-                        
-                        try:
-                            chunk_json = read_json_from_nas(chunk_json_path)
-                            if chunk_json:
-                                json_data.append(chunk_json)
-                                print(f"   Loaded chunk {chunk_index} JSON")
-                                chunk_index += 1
-                            else:
-                                break  # No more chunks
-                        except:
-                            break  # No more chunks
-                    
-                    if not json_data:
-                        print(f"   [WARNING] No chunk JSON files found, will use regex fallback")
-                        json_data = None
-                else:
-                    # Single file - load single JSON
-                    json_relative_path = md_relative_path.replace('.md', '.json')
-                    print(f"   Looking for JSON file: {os.path.basename(json_relative_path)}")
-                    
-                    try:
-                        json_data = read_json_from_nas(json_relative_path)
-                        if json_data:
-                            print(f"   Successfully loaded JSON data for page extraction")
-                        else:
-                            print(f"   [WARNING] Failed to load JSON data, will use regex fallback")
-                    except Exception as e:
-                        print(f"   [WARNING] Error loading JSON file: {e}, will use regex fallback")
-
-                # --- Split content by pages ---
-                if json_data:
-                    page_contents = split_content_by_pages_using_json(markdown_content, json_data)
-                else:
-                    page_contents = split_content_by_pages_regex(markdown_content)
+                print(f"   Successfully extracted {len(page_contents)} pages with content.")
                 
                 # --- Generate embeddings for document_usage and document_description ---
                 print("   Generating embeddings for catalog entry...")
@@ -1212,7 +1101,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     "file_size": original_metadata.get('file_size'),
                     "file_path": original_metadata.get('file_path'),
                     "file_link": f"//{NAS_PARAMS['ip']}/{NAS_PARAMS['share']}/{original_metadata.get('file_path', '')}",
-                    "processed_md_path": md_relative_path # For checkpointing
+                    "processed_json_path": json_relative_path # For checkpointing (updated to JSON)
                 }
 
                 # Create Content Entries (multiple per page based on sections)
@@ -1280,7 +1169,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     # (or if report save failure is considered non-critical)
                     # Assuming report save failure is non-critical for now:
                     new_entries_count += 1
-                    processed_md_files.add(md_relative_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
+                    processed_json_files.add(json_relative_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
                 else:
                     print(f"   [CRITICAL ERROR] Failed to save one or both primary output files (catalog/content) to NAS after processing {md_filename}. Stopping.")
                     error_count += 1

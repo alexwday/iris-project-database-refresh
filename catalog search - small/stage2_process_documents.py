@@ -62,8 +62,9 @@ DOCUMENT_SOURCE = 'internal_esg' # From Stage 1
 # DB_TABLE_NAME = 'apg_catalog'    # From Stage 1 (Not used in Stage 2)
 
 # PDF Processing Configuration
-PDF_PAGE_LIMIT = 2000
-PDF_CHUNK_SIZE = 1000
+# Note: Page-by-page processing is now used for all PDFs, eliminating the need for page limits
+# PDF_PAGE_LIMIT = 2000  # Legacy - no longer used
+# PDF_CHUNK_SIZE = 1000  # Legacy - no longer used
 
 # --- CA Bundle Configuration ---
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this exists on NAS)
@@ -324,8 +325,69 @@ def analyze_document_with_di(di_client, local_file_path, output_format=DocumentC
     return None
 
 
+def extract_individual_pages(local_pdf_path, temp_dir):
+    """Extracts each page of a PDF as individual PDF files."""
+    page_paths = []
+    base_name = os.path.splitext(os.path.basename(local_pdf_path))[0]
+    print(f"   Extracting individual pages from PDF: {os.path.basename(local_pdf_path)}...")
+    try:
+        reader = PdfReader(local_pdf_path)
+        total_pages = len(reader.pages)
+        print(f"   Total pages to extract: {total_pages}")
+        
+        for page_num in range(total_pages):
+            writer = PdfWriter()
+            writer.add_page(reader.pages[page_num])
+            
+            page_filename = f"{base_name}_page_{page_num + 1}.pdf"
+            page_path = os.path.join(temp_dir, page_filename)
+            
+            with open(page_path, "wb") as page_file:
+                writer.write(page_file)
+            
+            page_paths.append({
+                'page_number': page_num + 1,
+                'file_path': page_path
+            })
+            
+        print(f"   Successfully extracted {len(page_paths)} individual pages.")
+        return page_paths
+    except Exception as e:
+        print(f"   [ERROR] Failed to extract pages from PDF {local_pdf_path}: {e}")
+        return []
+
+def process_pages_batch(di_client, page_files, max_retries=3, retry_delay=5):
+    """Processes multiple PDF pages in batch using Azure Document Intelligence."""
+    print(f"   Processing batch of {len(page_files)} pages with Azure DI...")
+    page_results = []
+    
+    for page_info in page_files:
+        page_num = page_info['page_number']
+        page_path = page_info['file_path']
+        
+        print(f"      Processing page {page_num}...")
+        
+        # Process this individual page
+        analyze_result = analyze_document_with_di(di_client, page_path, max_retries=max_retries, retry_delay=retry_delay)
+        
+        if analyze_result and analyze_result.content:
+            page_results.append({
+                'page_number': page_num,
+                'markdown_content': analyze_result.content
+            })
+            print(f"      Page {page_num} processed successfully.")
+        else:
+            print(f"      [ERROR] Failed to process page {page_num}.")
+            # Still add entry with None content to maintain page numbering
+            page_results.append({
+                'page_number': page_num,
+                'markdown_content': None
+            })
+    
+    return page_results
+
 def split_pdf(local_pdf_path, chunk_size, temp_dir):
-    """Splits a PDF into chunks of a specified size."""
+    """Legacy function - kept for backwards compatibility with non-PDF files."""
     chunk_paths = []
     base_name = os.path.splitext(os.path.basename(local_pdf_path))[0]
     print(f"   Splitting PDF: {os.path.basename(local_pdf_path)} into {chunk_size}-page chunks...")
@@ -400,7 +462,6 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
             start_time = time.time()
             file_has_error = False
             local_file_path = None # Ensure defined in outer scope for finally block
-            local_chunk_paths = [] # Ensure defined in outer scope for finally block
 
             print(f"\n--- Processing file {i+1}/{len(files_to_process)} ---")
             try:
@@ -423,11 +484,9 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                 file_name_base = os.path.splitext(file_name)[0]
                 # Output subfolder relative to share
                 file_output_subfolder_relative = os.path.join(stage2_output_dir_relative, file_name_base).replace('\\', '/')
-                output_md_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}.md").replace('\\', '/')
-                output_json_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}.json").replace('\\', '/') # Base name for non-chunked
+                output_json_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}.json").replace('\\', '/') # Structured JSON output
 
                 print(f"   Output Subfolder (Relative): {share_name}/{file_output_subfolder_relative}")
-                print(f"   Output Markdown Path (Relative): {share_name}/{output_md_relative_path}")
                 print(f"   Output JSON Path (Relative): {share_name}/{output_json_relative_path}")
 
                 # Ensure the specific output subfolder exists for this file (needs connection)
@@ -452,124 +511,74 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                     continue # Skip to next file
 
                 # --- Document Intelligence Processing ---
-                combined_markdown = ""
-                results_json_list = [] # To store DI results (full or chunked)
-
-                # Check if PDF and needs splitting
+                structured_result = None
+                
+                # Check if PDF - use page-by-page processing
                 is_pdf = file_name.lower().endswith('.pdf')
-                needs_splitting = False
-                page_count = 0
 
                 if is_pdf:
                     try:
                         reader = PdfReader(local_file_path)
                         page_count = len(reader.pages)
-                        print(f"   PDF detected with {page_count} pages.")
-                        if page_count > PDF_PAGE_LIMIT:
-                            needs_splitting = True
-                            print(f"   PDF exceeds page limit ({PDF_PAGE_LIMIT}). Splitting required.")
+                        print(f"   PDF detected with {page_count} pages. Using page-by-page processing.")
+                        
+                        # Extract individual pages
+                        page_files = extract_individual_pages(local_file_path, temp_dir)
+                        if not page_files:
+                            print(f"   [ERROR] Failed to extract pages from PDF {file_name}. Skipping analysis.")
+                            file_has_error = True
                         else:
-                             print(f"   PDF within page limit. Processing as single document.")
-                    except Exception as pdf_err:
-                        print(f"   [WARNING] Could not read PDF metadata for {file_name}: {pdf_err}. Attempting to process as single document.")
-                        is_pdf = False # Treat as non-pdf if metadata read fails
-
-                if is_pdf and needs_splitting:
-                    # Split PDF into chunks
-                    local_chunk_paths = split_pdf(local_file_path, PDF_CHUNK_SIZE, temp_dir)
-                    if not local_chunk_paths:
-                        print(f"   [ERROR] Failed to split PDF {file_name}. Skipping analysis.")
-                        file_has_error = True
-                    else:
-                        # Process each chunk
-                        all_chunks_processed = True
-                        for chunk_index, chunk_path in enumerate(local_chunk_paths):
-                            print(f"      Processing chunk {chunk_index + 1}/{len(local_chunk_paths)}...")
-                            analyze_result = analyze_document_with_di(di_client, chunk_path)
-                            if analyze_result and analyze_result.content:
-                                combined_markdown += analyze_result.content + "\n\n" # Add separator between chunks
-                                # Manually create dictionary from AnalyzeResult, mirroring example structure
-                                result_dict = {'content': analyze_result.content, 'pages': []}
-                                if hasattr(analyze_result, 'pages'):
-                                    for page in analyze_result.pages:
-                                        page_data = {
-                                            'page_number': page.page_number,
-                                            'width': page.width if hasattr(page, 'width') else None,
-                                            'height': page.height if hasattr(page, 'height') else None,
-                                            'unit': page.unit if hasattr(page, 'unit') else None,
-                                            'angle': page.angle if hasattr(page, 'angle') else None,
-                                            'spans': []  # Add spans information
-                                        }
-                                        # Extract spans information if available
-                                        if hasattr(page, 'spans') and page.spans:
-                                            for span in page.spans:
-                                                span_data = {
-                                                    'offset': span.offset if hasattr(span, 'offset') else None,
-                                                    'length': span.length if hasattr(span, 'length') else None
-                                                }
-                                                page_data['spans'].append(span_data)
-                                        result_dict['pages'].append(page_data)
-                                if hasattr(analyze_result, 'tables') and analyze_result.tables:
-                                    result_dict['tables_count'] = len(analyze_result.tables)
-                                if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
-                                    result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
-                                # Add other relevant attributes if needed
-                                results_json_list.append(result_dict)
-                                print(f"      Chunk {chunk_index + 1} processed successfully.")
+                            # Process all pages in batch
+                            page_results = process_pages_batch(di_client, page_files)
+                            
+                            # Create structured result
+                            structured_result = {
+                                "document_name": file_name,
+                                "total_pages": page_count,
+                                "pages": page_results
+                            }
+                            
+                            # Check if all pages were processed successfully
+                            failed_pages = [p for p in page_results if p['markdown_content'] is None]
+                            if failed_pages:
+                                print(f"   [WARNING] {len(failed_pages)} pages failed to process for {file_name}.")
                             else:
-                                print(f"      [ERROR] Failed to process chunk {chunk_index + 1} for {file_name}.")
-                                file_has_error = True
-                                all_chunks_processed = False
-                        if not all_chunks_processed:
-                             print(f"   [ERROR] Not all chunks of {file_name} were processed successfully.")
-                        else:
-                             print(f"   All chunks of {file_name} processed.")
+                                print(f"   All {page_count} pages processed successfully for {file_name}.")
+                                
+                            # Clean up individual page files
+                            for page_info in page_files:
+                                try:
+                                    if os.path.exists(page_info['file_path']):
+                                        os.remove(page_info['file_path'])
+                                except OSError:
+                                    pass
+                                    
+                    except Exception as pdf_err:
+                        print(f"   [ERROR] Could not process PDF {file_name}: {pdf_err}. Skipping.")
+                        file_has_error = True
 
-                else: # Process non-PDF or small PDF
+                else: # Process non-PDF files
+                    print(f"   Processing non-PDF file: {file_name}")
                     analyze_result = analyze_document_with_di(di_client, local_file_path)
                     if analyze_result and analyze_result.content:
-                        combined_markdown = analyze_result.content
-                        # Manually create dictionary from AnalyzeResult, mirroring example structure
-                        result_dict = {'content': analyze_result.content, 'pages': []}
-                        if hasattr(analyze_result, 'pages'):
-                            for page in analyze_result.pages:
-                                page_data = {
-                                    'page_number': page.page_number,
-                                    'width': page.width if hasattr(page, 'width') else None,
-                                    'height': page.height if hasattr(page, 'height') else None,
-                                    'unit': page.unit if hasattr(page, 'unit') else None,
-                                    'angle': page.angle if hasattr(page, 'angle') else None,
-                                    'spans': []  # Add spans information
-                                }
-                                # Extract spans information if available
-                                if hasattr(page, 'spans') and page.spans:
-                                    for span in page.spans:
-                                        span_data = {
-                                            'offset': span.offset if hasattr(span, 'offset') else None,
-                                            'length': span.length if hasattr(span, 'length') else None
-                                        }
-                                        page_data['spans'].append(span_data)
-                                result_dict['pages'].append(page_data)
-                        if hasattr(analyze_result, 'tables') and analyze_result.tables:
-                            result_dict['tables_count'] = len(analyze_result.tables)
-                        if hasattr(analyze_result, 'paragraphs') and analyze_result.paragraphs:
-                            result_dict['paragraphs_count'] = len(analyze_result.paragraphs)
-                        # Add other relevant attributes if needed
-                        results_json_list.append(result_dict)
+                        # For non-PDF files, create a single-page structure for consistency
+                        structured_result = {
+                            "document_name": file_name,
+                            "total_pages": 1,
+                            "pages": [{
+                                "page_number": 1,
+                                "markdown_content": analyze_result.content
+                            }]
+                        }
+                        print(f"   Non-PDF document processed successfully.")
                     else:
-                        print(f"   [ERROR] Failed to process document {file_name}.")
+                        print(f"   [ERROR] Failed to process non-PDF document {file_name}.")
                         file_has_error = True
 
                 # --- Save Results to NAS ---
-                if combined_markdown and not file_has_error:
-                    print(f"   Saving combined Markdown output to NAS...")
-                    md_bytes = combined_markdown.encode('utf-8')
-                    if not write_to_nas(share_name, output_md_relative_path, md_bytes):
-                        print(f"   [ERROR] Failed to write Markdown file for {file_name} to NAS.")
-                        file_has_error = True # Mark error even if DI worked
-
-                if results_json_list and not file_has_error:
-                    print(f"   Saving analysis JSON output(s) to NAS...")
+                if structured_result and not file_has_error:
+                    print(f"   Saving structured JSON output to NAS...")
+                    
                     # Simple JSON serialization helper
                     def json_serializer(obj):
                         if isinstance(obj, (datetime, timezone)): # Example: handle datetime
@@ -580,20 +589,13 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                         except Exception:
                             return None # Or some placeholder for unslizable objects
 
-                    if needs_splitting:
-                        # Save JSON for each chunk
-                        for chunk_index, result_json in enumerate(results_json_list):
-                            chunk_json_relative_path = os.path.join(file_output_subfolder_relative, f"{file_name_base}_chunk_{chunk_index + 1}.json").replace('\\', '/')
-                            json_bytes = json.dumps(result_json, indent=4, default=json_serializer).encode('utf-8')
-                            if not write_to_nas(share_name, chunk_json_relative_path, json_bytes):
-                                print(f"   [ERROR] Failed to write JSON chunk {chunk_index + 1} for {file_name} to NAS.")
-                                # Decide if this constitutes a full file error
+                    # Save structured JSON (replaces both MD and old JSON format)
+                    json_bytes = json.dumps(structured_result, indent=4, default=json_serializer).encode('utf-8')
+                    if not write_to_nas(share_name, output_json_relative_path, json_bytes):
+                        print(f"   [ERROR] Failed to write structured JSON file for {file_name} to NAS.")
+                        file_has_error = True
                     else:
-                        # Save single JSON for non-split files
-                        json_bytes = json.dumps(results_json_list[0], indent=4, default=json_serializer).encode('utf-8')
-                        if not write_to_nas(share_name, output_json_relative_path, json_bytes):
-                            print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
-                            # Decide if this constitutes a full file error
+                        print(f"   Successfully saved structured JSON with {structured_result['total_pages']} pages.")
 
             except Exception as e:
                 print(f"   [ERROR] Unexpected error processing file {file_info.get('file_name', 'N/A')}: {e}")
@@ -605,13 +607,7 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                         os.remove(local_file_path)
                     except OSError as e:
                         print(f"   [WARNING] Failed to remove temporary file {local_file_path}: {e}")
-                if local_chunk_paths:
-                    for chunk_path in local_chunk_paths:
-                         if os.path.exists(chunk_path):
-                            try:
-                                os.remove(chunk_path)
-                            except OSError as e:
-                                print(f"   [WARNING] Failed to remove temporary chunk {chunk_path}: {e}")
+                # Note: Individual page files are cleaned up in the PDF processing section above
 
                 # --- Update Counters ---
                 if file_has_error:
