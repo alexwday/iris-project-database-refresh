@@ -328,21 +328,41 @@ def read_json_from_nas(nas_path_relative):
         print(f"   [ERROR] Unexpected error reading JSON from NAS '{nas_path_relative}': {e}")
         return None # Indicate failure
 
-def write_json_to_nas(nas_path_relative, data):
-    """Writes Python data (list/dict) as JSON to a file path on the NAS."""
+def write_json_to_nas(nas_path_relative, data, max_retries=3, retry_delay=2):
+    """Writes Python data (list/dict) as JSON to a file path on the NAS with retry logic."""
     print(f"   Attempting to write JSON to NAS path: {NAS_PARAMS['share']}/{nas_path_relative}")
-    try:
-        # Convert Python object to JSON string with specific formatting
-        json_string = json.dumps(data, indent=4, default=str)
-        json_bytes = json_string.encode('utf-8')
-        
-        return write_to_nas(NAS_PARAMS["share"], nas_path_relative, json_bytes)
-    except TypeError as e:
-        print(f"   [ERROR] Failed to serialize data to JSON: {e}")
-        return False
-    except Exception as e:
-        print(f"   [ERROR] Unexpected error preparing JSON for NAS write '{nas_path_relative}': {e}")
-        return False
+    
+    for attempt in range(max_retries):
+        try:
+            # Convert Python object to JSON string with specific formatting
+            json_string = json.dumps(data, indent=4, default=str)
+            json_bytes = json_string.encode('utf-8')
+            
+            # Log size for debugging large files
+            file_size_mb = len(json_bytes) / (1024 * 1024)
+            if file_size_mb > 5:  # Warn if file is over 5MB
+                print(f"   [WARNING] Large JSON file: {file_size_mb:.1f}MB")
+            
+            success = write_to_nas(NAS_PARAMS["share"], nas_path_relative, json_bytes)
+            if success:
+                return True
+            else:
+                print(f"   [Attempt {attempt + 1}/{max_retries}] Failed to write to NAS")
+                if attempt < max_retries - 1:
+                    print(f"   Waiting {retry_delay} seconds before retry...")
+                    time.sleep(retry_delay)
+                    
+        except TypeError as e:
+            print(f"   [ERROR] Failed to serialize data to JSON: {e}")
+            return False  # Don't retry serialization errors
+        except Exception as e:
+            print(f"   [Attempt {attempt + 1}/{max_retries}] Unexpected error preparing JSON for NAS write '{nas_path_relative}': {e}")
+            if attempt < max_retries - 1:
+                print(f"   Waiting {retry_delay} seconds before retry...")
+                time.sleep(retry_delay)
+    
+    print(f"   [ERROR] Failed to write JSON after {max_retries} attempts")
+    return False
 
 def read_text_from_nas(nas_path_relative):
     """Reads text content from a file path on the NAS."""
@@ -1162,7 +1182,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     else:
                         # Log warning but don't necessarily stop the whole process? Or make it critical?
                         # For now, log warning and rollback the append for consistency.
-                        print(f"   [WARNING] Failed to save anonymization report file to NAS after processing {md_filename}. Report may be out of sync.")
+                        print(f"   [WARNING] Failed to save anonymization report file to NAS after processing {json_filename}. Report may be out of sync.")
                         report_entries.pop() # Rollback append
 
                     # Only increment count and mark processed if all saves were successful
@@ -1171,7 +1191,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     new_entries_count += 1
                     processed_json_files.add(json_relative_path) # Mark as processed only if all saves succeed (or primary ones + report append attempted)
                 else:
-                    print(f"   [CRITICAL ERROR] Failed to save one or both primary output files (catalog/content) to NAS after processing {md_filename}. Stopping.")
+                    print(f"   [CRITICAL ERROR] Failed to save one or both primary output files (catalog/content) to NAS after processing {json_filename}. Stopping.")
                     error_count += 1
                     # Rollback the appends for consistency before exiting
                     catalog_entries.pop()
