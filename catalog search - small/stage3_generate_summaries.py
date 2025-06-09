@@ -1189,7 +1189,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
             # --- Final Summary ---
             print("\n" + "="*60)
             print(f"--- Stage 3 Processing Summary ---")
-            print(f"   Total Markdown files found: {len(md_files_to_process)}")
+            print(f"   Total JSON files found: {len(json_files_to_process)}")
             print(f"   Files skipped (already processed): {skipped_count}")
             print(f"   New entry pairs (catalog/content) added: {new_entries_count}")
             print(f"   Errors encountered: {error_count}")
