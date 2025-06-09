@@ -21,6 +21,7 @@ import json
 import tempfile
 import time
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Use pysmb instead of smbclient ---
 from smb.SMBConnection import SMBConnection
 from smb import smb_structs
@@ -65,6 +66,9 @@ DOCUMENT_SOURCE = 'internal_esg' # From Stage 1
 # Note: Page-by-page processing is now used for all PDFs, eliminating the need for page limits
 # PDF_PAGE_LIMIT = 2000  # Legacy - no longer used
 # PDF_CHUNK_SIZE = 1000  # Legacy - no longer used
+
+# Concurrent Processing Configuration
+MAX_CONCURRENT_PAGES = 5  # Number of pages to process simultaneously with Azure DI
 
 # --- CA Bundle Configuration ---
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this exists on NAS)
@@ -356,33 +360,78 @@ def extract_individual_pages(local_pdf_path, temp_dir):
         print(f"   [ERROR] Failed to extract pages from PDF {local_pdf_path}: {e}")
         return []
 
-def process_pages_batch(di_client, page_files, max_retries=3, retry_delay=5):
-    """Processes multiple PDF pages in batch using Azure Document Intelligence."""
-    print(f"   Processing batch of {len(page_files)} pages with Azure DI...")
-    page_results = []
+def process_single_page(di_client, page_info, max_retries=3, retry_delay=5):
+    """Processes a single PDF page using Azure Document Intelligence."""
+    page_num = page_info['page_number']
+    page_path = page_info['file_path']
     
-    for page_info in page_files:
-        page_num = page_info['page_number']
-        page_path = page_info['file_path']
-        
-        print(f"      Processing page {page_num}...")
-        
+    try:
         # Process this individual page
         analyze_result = analyze_document_with_di(di_client, page_path, max_retries=max_retries, retry_delay=retry_delay)
         
         if analyze_result and analyze_result.content:
-            page_results.append({
+            return {
                 'page_number': page_num,
-                'markdown_content': analyze_result.content
-            })
-            print(f"      Page {page_num} processed successfully.")
+                'markdown_content': analyze_result.content,
+                'success': True
+            }
         else:
-            print(f"      [ERROR] Failed to process page {page_num}.")
-            # Still add entry with None content to maintain page numbering
-            page_results.append({
+            return {
                 'page_number': page_num,
-                'markdown_content': None
-            })
+                'markdown_content': None,
+                'success': False
+            }
+    except Exception as e:
+        print(f"      [ERROR] Exception processing page {page_num}: {e}")
+        return {
+            'page_number': page_num,
+            'markdown_content': None,
+            'success': False
+        }
+
+def process_pages_batch(di_client, page_files, max_workers=5, max_retries=3, retry_delay=5):
+    """Processes multiple PDF pages concurrently using Azure Document Intelligence."""
+    print(f"   Processing batch of {len(page_files)} pages with Azure DI (max {max_workers} concurrent)...")
+    page_results = []
+    
+    # Process pages concurrently
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all page processing tasks
+        future_to_page = {
+            executor.submit(process_single_page, di_client, page_info, max_retries, retry_delay): page_info
+            for page_info in page_files
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_page):
+            page_info = future_to_page[future]
+            try:
+                result = future.result()
+                page_results.append(result)
+                
+                if result['success']:
+                    print(f"      Page {result['page_number']} processed successfully.")
+                else:
+                    print(f"      [ERROR] Failed to process page {result['page_number']}.")
+                    
+            except Exception as e:
+                page_num = page_info['page_number']
+                print(f"      [ERROR] Exception in future for page {page_num}: {e}")
+                page_results.append({
+                    'page_number': page_num,
+                    'markdown_content': None,
+                    'success': False
+                })
+    
+    # Sort results by page number to maintain order
+    page_results.sort(key=lambda x: x['page_number'])
+    
+    # Remove the 'success' field from results for compatibility
+    for result in page_results:
+        result.pop('success', None)
+    
+    successful_pages = sum(1 for r in page_results if r['markdown_content'] is not None)
+    print(f"   Batch processing completed: {successful_pages}/{len(page_files)} pages successful")
     
     return page_results
 
@@ -528,8 +577,8 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
                             print(f"   [ERROR] Failed to extract pages from PDF {file_name}. Skipping analysis.")
                             file_has_error = True
                         else:
-                            # Process all pages in batch
-                            page_results = process_pages_batch(di_client, page_files)
+                            # Process all pages in batch (concurrently)
+                            page_results = process_pages_batch(di_client, page_files, max_workers=MAX_CONCURRENT_PAGES)
                             
                             # Create structured result
                             structured_result = {
