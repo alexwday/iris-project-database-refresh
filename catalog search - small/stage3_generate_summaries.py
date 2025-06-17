@@ -66,7 +66,7 @@ DOCUMENT_TYPE = 'POLICY_DOCUMENT' # Example: Replace with appropriate type
 # - 'concise': Brief overview for large catalogs (saves context window)
 # - 'standard': Balanced summary for typical use cases
 # - 'detailed': Exhaustive analysis for small catalogs (better retrieval)
-DETAIL_LEVEL = 'standard'
+DETAIL_LEVEL = 'detailed'
 
 # --- OAuth Configuration ---
 # OAuth authentication parameters
@@ -492,7 +492,7 @@ def get_oauth_token():
         print(f"   [ERROR] Unexpected error during OAuth token request: {e}")
         return None
 
-def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', document_source='unknown', filename=''):
+def call_gpt_summarizer(api_client, markdown_content, detail_level, document_source='unknown', filename=''):
     """
     Calls the custom GPT model to generate summaries using tool calling.
 
@@ -1080,6 +1080,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
 
                 # --- Call GPT Summarizer (with detail level, source, and filename) ---
                 # Use configured detail level
+                print(f"   DEBUG: Using configured DETAIL_LEVEL: {DETAIL_LEVEL}")
                 # Extract filename from JSON path for reference
                 original_filename = os.path.basename(json_relative_path).replace('.json', '')
                 description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, DETAIL_LEVEL, DOCUMENT_SOURCE, original_filename)
