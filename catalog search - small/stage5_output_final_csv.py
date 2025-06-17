@@ -338,6 +338,28 @@ def generate_deployment_metadata(catalog_df, content_df, timestamp):
     
     return metadata
 
+def safe_datetime_format(dt_value):
+    """Safely format a datetime value to ISO string, handling various input types."""
+    if dt_value is None or pd.isna(dt_value):
+        return None
+    
+    # If it's already a string, return as-is
+    if isinstance(dt_value, str):
+        return dt_value
+    
+    # If it's a datetime object, format it
+    try:
+        if hasattr(dt_value, 'isoformat'):
+            return dt_value.isoformat()
+        elif hasattr(dt_value, 'strftime'):
+            return dt_value.strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            # Fallback: convert to string
+            return str(dt_value)
+    except Exception:
+        # Last resort: convert to string
+        return str(dt_value)
+
 def generate_summary_report(catalog_df, content_df, validation_issues, timestamp):
     """Generate a summary report of the deployment."""
     report = {
@@ -352,8 +374,8 @@ def generate_summary_report(catalog_df, content_df, validation_issues, timestamp
             "unique_documents": catalog_df['document_name'].nunique() if 'document_name' in catalog_df.columns and not catalog_df.empty else 0,
             "file_types": catalog_df['file_type'].value_counts().to_dict() if 'file_type' in catalog_df.columns and not catalog_df.empty else {},
             "date_range": {
-                "earliest": catalog_df['date_created'].min().isoformat() if 'date_created' in catalog_df.columns and not catalog_df.empty and catalog_df['date_created'].notna().any() else None,
-                "latest": catalog_df['date_created'].max().isoformat() if 'date_created' in catalog_df.columns and not catalog_df.empty and catalog_df['date_created'].notna().any() else None
+                "earliest": safe_datetime_format(catalog_df['date_created'].min()) if 'date_created' in catalog_df.columns and not catalog_df.empty and catalog_df['date_created'].notna().any() else None,
+                "latest": safe_datetime_format(catalog_df['date_created'].max()) if 'date_created' in catalog_df.columns and not catalog_df.empty and catalog_df['date_created'].notna().any() else None
             }
         },
         "content_stats": {
