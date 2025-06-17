@@ -19,6 +19,7 @@ import pandas as pd
 import json
 import sys
 import os
+import time
 from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 import io
@@ -395,6 +396,94 @@ def generate_summary_report(catalog_df, content_df, validation_issues, timestamp
     
     return report
 
+def delete_directory_recursive(conn, share_name, dir_path, max_retries=3):
+    """
+    Recursively delete a directory and all its contents with retry logic.
+    
+    Args:
+        conn: SMB connection object
+        share_name: Name of the SMB share
+        dir_path: Path to directory to delete (relative to share)
+        max_retries: Maximum retry attempts for each file
+    
+    Returns:
+        bool: True if all deletions succeeded, False if any failed
+    """
+    success = True
+    
+    try:
+        files = conn.listPath(share_name, dir_path)
+        
+        # First pass: delete all files
+        for file_info in files:
+            if file_info.filename in ['.', '..']:
+                continue
+                
+            file_path = os.path.join(dir_path, file_info.filename).replace('\\', '/')
+            
+            if not file_info.isDirectory:
+                # Delete file with retry logic
+                for attempt in range(max_retries):
+                    try:
+                        conn.deleteFiles(share_name, file_path)
+                        print(f"      Deleted file: {file_info.filename}")
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            print(f"      Retry {attempt + 1}/{max_retries} for file: {file_info.filename}")
+                            time.sleep(1)  # Wait before retry
+                        else:
+                            print(f"      [ERROR] Failed to delete file {file_info.filename}: {e}")
+                            success = False
+        
+        # Second pass: recursively delete subdirectories
+        for file_info in files:
+            if file_info.filename in ['.', '..']:
+                continue
+                
+            if file_info.isDirectory:
+                subdir_path = os.path.join(dir_path, file_info.filename).replace('\\', '/')
+                print(f"      Entering subdirectory: {file_info.filename}")
+                
+                # Recursively delete subdirectory
+                if not delete_directory_recursive(conn, share_name, subdir_path, max_retries):
+                    success = False
+                    continue
+                
+                # Delete the now-empty subdirectory
+                for attempt in range(max_retries):
+                    try:
+                        conn.deleteDirectory(share_name, subdir_path)
+                        print(f"      Deleted directory: {file_info.filename}")
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            print(f"      Retry {attempt + 1}/{max_retries} for directory: {file_info.filename}")
+                            time.sleep(1)
+                        else:
+                            print(f"      [ERROR] Failed to delete directory {file_info.filename}: {e}")
+                            success = False
+        
+        # Finally, delete the main directory itself
+        if success:
+            for attempt in range(max_retries):
+                try:
+                    conn.deleteDirectory(share_name, dir_path)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        print(f"      Retry {attempt + 1}/{max_retries} for main directory")
+                        time.sleep(1)
+                    else:
+                        print(f"      [ERROR] Failed to delete main directory: {e}")
+                        success = False
+        
+    except Exception as e:
+        print(f"   [ERROR] Failed to list directory contents for cleanup: {e}")
+        success = False
+    
+    return success
+
 def archive_processing_run(timestamp):
     """Archive the entire processing run by zipping and moving to archive folder."""
     try:
@@ -462,25 +551,11 @@ def archive_processing_run(timestamp):
             
             # Remove the source directory after successful archiving
             print(f"   Cleaning up source directory: {source_dir_relative}")
-            try:
-                # Delete all files in the source directory first
-                files = conn.listPath(NAS_PARAMS["share"], source_dir_relative)
-                for file_info in files:
-                    if file_info.filename in ['.', '..']:
-                        continue
-                    
-                    file_path = os.path.join(source_dir_relative, file_info.filename).replace('\\', '/')
-                    if not file_info.isDirectory:
-                        conn.deleteFiles(NAS_PARAMS["share"], file_path)
-                        print(f"      Deleted file: {file_info.filename}")
-                
-                # Remove the directory itself
-                conn.deleteDirectory(NAS_PARAMS["share"], source_dir_relative)
+            cleanup_success = delete_directory_recursive(conn, NAS_PARAMS["share"], source_dir_relative)
+            if cleanup_success:
                 print(f"   Successfully removed source directory: {source_dir_relative}")
-                
-            except Exception as cleanup_error:
-                print(f"   [WARNING] Failed to cleanup source directory: {cleanup_error}")
-                print("   Archive created successfully, but manual cleanup may be needed.")
+            else:
+                print("   [WARNING] Some files could not be deleted. Manual cleanup may be needed.")
             
             conn.close()
             return True
