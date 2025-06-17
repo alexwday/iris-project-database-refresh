@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Stage 5: Output Final CSV Files for IT Deployment
+Stage 5: Create Timestamped Deployment Files and Archive Processing Run
 
-This script creates the final CSV files that IT will use for PostgreSQL deployment.
-It reads the updated master CSV files and outputs clean, deployment-ready versions
-with proper formatting and validation.
+This script creates timestamped, deployment-ready CSV files for IT pickup and 
+archives the entire processing run for audit and rollback purposes.
 
 Workflow:
 1. Loads the updated master CSV files from Stage 4
 2. Validates data integrity and format consistency
-3. Applies any final transformations needed for PostgreSQL import
-4. Outputs final CSV files to NAS for IT pickup
+3. Applies final transformations needed for PostgreSQL import
+4. Creates timestamped deployment copies for IT pickup
 5. Generates deployment metadata and summary report
-6. Archives previous versions for rollback capability
+6. Archives the entire processing run (zip + move to archive folder)
+7. Cleans up working files
 """
 
 import pandas as pd
@@ -25,22 +25,28 @@ import io
 import socket
 from datetime import datetime, timezone
 import hashlib
+import zipfile
+import tempfile
 
 # ==============================================================================
 # --- Configuration ---
 # ==============================================================================
 
 # --- CSV Configuration ---
-# Paths to master CSV files on NAS (relative to share)
+# Paths to master CSV files on NAS (relative to share) - these are outputs from Stage 4
 MASTER_CSV_FOLDER_PATH = "path/to/master_csv_folder"
 MASTER_CATALOG_CSV = "master_catalog.csv"
 MASTER_CONTENT_CSV = "master_content.csv"
 
-# --- Output Configuration ---
-FINAL_CATALOG_CSV = "final_catalog.csv"
-FINAL_CONTENT_CSV = "final_content.csv"
+# --- Deployment Configuration ---
+# Timestamped files for IT pickup (format: catalog_YYYY-MM-DD_HH-MM-SS.csv)
+DEPLOYMENT_CATALOG_PREFIX = "catalog"
+DEPLOYMENT_CONTENT_PREFIX = "content"
 DEPLOYMENT_METADATA_JSON = "deployment_metadata.json"
 SUMMARY_REPORT_JSON = "summary_report.json"
+
+# --- Archive Configuration ---
+ARCHIVE_SUBFOLDER_NAME = "_archive"
 
 # --- NAS Configuration ---
 NAS_PARAMS = {
@@ -293,18 +299,18 @@ def prepare_final_csv(df, csv_type):
     
     return df_final
 
-def generate_deployment_metadata(catalog_df, content_df):
+def generate_deployment_metadata(catalog_df, content_df, timestamp):
     """Generate deployment metadata for IT."""
     metadata = {
         "deployment_info": {
-            "timestamp": datetime.utcnow().isoformat() + 'Z',
+            "timestamp": timestamp,
             "document_source": DOCUMENT_SOURCE,
             "pipeline_version": "CSV_Migration_v1.0",
-            "stage5_version": "1.0"
+            "stage5_version": "2.0"
         },
         "file_info": {
-            "catalog_file": FINAL_CATALOG_CSV,
-            "content_file": FINAL_CONTENT_CSV,
+            "catalog_file": f"{DEPLOYMENT_CATALOG_PREFIX}_{timestamp}.csv",
+            "content_file": f"{DEPLOYMENT_CONTENT_PREFIX}_{timestamp}.csv",
             "catalog_records": len(catalog_df),
             "content_records": len(content_df),
             "catalog_hash": calculate_file_hash(catalog_df),
@@ -332,11 +338,11 @@ def generate_deployment_metadata(catalog_df, content_df):
     
     return metadata
 
-def generate_summary_report(catalog_df, content_df, validation_issues):
+def generate_summary_report(catalog_df, content_df, validation_issues, timestamp):
     """Generate a summary report of the deployment."""
     report = {
         "summary": {
-            "timestamp": datetime.utcnow().isoformat() + 'Z',
+            "timestamp": timestamp,
             "document_source": DOCUMENT_SOURCE,
             "status": "SUCCESS" if not validation_issues else "WARNING",
             "total_records": len(catalog_df) + len(content_df)
@@ -367,16 +373,99 @@ def generate_summary_report(catalog_df, content_df, validation_issues):
     
     return report
 
+def archive_processing_run(timestamp):
+    """Archive the entire processing run by zipping and moving to archive folder."""
+    try:
+        # Define source and destination paths
+        source_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+        archive_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, ARCHIVE_SUBFOLDER_NAME).replace('\\', '/')
+        archive_filename = f"{DOCUMENT_SOURCE}_{timestamp}.zip"
+        archive_path_relative = os.path.join(archive_dir_relative, archive_filename).replace('\\', '/')
+        
+        print(f"   Creating archive: {archive_filename}")
+        print(f"   Source: {NAS_PARAMS['share']}/{source_dir_relative}")
+        print(f"   Archive: {NAS_PARAMS['share']}/{archive_path_relative}")
+        
+        # Create temporary zip file locally
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_zip:
+            temp_zip_path = temp_zip.name
+        
+        try:
+            # Download all files from processing directory and zip them
+            conn = create_nas_connection()
+            if not conn:
+                print("   [ERROR] Failed to connect to NAS for archiving")
+                return False
+            
+            # Create zip file
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                # Walk through the source directory and add all files to zip
+                files_added = 0
+                try:
+                    files = conn.listPath(NAS_PARAMS["share"], source_dir_relative)
+                    for file_info in files:
+                        if file_info.filename in ['.', '..']:
+                            continue
+                        
+                        file_path = os.path.join(source_dir_relative, file_info.filename).replace('\\', '/')
+                        if not file_info.isDirectory:
+                            # Download file content
+                            file_obj = io.BytesIO()
+                            conn.retrieveFile(NAS_PARAMS["share"], file_path, file_obj)
+                            file_obj.seek(0)
+                            file_content = file_obj.read()
+                            
+                            # Add to zip
+                            zipf.writestr(file_info.filename, file_content)
+                            files_added += 1
+                        
+                except Exception as e:
+                    print(f"   [ERROR] Error reading source directory for archiving: {e}")
+                    return False
+                
+                print(f"   Added {files_added} files to archive")
+            
+            # Ensure archive directory exists
+            if not ensure_nas_dir_exists(conn, NAS_PARAMS["share"], archive_dir_relative):
+                print("   [ERROR] Failed to create archive directory")
+                return False
+            
+            # Upload zip file to NAS
+            with open(temp_zip_path, 'rb') as zip_file:
+                zip_content = zip_file.read()
+            
+            file_obj = io.BytesIO(zip_content)
+            bytes_written = conn.storeFile(NAS_PARAMS["share"], archive_path_relative, file_obj)
+            print(f"   Successfully archived {bytes_written} bytes to: {archive_filename}")
+            
+            conn.close()
+            return True
+            
+        finally:
+            # Clean up temporary zip file
+            try:
+                os.unlink(temp_zip_path)
+            except Exception:
+                pass
+                
+    except Exception as e:
+        print(f"   [ERROR] Failed to archive processing run: {e}")
+        return False
+
 # ==============================================================================
 # --- Main Processing Function ---
 # ==============================================================================
 
 def main_processing_stage5():
-    """Handles the core logic for Stage 5: final CSV output preparation."""
+    """Handles the core logic for Stage 5: create timestamped deployment files and archive processing run."""
     print(f"--- Starting Main Processing for Stage 5 ---")
+    
+    # Generate timestamp for this deployment
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    print(f"   Deployment timestamp: {timestamp}")
 
     # --- Load Updated Master CSV Files ---
-    print("[2] Loading Updated Master CSV Files...")
+    print("[2] Loading Updated Master CSV Files from Stage 4...")
     catalog_df = load_master_csv(MASTER_CATALOG_CSV)
     content_df = load_master_csv(MASTER_CONTENT_CSV)
     
@@ -406,7 +495,7 @@ def main_processing_stage5():
     print("-" * 60)
 
     # --- Prepare Final CSV Data ---
-    print("[4] Preparing Final CSV Data for Deployment...")
+    print("[4] Preparing CSV Data for Deployment...")
     final_catalog_df = prepare_final_csv(catalog_df, "catalog")
     final_content_df = prepare_final_csv(content_df, "content")
     
@@ -414,20 +503,26 @@ def main_processing_stage5():
     print(f"   Prepared content: {len(final_content_df)} records")
     print("-" * 60)
 
-    # --- Generate Deployment Files ---
-    print("[5] Generating Deployment Files...")
+    # --- Create Timestamped Deployment Files ---
+    print("[5] Creating Timestamped Deployment Files for IT...")
     
-    # Define deployment paths
+    # Define deployment paths with timestamps
     deployment_dir_relative = os.path.join(NAS_DEPLOYMENT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
     
-    catalog_output_path = os.path.join(deployment_dir_relative, FINAL_CATALOG_CSV).replace('\\', '/')
-    content_output_path = os.path.join(deployment_dir_relative, FINAL_CONTENT_CSV).replace('\\', '/')
-    metadata_output_path = os.path.join(deployment_dir_relative, DEPLOYMENT_METADATA_JSON).replace('\\', '/')
-    summary_output_path = os.path.join(deployment_dir_relative, SUMMARY_REPORT_JSON).replace('\\', '/')
+    # Timestamped filenames
+    catalog_filename = f"{DEPLOYMENT_CATALOG_PREFIX}_{timestamp}.csv"
+    content_filename = f"{DEPLOYMENT_CONTENT_PREFIX}_{timestamp}.csv"
+    metadata_filename = f"metadata_{timestamp}.json"
+    summary_filename = f"summary_{timestamp}.json"
+    
+    catalog_output_path = os.path.join(deployment_dir_relative, catalog_filename).replace('\\', '/')
+    content_output_path = os.path.join(deployment_dir_relative, content_filename).replace('\\', '/')
+    metadata_output_path = os.path.join(deployment_dir_relative, metadata_filename).replace('\\', '/')
+    summary_output_path = os.path.join(deployment_dir_relative, summary_filename).replace('\\', '/')
     
     # Generate metadata and reports
-    deployment_metadata = generate_deployment_metadata(final_catalog_df, final_content_df)
-    summary_report = generate_summary_report(final_catalog_df, final_content_df, all_issues)
+    deployment_metadata = generate_deployment_metadata(final_catalog_df, final_content_df, timestamp)
+    summary_report = generate_summary_report(final_catalog_df, final_content_df, all_issues, timestamp)
     
     # Convert DataFrames to CSV strings
     catalog_csv_content = final_catalog_df.to_csv(index=False, na_rep='NULL')
@@ -435,17 +530,21 @@ def main_processing_stage5():
     metadata_json_content = json.dumps(deployment_metadata, indent=2)
     summary_json_content = json.dumps(summary_report, indent=2)
     
-    print(f"   Generated deployment files for: {NAS_PARAMS['share']}/{deployment_dir_relative}")
+    print(f"   Generated timestamped deployment files:")
+    print(f"     - {catalog_filename}")
+    print(f"     - {content_filename}")
+    print(f"     - {metadata_filename}")
+    print(f"     - {summary_filename}")
     print("-" * 60)
 
-    # --- Write Files to NAS ---
-    print("[6] Writing Deployment Files to NAS...")
+    # --- Write Deployment Files to NAS ---
+    print("[6] Writing Timestamped Files to IT Pickup Folder...")
     
     files_to_write = [
-        (catalog_output_path, catalog_csv_content, "Final catalog CSV"),
-        (content_output_path, content_csv_content, "Final content CSV"),
-        (metadata_output_path, metadata_json_content, "Deployment metadata"),
-        (summary_output_path, summary_json_content, "Summary report")
+        (catalog_output_path, catalog_csv_content, f"Timestamped catalog CSV ({catalog_filename})"),
+        (content_output_path, content_csv_content, f"Timestamped content CSV ({content_filename})"),
+        (metadata_output_path, metadata_json_content, f"Deployment metadata ({metadata_filename})"),
+        (summary_output_path, summary_json_content, f"Summary report ({summary_filename})")
     ]
     
     success_count = 0
@@ -463,18 +562,28 @@ def main_processing_stage5():
     print(f"   Successfully wrote all {len(files_to_write)} deployment files")
     print("-" * 60)
 
+    # --- Archive Processing Run ---
+    print("[7] Archiving Processing Run...")
+    archive_success = archive_processing_run(timestamp)
+    if not archive_success:
+        print("   [WARNING] Failed to archive processing run, but deployment files are ready.")
+    print("-" * 60)
+
     # --- Final Summary ---
-    print("[7] Deployment Summary...")
+    print("[8] Deployment and Archive Summary...")
     print(f"   Document Source: {DOCUMENT_SOURCE}")
+    print(f"   Deployment Timestamp: {timestamp}")
     print(f"   Catalog Records: {len(final_catalog_df)}")
     print(f"   Content Records: {len(final_content_df)}")
     print(f"   Deployment Location: {NAS_PARAMS['share']}/{deployment_dir_relative}")
     print(f"   Validation Issues: {len(all_issues)}")
     print(f"   Files Ready for IT Pickup:")
-    print(f"     - {FINAL_CATALOG_CSV}")
-    print(f"     - {FINAL_CONTENT_CSV}")
-    print(f"     - {DEPLOYMENT_METADATA_JSON}")
-    print(f"     - {SUMMARY_REPORT_JSON}")
+    print(f"     - {catalog_filename}")
+    print(f"     - {content_filename}")
+    print(f"     - {metadata_filename}")
+    print(f"     - {summary_filename}")
+    if archive_success:
+        print(f"   Processing run archived successfully")
     
     print("-" * 60)
     print("\n" + "="*60)
