@@ -747,7 +747,7 @@ if __name__ == "__main__":
 
             # --- Define Paths (Relative to Share) ---
             print("[4] Defining NAS Paths (Relative)...") # Renumbered
-            # share_name is already defined
+            share_name = NAS_PARAMS["share"]
             # Base output directory from Stage 1 (relative to share)
             stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
             # Input JSON file from Stage 1 (relative to share)
