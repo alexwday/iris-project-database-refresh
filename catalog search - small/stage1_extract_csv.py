@@ -663,107 +663,107 @@ if __name__ == "__main__":
                     files_to_delete = pd.concat([files_to_delete, deleted_files_to_remove], ignore_index=True)
                     print(f"      Added {len(deleted_files_to_remove)} CSV records to deletion list (files no longer on NAS).")
 
-                # --- Combine New and Updated Files for Processing ---
-                files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
+                    # --- Combine New and Updated Files for Processing ---
+                    files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
 
-        # --- Final Summary ---
-        unchanged_count = 0
-        if not both_files.empty:
-            if 'updated_mask' in locals() and not updated_mask.empty:
-                unchanged_count = len(both_files[~updated_mask])
-            else:
-                unchanged_count = len(both_files)
-
-        print(f"\n   Comparison Summary:")
-        print(f"      - NAS Files to Process (New or Updated): {len(files_to_process)}")
-        print(f"      - Existing CSV Records to Delete (Updated Files + Missing Files): {len(files_to_delete)}")
-        print(f"      - Files Found Unchanged (Timestamp Match): {unchanged_count}")
-        print("-" * 60)
-
-        # --- Save Comparison Results to NAS ---
-        print("[7] Saving Comparison Results to NAS...")
-
-        # Save files to process
-        print(f"   Saving 'files to process' list to: '{os.path.basename(process_output_relative_file)}'...")
-        process_json_string = files_to_process.to_json(orient='records', indent=4, date_format='iso')
-        if not write_json_to_nas(NAS_PARAMS["share"], process_output_relative_file, process_json_string):
-            print("   [CRITICAL ERROR] Failed to write 'files to process' JSON to NAS. Exiting.")
-            sys.exit(1)
-
-        # Save files to delete
-        print(f"   Saving 'files to delete' list to: '{os.path.basename(delete_output_relative_file)}'...")
-        if 'id' in files_to_delete.columns and not files_to_delete['id'].isnull().all():
-             files_to_delete['id'] = files_to_delete['id'].astype('Int64')
-        delete_json_string = files_to_delete.to_json(orient='records', indent=4)
-        if not write_json_to_nas(NAS_PARAMS["share"], delete_output_relative_file, delete_json_string):
-            print("   [CRITICAL ERROR] Failed to write 'files to delete' JSON to NAS. Exiting.")
-            sys.exit(1)
-        print("-" * 60)
-
-        # --- Create Skip Flag if No Files to Process ---
-        print("[8] Managing Flag Files...")
-        skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-        refresh_flag_file_name = '_FULL_REFRESH.flag'
-        skip_flag_relative_path = os.path.join(nas_output_dir_relative, skip_flag_file_name).replace('\\', '/')
-        refresh_flag_relative_path = os.path.join(nas_output_dir_relative, refresh_flag_file_name).replace('\\', '/')
-        conn_flag = None
-
-        try:
-            conn_flag = create_nas_connection()
-            if not conn_flag:
-                print("   [WARNING] Failed to connect to NAS to manage flag files. Skipping flag operations.")
-            else:
-                # Skip flag logic
-                if files_to_process.empty:
-                    print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
-                    try:
-                        conn_flag.storeFile(NAS_PARAMS["share"], skip_flag_relative_path, io.BytesIO(b''))
-                        print(f"   Successfully created skip flag file: {skip_flag_relative_path}")
-                    except Exception as e:
-                        print(f"   [WARNING] Error creating skip flag file '{skip_flag_relative_path}': {e}")
+            # --- Final Summary ---
+            unchanged_count = 0
+            if not both_files.empty:
+                if 'updated_mask' in locals() and not updated_mask.empty:
+                    unchanged_count = len(both_files[~updated_mask])
                 else:
-                    print(f"   Files found for processing ({len(files_to_process)}). Ensuring skip flag does not exist.")
-                    try:
-                        conn_flag.deleteFiles(NAS_PARAMS["share"], skip_flag_relative_path)
-                        print(f"   Removed potentially existing skip flag file: {skip_flag_relative_path}")
-                    except Exception as e:
-                        if "OBJECT_NAME_NOT_FOUND" not in str(e) and "STATUS_NO_SUCH_FILE" not in str(e):
-                             print(f"   [INFO] Error removing skip flag file (may not exist): {e}")
-                        else:
-                             print(f"   Skip flag file did not exist.")
+                    unchanged_count = len(both_files)
 
-                # Full refresh flag logic
-                if FULL_REFRESH:
-                    print(f"   Full refresh mode enabled. Creating refresh flag file: '{refresh_flag_file_name}'")
-                    try:
-                        conn_flag.storeFile(NAS_PARAMS["share"], refresh_flag_relative_path, io.BytesIO(b''))
-                        print(f"   Successfully created refresh flag file: {refresh_flag_relative_path}")
-                    except Exception as e:
-                        print(f"   [WARNING] Error creating refresh flag file '{refresh_flag_relative_path}': {e}")
-                else:
-                    print(f"   Incremental mode. Ensuring refresh flag does not exist.")
-                    try:
-                        conn_flag.deleteFiles(NAS_PARAMS["share"], refresh_flag_relative_path)
-                        print(f"   Removed potentially existing refresh flag file: {refresh_flag_relative_path}")
-                    except Exception as e:
-                        if "OBJECT_NAME_NOT_FOUND" not in str(e) and "STATUS_NO_SUCH_FILE" not in str(e):
-                            print(f"   [INFO] Error removing refresh flag file (may not exist): {e}")
-                        else:
-                            print(f"   Refresh flag file did not exist.")
-
-        except Exception as e:
-            print(f"   [WARNING] Unexpected error during flag file management: {e}")
-        finally:
-            if conn_flag:
-                conn_flag.close()
-
-            # Track this source as processed
-            all_sources_processed.append(DOCUMENT_SOURCE)
-            if not files_to_process.empty:
-                sources_with_files.append(DOCUMENT_SOURCE)
-            
-            print(f"   Source '{DOCUMENT_SOURCE}' processing completed.")
+            print(f"\n   Comparison Summary:")
+            print(f"      - NAS Files to Process (New or Updated): {len(files_to_process)}")
+            print(f"      - Existing CSV Records to Delete (Updated Files + Missing Files): {len(files_to_delete)}")
+            print(f"      - Files Found Unchanged (Timestamp Match): {unchanged_count}")
             print("-" * 60)
+
+            # --- Save Comparison Results to NAS ---
+            print("[7] Saving Comparison Results to NAS...")
+
+            # Save files to process
+            print(f"   Saving 'files to process' list to: '{os.path.basename(process_output_relative_file)}'...")
+            process_json_string = files_to_process.to_json(orient='records', indent=4, date_format='iso')
+            if not write_json_to_nas(NAS_PARAMS["share"], process_output_relative_file, process_json_string):
+                print("   [CRITICAL ERROR] Failed to write 'files to process' JSON to NAS. Exiting.")
+                sys.exit(1)
+
+            # Save files to delete
+            print(f"   Saving 'files to delete' list to: '{os.path.basename(delete_output_relative_file)}'...")
+            if 'id' in files_to_delete.columns and not files_to_delete['id'].isnull().all():
+                 files_to_delete['id'] = files_to_delete['id'].astype('Int64')
+            delete_json_string = files_to_delete.to_json(orient='records', indent=4)
+            if not write_json_to_nas(NAS_PARAMS["share"], delete_output_relative_file, delete_json_string):
+                print("   [CRITICAL ERROR] Failed to write 'files to delete' JSON to NAS. Exiting.")
+                sys.exit(1)
+            print("-" * 60)
+
+            # --- Create Skip Flag if No Files to Process ---
+            print("[8] Managing Flag Files...")
+            skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+            refresh_flag_file_name = '_FULL_REFRESH.flag'
+            skip_flag_relative_path = os.path.join(nas_output_dir_relative, skip_flag_file_name).replace('\\', '/')
+            refresh_flag_relative_path = os.path.join(nas_output_dir_relative, refresh_flag_file_name).replace('\\', '/')
+            conn_flag = None
+
+            try:
+                conn_flag = create_nas_connection()
+                if not conn_flag:
+                    print("   [WARNING] Failed to connect to NAS to manage flag files. Skipping flag operations.")
+                else:
+                    # Skip flag logic
+                    if files_to_process.empty:
+                        print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
+                        try:
+                            conn_flag.storeFile(NAS_PARAMS["share"], skip_flag_relative_path, io.BytesIO(b''))
+                            print(f"   Successfully created skip flag file: {skip_flag_relative_path}")
+                        except Exception as e:
+                            print(f"   [WARNING] Error creating skip flag file '{skip_flag_relative_path}': {e}")
+                    else:
+                        print(f"   Files found for processing ({len(files_to_process)}). Ensuring skip flag does not exist.")
+                        try:
+                            conn_flag.deleteFiles(NAS_PARAMS["share"], skip_flag_relative_path)
+                            print(f"   Removed potentially existing skip flag file: {skip_flag_relative_path}")
+                        except Exception as e:
+                            if "OBJECT_NAME_NOT_FOUND" not in str(e) and "STATUS_NO_SUCH_FILE" not in str(e):
+                                 print(f"   [INFO] Error removing skip flag file (may not exist): {e}")
+                            else:
+                                 print(f"   Skip flag file did not exist.")
+
+                    # Full refresh flag logic
+                    if FULL_REFRESH:
+                        print(f"   Full refresh mode enabled. Creating refresh flag file: '{refresh_flag_file_name}'")
+                        try:
+                            conn_flag.storeFile(NAS_PARAMS["share"], refresh_flag_relative_path, io.BytesIO(b''))
+                            print(f"   Successfully created refresh flag file: {refresh_flag_relative_path}")
+                        except Exception as e:
+                            print(f"   [WARNING] Error creating refresh flag file '{refresh_flag_relative_path}': {e}")
+                    else:
+                        print(f"   Incremental mode. Ensuring refresh flag does not exist.")
+                        try:
+                            conn_flag.deleteFiles(NAS_PARAMS["share"], refresh_flag_relative_path)
+                            print(f"   Removed potentially existing refresh flag file: {refresh_flag_relative_path}")
+                        except Exception as e:
+                            if "OBJECT_NAME_NOT_FOUND" not in str(e) and "STATUS_NO_SUCH_FILE" not in str(e):
+                                print(f"   [INFO] Error removing refresh flag file (may not exist): {e}")
+                            else:
+                                print(f"   Refresh flag file did not exist.")
+
+            except Exception as e:
+                print(f"   [WARNING] Unexpected error during flag file management: {e}")
+            finally:
+                if conn_flag:
+                    conn_flag.close()
+
+                # Track this source as processed
+                all_sources_processed.append(DOCUMENT_SOURCE)
+                if not files_to_process.empty:
+                    sources_with_files.append(DOCUMENT_SOURCE)
+                
+                print(f"   Source '{DOCUMENT_SOURCE}' processing completed.")
+                print("-" * 60)
 
     # Final summary
     print("\n" + "="*60)
