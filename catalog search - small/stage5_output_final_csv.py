@@ -206,7 +206,7 @@ def load_master_csv(filename):
 def calculate_file_hash(df):
     """Calculate a hash of the DataFrame content for integrity checking."""
     # Convert DataFrame to JSON string and calculate MD5 hash
-    json_str = df.to_json(sort_keys=True, orient='records')
+    json_str = df.to_json(orient='records')
     return hashlib.md5(json_str.encode('utf-8')).hexdigest()
 
 def validate_csv_data(df, csv_type):
