@@ -1,4 +1,4 @@
-c# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Stage 2: Process Documents with Azure Document Intelligence (using pysmb)
 
@@ -20,6 +20,7 @@ import sys
 import json
 import tempfile
 import time
+import re
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Use pysmb instead of smbclient ---
@@ -74,12 +75,12 @@ MAX_CONCURRENT_PAGES = 5  # Number of pages to process simultaneously with Azure
 CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer' # Added CA bundle filename (ensure this exists on NAS)
 
 # --- Proxy Configuration (Fill in if needed) ---
-PROXY_CONFIG = {
-    "use_proxy": True, # Set to True to enable proxy settings
-    "url": "http://your_proxy_server:port", # e.g., http://proxy.example.com:8080
-    "username": "YOUR_PROXY_USERNAME", # Set to None if no authentication needed
-    "password": "YOUR_PROXY_PASSWORD"  # Set to None if no authentication needed
-}
+# PROXY_CONFIG = {
+#     "use_proxy": False, # Set to True to enable proxy settings
+#     "url": "http://your_proxy_server:port", # e.g., http://proxy.example.com:8080
+#     "username": "YOUR_PROXY_USERNAME", # Set to None if no authentication needed
+#     "password": "YOUR_PROXY_PASSWORD"  # Set to None if no authentication needed
+# }
 
 # --- pysmb Configuration ---
 # Increase timeout for potentially slow NAS operations
@@ -370,9 +371,24 @@ def process_single_page(di_client, page_info, max_retries=3, retry_delay=5):
         analyze_result = analyze_document_with_di(di_client, page_path, max_retries=max_retries, retry_delay=retry_delay)
         
         if analyze_result and analyze_result.content:
+            # Clean up Azure DI page markers since we track page numbers separately
+            content = analyze_result.content
+            # Remove common Azure DI page markers
+            # Remove <!-- PageNumber: X --> tags
+            content = re.sub(r'<!--\s*PageNumber:\s*\d+\s*-->', '', content)
+            # Remove <!-- PageFooter: Page X of Y --> tags  
+            content = re.sub(r'<!--\s*PageFooter:.*?-->', '', content)
+            # Remove <!-- PageHeader: ... --> tags
+            content = re.sub(r'<!--\s*PageHeader:.*?-->', '', content)
+            # Remove :selected: tags that Azure DI sometimes adds
+            content = re.sub(r':selected:', '', content)
+            # Clean up extra newlines created by removal
+            content = re.sub(r'\n{3,}', '\n\n', content)
+            content = content.strip()
+            
             return {
                 'page_number': page_num,
-                'markdown_content': analyze_result.content,
+                'markdown_content': content,
                 'success': True
             }
         else:
@@ -698,11 +714,7 @@ if __name__ == "__main__":
 
     # --- Setup Custom CA Bundle and Initialize Clients ---
     temp_cert_file_path = None # Store path instead of file object
-    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
-    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
-    original_http_proxy = os.environ.get('HTTP_PROXY') # Store original proxy values
-    original_https_proxy = os.environ.get('HTTPS_PROXY')
-    proxy_set_by_script = False # Flag to track if we set the proxy vars
+    # Environment variables removed - not compatible with notebook environment
 
     di_client = None # Initialize DI client
     # http_transport = None # Removed httpx transport variable
@@ -710,74 +722,20 @@ if __name__ == "__main__":
     should_skip = False # Flag for skipping based on Stage 1 flag
 
     try:
-        # --- Download and Set Custom CA Bundle ---
-        print("[1] Setting up Custom CA Bundle...")
-        share_name = NAS_PARAMS["share"]
-        # Construct relative path to CA bundle within the NAS_OUTPUT_FOLDER_PATH
-        # Assuming bundle is at the root of NAS_OUTPUT_FOLDER_PATH, adjust if needed
-        ca_bundle_relative_path = os.path.join(NAS_OUTPUT_FOLDER_PATH, CA_BUNDLE_FILENAME).replace('\\', '/')
-        print(f"   Looking for CA bundle at: {share_name}/{ca_bundle_relative_path}")
+        # --- CA Bundle Setup (Simplified for Notebook Environment) ---
+        print("[1] CA Bundle setup skipped for notebook compatibility...")
+        # Note: If SSL/TLS issues occur, configure certificates directly in the Azure DI client
+        # or ensure the notebook environment has proper certificate validation configured
 
-        # Read CA bundle content from NAS using pysmb helper
-        ca_bundle_bytes = read_from_nas(share_name, ca_bundle_relative_path)
-
-        if ca_bundle_bytes:
-            # Create a temporary file to store the certificate
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".cer", mode='wb') as temp_cert_file:
-                temp_cert_file.write(ca_bundle_bytes)
-                temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
-                print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
-
-            # Set the environment variables
-            os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
-            os.environ['SSL_CERT_FILE'] = temp_cert_file_path
-            print(f"   Set REQUESTS_CA_BUNDLE environment variable.")
-            print(f"   Set SSL_CERT_FILE environment variable.")
-        else:
-            print(f"   [WARNING] CA Bundle file not found or could not be read from {share_name}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
-
-        # --- Set Proxy Environment Variables (if configured) ---
-        if PROXY_CONFIG.get("use_proxy"):
-            print("[2] Setting up Proxy Configuration...")
-            proxy_url_base = PROXY_CONFIG.get("url")
-            proxy_user = PROXY_CONFIG.get("username")
-            proxy_pass = PROXY_CONFIG.get("password")
-            proxy_string = proxy_url_base # Start with base URL
-
-            if proxy_user and proxy_pass and proxy_url_base:
-                # Construct URL with authentication if user/pass provided
-                protocol, rest = proxy_url_base.split("://", 1)
-                proxy_string = f"{protocol}://{proxy_user}:{proxy_pass}@{rest}"
-                print("   Configuring proxy with authentication.")
-            elif proxy_url_base:
-                print("   Configuring proxy without authentication.")
-            else:
-                print("   [WARNING] Proxy use enabled but proxy URL is not configured. Skipping proxy setup.")
-                proxy_string = None
-
-            # Restore setting environment variables
-            if proxy_string:
-                os.environ['HTTP_PROXY'] = proxy_string
-                os.environ['HTTPS_PROXY'] = proxy_string
-                proxy_set_by_script = True
-                print(f"   Set HTTP_PROXY and HTTPS_PROXY environment variables.")
-        else:
-            print("[2] Proxy configuration disabled. Skipping proxy setup.")
-
-        # --- Initialize DI Client (Relying on Environment Variables) ---
-        # Removed explicit httpx transport initialization
-        print("[3] Initializing Document Intelligence Client...") # Renumbered
+        # --- Initialize DI Client ---
+        print("[2] Initializing Document Intelligence Client...")
         try:
-            # Initialize DI client directly. It should pick up the proxy and CA bundle
-            # environment variables set earlier (HTTPS_PROXY, SSL_CERT_FILE/REQUESTS_CA_BUNDLE).
-            # Do NOT disable SSL verification here (remove connection_verify=False).
+            # Initialize DI client directly for notebook environment
             di_client = DocumentIntelligenceClient(
                 endpoint=AZURE_DI_ENDPOINT,
                 credential=AzureKeyCredential(AZURE_DI_KEY)
-                # No transport argument, let the SDK handle it.
-                # No connection_verify=False, let it use the CA bundle from env vars.
             )
-            print("   Document Intelligence client initialized (relying on environment variables for proxy/CA).")
+            print("   Document Intelligence client initialized successfully.")
 
         except Exception as e:
             print(f"[CRITICAL ERROR] Failed to initialize Document Intelligence client: {e}")
@@ -849,70 +807,13 @@ if __name__ == "__main__":
     finally:
         print("\n--- Cleaning up Stage 2 ---")
 
-        # Close the httpx transport - No longer needed as transport is not explicitly created
-        # if http_transport:
-        #     try:
-        #         http_transport.close()
-        #         print("   Closed httpx transport.")
-        #     except Exception as e:
-        #         print(f"   [WARNING] Error closing httpx transport: {e}")
-
-        # Clean up the temporary certificate file
+        # Clean up the temporary certificate file (if created)
         if temp_cert_file_path and os.path.exists(temp_cert_file_path):
             try:
                 os.remove(temp_cert_file_path)
                 print(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
             except OSError as e:
                  print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
-
-        # Restore original environment variables
-        # Restore REQUESTS_CA_BUNDLE
-        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
-        if original_requests_ca_bundle is None:
-            # If it didn't exist originally, remove it if we set it
-            if current_requests_bundle == temp_cert_file_path:
-                 print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
-                 if 'REQUESTS_CA_BUNDLE' in os.environ:
-                     del os.environ['REQUESTS_CA_BUNDLE']
-        else:
-            # If it existed originally, restore its value if it changed
-            if current_requests_bundle != original_requests_ca_bundle:
-                 print(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
-                 os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
-
-        # Restore SSL_CERT_FILE
-        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
-        if original_ssl_cert_file is None:
-            # If it didn't exist originally, remove it if we set it
-            if current_ssl_cert == temp_cert_file_path:
-                 print("   Unsetting SSL_CERT_FILE environment variable.")
-                 if 'SSL_CERT_FILE' in os.environ:
-                     del os.environ['SSL_CERT_FILE']
-        else:
-            # If it existed originally, restore its value if it changed
-            if current_ssl_cert != original_ssl_cert_file:
-                 print(f"   Restoring original SSL_CERT_FILE environment variable.")
-                 os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
-
-        # Restore Proxy Variables if they were set by the script
-        if proxy_set_by_script:
-            print("   Restoring original proxy environment variables...")
-            # Restore HTTP_PROXY
-            if original_http_proxy is None:
-                if 'HTTP_PROXY' in os.environ:
-                    del os.environ['HTTP_PROXY']
-                    print("   Unset HTTP_PROXY.")
-            else:
-                os.environ['HTTP_PROXY'] = original_http_proxy
-                print("   Restored original HTTP_PROXY.")
-            # Restore HTTPS_PROXY
-            if original_https_proxy is None:
-                if 'HTTPS_PROXY' in os.environ:
-                    del os.environ['HTTPS_PROXY']
-                    print("   Unset HTTPS_PROXY.")
-            else:
-                os.environ['HTTPS_PROXY'] = original_https_proxy
-                print("   Restored original HTTPS_PROXY.")
 
         print("--- Cleanup Complete ---")
 

@@ -585,6 +585,7 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         return None, None, None
 
 # Legacy page splitting functions removed - now using structured JSON data directly
+# Section splitting functions removed - now storing full page content only
 
 def split_page_into_sections(page_content, min_sections=2):
     """
@@ -835,43 +836,14 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
     """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
     print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
-    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE') # Store original env var value
-    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE') # Store original env var value
+    # Environment variables removed - not compatible with notebook environment
     is_full_refresh = False # Flag to track refresh mode
 
     try:
-        # --- Download and Set Custom CA Bundle ---
-        print("[3] Setting up Custom CA Bundle...")
-        try: # Inner try/except for CA bundle download/setup
-            if check_nas_path_exists(NAS_PARAMS["share"], ca_bundle_relative_path):
-                # Read CA bundle content from NAS
-                ca_bundle_bytes = read_from_nas(NAS_PARAMS["share"], ca_bundle_relative_path)
-                
-                if ca_bundle_bytes:
-                    # Create a temporary file to store the certificate
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".cer", mode='wb') as temp_cert_file:
-                        temp_cert_file.write(ca_bundle_bytes)
-                        temp_cert_file_path = temp_cert_file.name # Store the path for cleanup
-                        print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
-
-                    # Set the environment variables
-                    os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
-                    os.environ['SSL_CERT_FILE'] = temp_cert_file_path
-                    print(f"   Set REQUESTS_CA_BUNDLE environment variable.")
-                    print(f"   Set SSL_CERT_FILE environment variable.")
-                else:
-                    print(f"   [WARNING] Failed to read CA bundle content. Proceeding without custom CA bundle.")
-            else:
-                print(f"   [WARNING] CA Bundle file not found at {NAS_PARAMS['share']}/{ca_bundle_relative_path}. Proceeding without custom CA bundle.")
-        except Exception as e:
-            print(f"   [ERROR] Unexpected error during CA bundle handling '{ca_bundle_relative_path}': {e}. Proceeding without custom CA bundle.")
-            # Cleanup potentially created temp file if error occurred after creation
-            if temp_cert_file_path and os.path.exists(temp_cert_file_path):
-                try:
-                    os.remove(temp_cert_file_path)
-                    print(f"   Cleaned up partially created temp CA file: {temp_cert_file_path}")
-                    temp_cert_file_path = None
-                except OSError: pass # Ignore cleanup error
+        # --- CA Bundle Setup (Simplified for Notebook Environment) ---
+        print("[3] CA Bundle setup skipped for notebook compatibility...")
+        # Note: If SSL/TLS issues occur, configure certificates directly in the OpenAI client
+        # or ensure the notebook environment has proper certificate validation configured
 
         # --- Check for Full Refresh Flag ---
         print(f"[4] Checking for Full Refresh flag: {os.path.basename(refresh_flag_relative_path)}...")
@@ -1124,28 +1096,23 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     "processed_json_path": json_relative_path # For checkpointing (updated to JSON)
                 }
 
-                # Create Content Entries (multiple per page based on sections)
+                # Create Content Entries (one per page, no section splitting)
                 new_content_entries = []
-                print(f"   Splitting {len(page_contents)} pages into sections...")
+                print(f"   Creating content entries for {len(page_contents)} pages...")
                 for page_num, page_content in page_contents:
-                    # Split each page into sections
-                    page_sections = split_page_into_sections(page_content, min_sections=2)
-                    print(f"      Page {page_num}: {len(page_sections)} sections")
-                    
-                    # Create entries for each section within the page
-                    for section_id, section_content in page_sections:
-                        content_entry = {
-                            "document_source": doc_source,
-                            "document_type": doc_type,
-                            "document_name": doc_name,
-                            "page_number": page_num,  # Page number from Azure DI
-                            "section_id": section_id,  # Section within the page (1, 2, 3...)
-                            "section_name": f"{doc_base_name}_page_{page_num}_section_{section_id}",  # Hierarchical naming
-                            "section_summary": f"Page {page_num}, Section {section_id} of {doc_name}",  # Hierarchical summary
-                            "section_content": section_content,  # Section-specific content
-                            "date_created": datetime.now(timezone.utc).isoformat()  # Add creation date
-                        }
-                        new_content_entries.append(content_entry)
+                    content_entry = {
+                        "document_source": doc_source,
+                        "document_type": doc_type,
+                        "document_name": doc_name,
+                        "page_number": page_num,  # Page number from Azure DI
+                        "section_id": 1,  # Always 1 since no sections
+                        "section_name": f"{doc_base_name}_page_{page_num}",  # Simplified naming
+                        "section_summary": f"Page {page_num} of {doc_name}",  # Simplified summary
+                        "section_content": page_content,  # Full page content
+                        "date_created": datetime.now(timezone.utc).isoformat()  # Add creation date
+                    }
+                    new_content_entries.append(content_entry)
+                    print(f"      Page {page_num}: Created content entry")
                 
                 # --- Append and Save Both Entries (Atomic-like operation for checkpointing) ---
                 print(f"   Appending new catalog entry for: {doc_name}")
@@ -1235,36 +1202,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
             except OSError as e:
                  print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
 
-        # Restore original environment variables
-        # Restore REQUESTS_CA_BUNDLE
-        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
-        if original_requests_ca_bundle is None:
-            # If it didn't exist originally, remove it if we set it
-            if current_requests_bundle == temp_cert_file_path:
-                 print("   Unsetting REQUESTS_CA_BUNDLE environment variable.")
-                 # Check if key exists before deleting
-                 if 'REQUESTS_CA_BUNDLE' in os.environ:
-                     del os.environ['REQUESTS_CA_BUNDLE']
-        else:
-            # If it existed originally, restore its value if it changed
-            if current_requests_bundle != original_requests_ca_bundle:
-                 print(f"   Restoring original REQUESTS_CA_BUNDLE environment variable.")
-                 os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
-
-        # Restore SSL_CERT_FILE
-        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
-        if original_ssl_cert_file is None:
-            # If it didn't exist originally, remove it if we set it
-            if current_ssl_cert == temp_cert_file_path:
-                 print("   Unsetting SSL_CERT_FILE environment variable.")
-                 # Check if key exists before deleting
-                 if 'SSL_CERT_FILE' in os.environ:
-                     del os.environ['SSL_CERT_FILE']
-        else:
-            # If it existed originally, restore its value if it changed
-            if current_ssl_cert != original_ssl_cert_file:
-                 print(f"   Restoring original SSL_CERT_FILE environment variable.")
-                 os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+        # Environment variable cleanup removed - not needed for notebook environment
 
 # ==============================================================================
 # --- Script Entry Point ---
