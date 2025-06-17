@@ -460,6 +460,28 @@ def archive_processing_run(timestamp):
             bytes_written = conn.storeFile(NAS_PARAMS["share"], archive_path_relative, file_obj)
             print(f"   Successfully archived {bytes_written} bytes to: {archive_filename}")
             
+            # Remove the source directory after successful archiving
+            print(f"   Cleaning up source directory: {source_dir_relative}")
+            try:
+                # Delete all files in the source directory first
+                files = conn.listPath(NAS_PARAMS["share"], source_dir_relative)
+                for file_info in files:
+                    if file_info.filename in ['.', '..']:
+                        continue
+                    
+                    file_path = os.path.join(source_dir_relative, file_info.filename).replace('\\', '/')
+                    if not file_info.isDirectory:
+                        conn.deleteFiles(NAS_PARAMS["share"], file_path)
+                        print(f"      Deleted file: {file_info.filename}")
+                
+                # Remove the directory itself
+                conn.deleteDirectory(NAS_PARAMS["share"], source_dir_relative)
+                print(f"   Successfully removed source directory: {source_dir_relative}")
+                
+            except Exception as cleanup_error:
+                print(f"   [WARNING] Failed to cleanup source directory: {cleanup_error}")
+                print("   Archive created successfully, but manual cleanup may be needed.")
+            
             conn.close()
             return True
             
