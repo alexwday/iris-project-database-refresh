@@ -90,6 +90,11 @@ SYSTEM_PROMPT_TEMPLATE = """<CONTEXT>
 <PROJECT_CONTEXT>
 This project processes diverse documents (extracted from sources like '{document_source}') to create structured catalog entries for a database. These entries contain 'usage' and 'description' fields intended for an agentic RAG (Retrieval-Augmented Generation) system. The 'usage' field allows the AI agent to assess document relevance for retrieval, while the 'description' field provides a concise summary for human users browsing the catalog.
 </PROJECT_CONTEXT>
+
+<FILENAME_CONTEXT>
+Original filename: {filename}
+This filename is provided for reference but may contain spelling errors or be incomplete. Prioritize names and identifiers found within the document content itself.
+</FILENAME_CONTEXT>
 </CONTEXT>
 
 You are an expert technical writer specializing in analyzing documents and generating structured summaries optimized for both AI agent retrieval and human understanding.
@@ -122,13 +127,21 @@ Analyze the provided document content and generate the `usage` and `description`
 
 <INSTRUCTIONS>
 1.  Carefully read and analyze the entire <DOCUMENT_CONTENT>.
-2.  Generate the `usage` string according to the <OBJECTIVE>, focusing on extracting information that aids agentic retrieval. Adapt the length and detail level based on the provided `detail_level`: '{detail_level}'.
+2.  **DOCUMENT IDENTIFICATION:** Look for and prioritize the following within the document content:
+    - Official document titles, names, or identifiers mentioned in headers, titles, or document metadata
+    - Reference IDs, document numbers, policy numbers, or similar identifiers
+    - Alternative names or abbreviations that the document might be known by
+    - If multiple names/identifiers are found, include both the reference ID and the actual/logical name
+3.  Generate the `usage` string according to the <OBJECTIVE>, focusing on extracting information that aids agentic retrieval. Adapt the length and detail level based on the provided `detail_level`: '{detail_level}'.
     - 'concise': Provide a brief overview of key topics and purpose.
     - 'standard': Offer a balanced summary of topics, entities, and use cases.
     - 'detailed': Require an exhaustive analysis covering all aspects mentioned in the <OBJECTIVE> for `usage`.
-3.  Generate the `description` string as a concise 1-2 sentence summary for humans, capturing the document's core essence. This field's length should *not* change based on `detail_level`.
-4.  **CRITICAL:** Base both fields *exclusively* on information present within the <DOCUMENT_CONTENT>. Do not infer, add external knowledge, or hallucinate information not explicitly stated in the text.
-5.  Format your response strictly as specified in <RESPONSE_FORMAT>. Do not include any preamble, conversational text, or explanations outside the required JSON structure.
+    - **ALWAYS include document names/identifiers:** Whether concise, standard, or detailed, ensure that any reference IDs, document names, or alternative titles found within the content are included in the usage field to enable retrieval by either reference ID or actual name.
+4.  Generate the `description` string as a concise 1-2 sentence summary for humans, capturing the document's core essence. This field's length should *not* change based on `detail_level`.
+    - **Include primary document identifier:** If a clear document name or reference ID is found within the content, include it in the description to aid user recognition.
+5.  **CRITICAL:** Base both fields *exclusively* on information present within the <DOCUMENT_CONTENT>. Do not infer, add external knowledge, or hallucinate information not explicitly stated in the text.
+    - **Filename fallback:** Only use the provided filename as a last resort if no clear document name or identifier can be found within the content itself.
+6.  Format your response strictly as specified in <RESPONSE_FORMAT>. Do not include any preamble, conversational text, or explanations outside the required JSON structure.
 </INSTRUCTIONS>
 </TASK>
 
@@ -471,7 +484,7 @@ def get_oauth_token():
         print(f"   [ERROR] Unexpected error during OAuth token request: {e}")
         return None
 
-def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', document_source='unknown'):
+def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', document_source='unknown', filename=''):
     """
     Calls the custom GPT model to generate summaries using tool calling.
 
@@ -480,6 +493,7 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         markdown_content: The text content of the document to summarize.
         detail_level (str): The desired level of detail ('concise', 'standard', 'detailed').
         document_source (str): The source identifier for context in the prompt.
+        filename (str): The original filename for reference (may contain errors).
 
     Returns:
         tuple: (description, usage, analyzer_results_data) strings/dict, or (None, None, None) on failure.
@@ -490,7 +504,8 @@ def call_gpt_summarizer(api_client, markdown_content, detail_level='standard', d
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             markdown_content=markdown_content,
             detail_level=detail_level,
-            document_source=document_source # Pass document source for context
+            document_source=document_source, # Pass document source for context
+            filename=filename # Pass filename for reference
         )
 
         messages = [
@@ -1026,10 +1041,12 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                     error_count += 1
                     continue
 
-                # --- Call GPT Summarizer (with detail level and source) ---
+                # --- Call GPT Summarizer (with detail level, source, and filename) ---
                 # Set detail level based on document source
                 current_detail_level = 'standard'
-                description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, current_detail_level, DOCUMENT_SOURCE)
+                # Extract filename from JSON path for reference
+                original_filename = os.path.basename(json_relative_path).replace('.json', '')
+                description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, current_detail_level, DOCUMENT_SOURCE, original_filename)
 
                 # Check if None was returned (indicates an error in call_gpt_summarizer)
                 if description is None or usage is None or anonymization_data is None:
