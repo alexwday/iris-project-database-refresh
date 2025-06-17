@@ -58,10 +58,34 @@ NAS_PARAMS = {
 # Base path on the NAS share where Stage 1 output files were stored
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder" # Relative path from share root
 
-# --- Processing Configuration (Should match Stage 1) ---
-# Define the specific document source processed in Stage 1.
-DOCUMENT_SOURCE = 'internal_esg' # From Stage 1
-# DB_TABLE_NAME = 'apg_catalog'    # From Stage 1 (Not used in Stage 2)
+# --- Processing Configuration ---
+# Document sources configuration - each line contains source name and detail level
+DOCUMENT_SOURCES = """
+internal_cheatsheets,detailed
+internal_esg,standard
+# internal_policies,concise
+financial_reports,detailed
+marketing_materials,concise
+# technical_docs,detailed
+"""
+
+def load_document_sources():
+    """Parse document sources configuration - works for all stages"""
+    sources = []
+    for line in DOCUMENT_SOURCES.strip().split('\n'):
+        line = line.strip()
+        if line and not line.startswith('#'):
+            parts = line.split(',')
+            if len(parts) == 2:
+                source_name = parts[0].strip()
+                detail_level = parts[1].strip()
+                sources.append({
+                    'name': source_name,
+                    'detail_level': detail_level
+                })
+            else:
+                print(f"Warning: Invalid config line ignored: {line}")
+    return sources
 
 # PDF Processing Configuration
 # Note: Page-by-page processing is now used for all PDFs, eliminating the need for page limits
@@ -709,8 +733,14 @@ def main_processing_stage2(di_client, files_to_process_json_relative, stage2_out
 if __name__ == "__main__":
     print("\n" + "="*60)
     print(f"--- Running Stage 2: Process Documents with Document Intelligence (using pysmb) ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
+    
+    # Get document sources
+    sources = load_document_sources()
+    print(f"[0] Processing {len(sources)} document sources:")
+    for source in sources:
+        print(f"   - {source['name']} (detail level: {source['detail_level']})")
+    print("-" * 60)
 
     # --- Setup Custom CA Bundle and Initialize Clients ---
     temp_cert_file_path = None # Store path instead of file object
@@ -719,7 +749,10 @@ if __name__ == "__main__":
     di_client = None # Initialize DI client
     # http_transport = None # Removed httpx transport variable
     initialization_error = False # Flag to track if setup fails
-    should_skip = False # Flag for skipping based on Stage 1 flag
+    
+    # Track overall processing results
+    all_sources_processed = []
+    sources_with_files = []
 
     try:
         # --- CA Bundle Setup (Simplified for Notebook Environment) ---
@@ -744,43 +777,51 @@ if __name__ == "__main__":
 
         if not initialization_error: # Proceed only if DI client initialized
             print("-" * 60)
+            
+            # Process each document source
+            for source_config in sources:
+                DOCUMENT_SOURCE = source_config['name']
+                
+                print(f"\n{'='*60}")
+                print(f"Processing Document Source: {DOCUMENT_SOURCE}")
+                print(f"{'='*60}\n")
 
-            # --- Define Paths (Relative to Share) ---
-            print("[4] Defining NAS Paths (Relative)...") # Renumbered
-            share_name = NAS_PARAMS["share"]
-            # Base output directory from Stage 1 (relative to share)
-            stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-            # Input JSON file from Stage 1 (relative to share)
-            files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
-            # Base output directory for Stage 2 results (relative to share)
-            stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
+                # --- Define Paths (Relative to Share) ---
+                print("[3] Defining NAS Paths (Relative)...")
+                share_name = NAS_PARAMS["share"]
+                # Base output directory from Stage 1 (relative to share)
+                stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+                # Input JSON file from Stage 1 (relative to share)
+                files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
+                # Base output directory for Stage 2 results (relative to share)
+                stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2A_processed_files').replace('\\', '/')
 
-            print(f"   Stage 1 Output Dir (Relative): {share_name}/{stage1_output_dir_relative}")
-            print(f"   Input JSON File (Relative): {share_name}/{files_to_process_json_relative}")
-            print(f"   Stage 2 Output Base Dir (Relative): {share_name}/{stage2_output_dir_relative}")
+                print(f"   Stage 1 Output Dir (Relative): {share_name}/{stage1_output_dir_relative}")
+                print(f"   Input JSON File (Relative): {share_name}/{files_to_process_json_relative}")
+                print(f"   Stage 2 Output Base Dir (Relative): {share_name}/{stage2_output_dir_relative}")
 
-            # Ensure base Stage 2 output directory exists using pysmb helper
-            conn_base_check = create_nas_connection()
-            if not conn_base_check:
-                 print("[CRITICAL ERROR] Failed to connect to NAS to check/create base Stage 2 output directory.")
-                 initialization_error = True # Set flag
-            else:
-                try:
-                    if not ensure_nas_dir_exists(conn_base_check, share_name, stage2_output_dir_relative):
-                        print("[CRITICAL ERROR] Could not create base Stage 2 output directory on NAS.")
-                        initialization_error = True # Set flag
-                    else:
-                        print(f"   Base Stage 2 output directory ensured.")
-                finally:
-                    conn_base_check.close() # Ensure connection is closed
-            print("-" * 60)
+                # Ensure base Stage 2 output directory exists using pysmb helper
+                conn_base_check = create_nas_connection()
+                if not conn_base_check:
+                     print("[ERROR] Failed to connect to NAS to check/create base Stage 2 output directory.")
+                     continue  # Skip this source
+                else:
+                    try:
+                        if not ensure_nas_dir_exists(conn_base_check, share_name, stage2_output_dir_relative):
+                            print("[ERROR] Could not create base Stage 2 output directory on NAS.")
+                            continue  # Skip this source
+                        else:
+                            print(f"   Base Stage 2 output directory ensured.")
+                    finally:
+                        conn_base_check.close() # Ensure connection is closed
+                print("-" * 60)
 
-            if not initialization_error: # Proceed only if paths defined and dir ensured
                 # --- Check for Skip Flag from Stage 1 ---
-                print("[5] Checking for skip flag from Stage 1...") # Renumbered
+                print("[4] Checking for skip flag from Stage 1...")
                 skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
                 skip_flag_relative_path = os.path.join(stage1_output_dir_relative, skip_flag_file_name).replace('\\', '/')
                 print(f"   Checking for flag file: {share_name}/{skip_flag_relative_path}")
+                should_skip = False
                 try:
                     # Use pysmb helper to check existence
                     if check_nas_path_exists(share_name, skip_flag_relative_path):
@@ -795,13 +836,31 @@ if __name__ == "__main__":
                 print("-" * 60)
 
                 # --- Execute Main Processing if Not Skipped ---
+                should_skip = False # Reset for each source
                 if should_skip:
-                    print("\n" + "="*60)
-                    print(f"--- Stage 2 Skipped (No files to process from Stage 1) ---")
-                    print("="*60 + "\n")
+                    print(f"   Stage 2 Skipped for source '{DOCUMENT_SOURCE}' (No files to process from Stage 1)")
                 else:
                     # Call the main processing function only if not skipping and DI client is valid
-                    main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative)
+                    try:
+                        main_processing_stage2(di_client, files_to_process_json_relative, stage2_output_dir_relative)
+                        sources_with_files.append(DOCUMENT_SOURCE)
+                    except Exception as e:
+                        print(f"   [ERROR] Processing failed for source '{DOCUMENT_SOURCE}': {e}")
+                        continue
+                
+                # Track this source as processed
+                all_sources_processed.append(DOCUMENT_SOURCE)
+                print(f"   Source '{DOCUMENT_SOURCE}' processing completed.")
+                print("-" * 60)
+
+            # Final summary
+            print("\n" + "="*60)
+            print(f"--- Stage 2 Completed Successfully ---")
+            print(f"--- Processed {len(all_sources_processed)} sources ---")
+            print(f"--- Sources with files processed: {len(sources_with_files)} ---")
+            if sources_with_files:
+                print(f"--- Sources with files: {', '.join(sources_with_files)} ---")
+            print("="*60 + "\n")
 
     # --- Cleanup (Executes regardless of success/failure in the try block) ---
     finally:

@@ -58,7 +58,33 @@ smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
 # --- Processing Configuration ---
-DOCUMENT_SOURCE = 'internal_esg'
+# Document sources configuration - each line contains source name and detail level
+DOCUMENT_SOURCES = """
+internal_cheatsheets,detailed
+internal_esg,standard
+# internal_policies,concise
+financial_reports,detailed
+marketing_materials,concise
+# technical_docs,detailed
+"""
+
+def load_document_sources():
+    """Parse document sources configuration - works for all stages"""
+    sources = []
+    for line in DOCUMENT_SOURCES.strip().split('\n'):
+        line = line.strip()
+        if line and not line.startswith('#'):
+            parts = line.split(',')
+            if len(parts) == 2:
+                source_name = parts[0].strip()
+                detail_level = parts[1].strip()
+                sources.append({
+                    'name': source_name,
+                    'detail_level': detail_level
+                })
+            else:
+                print(f"Warning: Invalid config line ignored: {line}")
+    return sources
 
 # --- Input Filenames ---
 FILES_TO_DELETE_FILENAME = '1D_csv_files_to_delete.json'
@@ -508,43 +534,78 @@ def main_processing_stage4(delete_list_relative_path, catalog_list_relative_path
 if __name__ == "__main__":
     print("\n" + "="*60)
     print(f"--- Running Stage 4: Update CSV Files ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
     print("="*60 + "\n")
-
-    # --- Define NAS Paths ---
-    print("[1] Defining NAS Input Paths...")
-    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-
-    delete_list_relative_path = os.path.join(source_base_dir_relative, FILES_TO_DELETE_FILENAME).replace('\\', '/')
-    catalog_list_relative_path = os.path.join(source_base_dir_relative, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
-    content_list_relative_path = os.path.join(source_base_dir_relative, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
-
-    print(f"   Files to Delete List: {NAS_PARAMS['share']}/{delete_list_relative_path}")
-    print(f"   Catalog Entries List: {NAS_PARAMS['share']}/{catalog_list_relative_path}")
-    print(f"   Content Entries List: {NAS_PARAMS['share']}/{content_list_relative_path}")
+    
+    # Get document sources
+    sources = load_document_sources()
+    print(f"[0] Processing {len(sources)} document sources:")
+    for source in sources:
+        print(f"   - {source['name']} (detail level: {source['detail_level']})")
     print("-" * 60)
+    
+    # Track overall processing results
+    all_sources_processed = []
+    sources_with_updates = []
+    
+    # Process each document source
+    for source_config in sources:
+        DOCUMENT_SOURCE = source_config['name']
+        
+        print(f"\n{'='*60}")
+        print(f"Processing Document Source: {DOCUMENT_SOURCE}")
+        print(f"{'='*60}\n")
 
-    # --- Check for Skip Flag ---
-    print("[2] Checking for skip flag from Stage 1...")
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_relative_path = os.path.join(source_base_dir_relative, skip_flag_file_name).replace('\\', '/')
-    print(f"   Checking for flag file: {NAS_PARAMS['share']}/{skip_flag_relative_path}")
-    should_skip = False
-    try:
-        if check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
-            print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            should_skip = True
+        # --- Define NAS Paths ---
+        print("[1] Defining NAS Input Paths...")
+        source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+
+        delete_list_relative_path = os.path.join(source_base_dir_relative, FILES_TO_DELETE_FILENAME).replace('\\', '/')
+        catalog_list_relative_path = os.path.join(source_base_dir_relative, CATALOG_ENTRIES_FILENAME).replace('\\', '/')
+        content_list_relative_path = os.path.join(source_base_dir_relative, CONTENT_ENTRIES_FILENAME).replace('\\', '/')
+
+        print(f"   Files to Delete List: {NAS_PARAMS['share']}/{delete_list_relative_path}")
+        print(f"   Catalog Entries List: {NAS_PARAMS['share']}/{catalog_list_relative_path}")
+        print(f"   Content Entries List: {NAS_PARAMS['share']}/{content_list_relative_path}")
+        print("-" * 60)
+
+        # --- Check for Skip Flag ---
+        print("[2] Checking for skip flag from Stage 1...")
+        skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
+        skip_flag_relative_path = os.path.join(source_base_dir_relative, skip_flag_file_name).replace('\\', '/')
+        print(f"   Checking for flag file: {NAS_PARAMS['share']}/{skip_flag_relative_path}")
+        should_skip = False
+        try:
+            if check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
+                print(f"   Skip flag file found. Stage 1 indicated no files to process.")
+                should_skip = True
+            else:
+                print(f"   Skip flag file not found. Proceeding with Stage 4.")
+        except Exception as e:
+            print(f"   [WARNING] Unexpected error checking for skip flag file: {e}")
+            print(f"   Proceeding with Stage 4.")
+        print("-" * 60)
+
+        # --- Execute Main Processing if Not Skipped ---
+        if should_skip:
+            print(f"   Stage 4 Skipped for source '{DOCUMENT_SOURCE}' (No files to process from Stage 1)")
         else:
-            print(f"   Skip flag file not found. Proceeding with Stage 4.")
-    except Exception as e:
-        print(f"   [WARNING] Unexpected error checking for skip flag file: {e}")
-        print(f"   Proceeding with Stage 4.")
-    print("-" * 60)
+            try:
+                main_processing_stage4(delete_list_relative_path, catalog_list_relative_path, content_list_relative_path)
+                sources_with_updates.append(DOCUMENT_SOURCE)
+            except Exception as e:
+                print(f"   [ERROR] CSV update failed for source '{DOCUMENT_SOURCE}': {e}")
+                continue
+        
+        # Track this source as processed
+        all_sources_processed.append(DOCUMENT_SOURCE)
+        print(f"   Source '{DOCUMENT_SOURCE}' processing completed.")
+        print("-" * 60)
 
-    # --- Execute Main Processing if Not Skipped ---
-    if should_skip:
-        print("\n" + "="*60)
-        print(f"--- Stage 4 Skipped (No files to process from Stage 1) ---")
-        print("="*60 + "\n")
-    else:
-        main_processing_stage4(delete_list_relative_path, catalog_list_relative_path, content_list_relative_path)
+    # Final summary
+    print("\n" + "="*60)
+    print(f"--- Stage 4 Completed Successfully ---")
+    print(f"--- Processed {len(all_sources_processed)} sources ---")
+    print(f"--- Sources with CSV updates: {len(sources_with_updates)} ---")
+    if sources_with_updates:
+        print(f"--- Sources with updates: {', '.join(sources_with_updates)} ---")
+    print("="*60 + "\n")
