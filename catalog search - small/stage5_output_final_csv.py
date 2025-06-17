@@ -66,7 +66,33 @@ smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
 # --- Processing Configuration ---
-DOCUMENT_SOURCE = 'internal_esg'
+# Document sources configuration - each line contains source name and detail level
+DOCUMENT_SOURCES = """
+internal_cheatsheets,detailed
+internal_esg,standard
+# internal_policies,concise
+financial_reports,detailed
+marketing_materials,concise
+# technical_docs,detailed
+"""
+
+def load_document_sources():
+    """Parse document sources configuration - works for all stages"""
+    sources = []
+    for line in DOCUMENT_SOURCES.strip().split('\n'):
+        line = line.strip()
+        if line and not line.startswith('#'):
+            parts = line.split(',')
+            if len(parts) == 2:
+                source_name = parts[0].strip()
+                detail_level = parts[1].strip()
+                sources.append({
+                    'name': source_name,
+                    'detail_level': detail_level
+                })
+            else:
+                print(f"Warning: Invalid config line ignored: {line}")
+    return sources
 
 # ==============================================================================
 # --- Helper Functions ---
@@ -300,12 +326,12 @@ def prepare_final_csv(df, csv_type):
     
     return df_final
 
-def generate_deployment_metadata(catalog_df, content_df, timestamp):
+def generate_deployment_metadata(catalog_df, content_df, timestamp, sources_included):
     """Generate deployment metadata for IT."""
     metadata = {
         "deployment_info": {
             "timestamp": timestamp,
-            "document_source": DOCUMENT_SOURCE,
+            "document_sources": sources_included,  # List of all sources included
             "pipeline_version": "CSV_Migration_v1.0",
             "stage5_version": "2.0"
         },
@@ -327,7 +353,7 @@ def generate_deployment_metadata(catalog_df, content_df, timestamp):
         },
         "instructions": {
             "import_order": ["Delete existing records for document_source", "Import catalog CSV", "Import content CSV"],
-            "delete_query": f"DELETE FROM apg_catalog WHERE document_source = '{DOCUMENT_SOURCE}'; DELETE FROM apg_content WHERE document_source = '{DOCUMENT_SOURCE}';",
+            "delete_query": f"DELETE FROM apg_catalog WHERE document_source IN ({', '.join([f"'{src}'" for src in sources_included])}); DELETE FROM apg_content WHERE document_source IN ({', '.join([f"'{src}'" for src in sources_included])});",
             "notes": [
                 "CSV files are formatted for PostgreSQL COPY command",
                 "Timestamp columns are in UTC format",
@@ -361,12 +387,12 @@ def safe_datetime_format(dt_value):
         # Last resort: convert to string
         return str(dt_value)
 
-def generate_summary_report(catalog_df, content_df, validation_issues, timestamp):
+def generate_summary_report(catalog_df, content_df, validation_issues, timestamp, sources_included):
     """Generate a summary report of the deployment."""
     report = {
         "summary": {
             "timestamp": timestamp,
-            "document_source": DOCUMENT_SOURCE,
+            "document_sources": sources_included,  # List of all sources included
             "status": "SUCCESS" if not validation_issues else "WARNING",
             "total_records": len(catalog_df) + len(content_df)
         },
@@ -484,13 +510,13 @@ def delete_directory_recursive(conn, share_name, dir_path, max_retries=3):
     
     return success
 
-def archive_processing_run(timestamp):
+def archive_processing_run(document_source, timestamp):
     """Archive the entire processing run by zipping and moving to archive folder."""
     try:
         # Define source and destination paths
-        source_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+        source_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, document_source).replace('\\', '/')
         archive_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, ARCHIVE_SUBFOLDER_NAME).replace('\\', '/')
-        archive_filename = f"{DOCUMENT_SOURCE}_{timestamp}.zip"
+        archive_filename = f"{document_source}_{timestamp}.zip"
         archive_path_relative = os.path.join(archive_dir_relative, archive_filename).replace('\\', '/')
         
         print(f"   Creating archive: {archive_filename}")
@@ -575,9 +601,9 @@ def archive_processing_run(timestamp):
 # --- Main Processing Function ---
 # ==============================================================================
 
-def main_processing_stage5():
-    """Handles the core logic for Stage 5: create timestamped deployment files and archive processing run."""
-    print(f"--- Starting Main Processing for Stage 5 ---")
+def main_processing_stage5_deployment():
+    """Handles the core logic for Stage 5: create timestamped deployment files (runs once for all sources)."""
+    print(f"--- Starting Main Processing for Stage 5 (Deployment Files) ---")
     
     # Generate timestamp for this deployment
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
@@ -666,16 +692,15 @@ def main_processing_stage5():
     print(f"   Successfully wrote all {len(files_to_write)} deployment files")
     print("-" * 60)
 
-    # --- Archive Processing Run ---
-    print("[7] Archiving Processing Run...")
-    archive_success = archive_processing_run(timestamp)
-    if not archive_success:
-        print("   [WARNING] Failed to archive processing run, but deployment files are ready.")
+    # Note: Archiving moved to per-source processing
+    print("[7] Deployment files created successfully. Archiving will be done per-source.")
     print("-" * 60)
+    
+    return timestamp  # Return timestamp for use in archiving
 
     # --- Final Summary ---
-    print("[8] Deployment and Archive Summary...")
-    print(f"   Document Source: {DOCUMENT_SOURCE}")
+    print("[8] Deployment Summary...")
+    print(f"   Document Sources: ALL_SOURCES_COMBINED")
     print(f"   Deployment Timestamp: {timestamp}")
     print(f"   Catalog Records: {len(final_catalog_df)}")
     print(f"   Content Records: {len(final_content_df)}")
@@ -684,8 +709,7 @@ def main_processing_stage5():
     print(f"   Files Ready for IT Pickup:")
     print(f"     - {catalog_filename}")
     print(f"     - {content_filename}")
-    if archive_success:
-        print(f"   Processing run archived successfully")
+    print(f"   Note: Individual source archiving will be handled separately")
     
     print("-" * 60)
     print("\n" + "="*60)
@@ -699,41 +723,114 @@ def main_processing_stage5():
 
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print(f"--- Running Stage 5: Output Final CSV Files ---")
-    print(f"--- Document Source: {DOCUMENT_SOURCE} ---")
+    print(f"--- Running Stage 5: Output Final CSV Files (All Sources) ---")
     print("="*60 + "\n")
+    
+    # Get document sources
+    sources = load_document_sources()
+    print(f"[0] Processing {len(sources)} document sources:")
+    for source in sources:
+        print(f"   - {source['name']} (detail level: {source['detail_level']})")
+    print("-" * 60)
 
-    # --- Check for Skip Flag ---
-    print("[1] Checking for skip flag from Stage 1...")
-    source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
-    skip_flag_file_name = '_SKIP_SUBSEQUENT_STAGES.flag'
-    skip_flag_relative_path = os.path.join(source_base_dir_relative, skip_flag_file_name).replace('\\', '/')
+    # Track overall processing results
+    all_sources_processed = []
+    sources_archived = []
     
-    print(f"   Checking for flag file: {NAS_PARAMS['share']}/{skip_flag_relative_path}")
-    should_skip = False
+    # --- Step 1: Create Deployment Files (Once for All Sources) ---
+    print("[1] Creating final deployment files from all processed sources...")
     
+    # Check if any sources have content to process
+    sources_to_process = []
+    for source_config in sources:
+        DOCUMENT_SOURCE = source_config['name']
+        source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+        skip_flag_relative_path = os.path.join(source_base_dir_relative, '_SKIP_SUBSEQUENT_STAGES.flag').replace('\\', '/')
+        
+        try:
+            if not check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
+                sources_to_process.append(source_config)
+                print(f"   Source '{DOCUMENT_SOURCE}' has content to include")
+            else:
+                print(f"   Source '{DOCUMENT_SOURCE}' was skipped (no files to process)")
+        except:
+            # Assume source has content if we can't check
+            sources_to_process.append(source_config)
+            print(f"   Source '{DOCUMENT_SOURCE}' included (skip flag check failed)")
+    
+    if not sources_to_process:
+        print("\n" + "="*60)
+        print(f"--- Stage 5 Skipped (No sources had files to process) ---")
+        print("="*60 + "\n")
+        sys.exit(0)
+    
+    print(f"   Found {len(sources_to_process)} sources with content to process")
+    print("-" * 60)
+
+    # --- Execute Deployment File Creation (Once) ---
     try:
-        conn = create_nas_connection()
-        if conn:
-            try:
-                conn.getAttributes(NAS_PARAMS["share"], skip_flag_relative_path)
-                should_skip = True
-                print(f"   Skip flag file found. Stage 1 indicated no files to process.")
-            except:
-                print(f"   Skip flag file not found. Proceeding with Stage 5.")
-            conn.close()
-        else:
-            print(f"   Could not connect to NAS. Proceeding with Stage 5.")
+        deployment_timestamp = main_processing_stage5_deployment()
+        print(f"   Deployment files created successfully with timestamp: {deployment_timestamp}")
     except Exception as e:
-        print(f"   [WARNING] Error checking for skip flag: {e}")
-        print(f"   Proceeding with Stage 5.")
+        print(f"\n[ERROR] Stage 5 deployment file creation failed: {e}")
+        sys.exit(1)
     
     print("-" * 60)
 
-    # --- Execute Main Processing if Not Skipped ---
-    if should_skip:
-        print("\n" + "="*60)
-        print(f"--- Stage 5 Skipped (No files to process from Stage 1) ---")
-        print("="*60 + "\n")
-    else:
-        main_processing_stage5()
+    # --- Step 2: Archive Each Source Individually ---
+    print("[2] Archiving each source's processing run...")
+    
+    for source_config in sources:
+        DOCUMENT_SOURCE = source_config['name']
+        
+        print(f"\n{'='*60}")
+        print(f"Archiving Document Source: {DOCUMENT_SOURCE}")
+        print(f"{'='*60}\n")
+        
+        # Check if this source should be archived (same logic as deployment check)
+        source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+        skip_flag_relative_path = os.path.join(source_base_dir_relative, '_SKIP_SUBSEQUENT_STAGES.flag').replace('\\', '/')
+        
+        should_skip = False
+        try:
+            if check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
+                print(f"   Skip flag found. No processing run to archive for '{DOCUMENT_SOURCE}'.")
+                should_skip = True
+            else:
+                print(f"   No skip flag found. Proceeding with archiving for '{DOCUMENT_SOURCE}'.")
+        except Exception as e:
+            print(f"   [WARNING] Error checking skip flag for '{DOCUMENT_SOURCE}': {e}")
+            print(f"   Proceeding with archiving attempt.")
+        
+        if should_skip:
+            print(f"   Archiving skipped for source '{DOCUMENT_SOURCE}' (No processing run to archive)")
+        else:
+            try:
+                print(f"   Archiving processing run for source '{DOCUMENT_SOURCE}'...")
+                archive_success = archive_processing_run(DOCUMENT_SOURCE, deployment_timestamp)
+                if archive_success:
+                    sources_archived.append(DOCUMENT_SOURCE)
+                    print(f"   Successfully archived source '{DOCUMENT_SOURCE}'")
+                else:
+                    print(f"   [WARNING] Failed to archive source '{DOCUMENT_SOURCE}', but continuing with other sources.")
+            except Exception as e:
+                print(f"   [ERROR] Archiving failed for source '{DOCUMENT_SOURCE}': {e}")
+                print(f"   Continuing with other sources.")
+        
+        # Track this source as processed
+        all_sources_processed.append(DOCUMENT_SOURCE)
+        print(f"   Source '{DOCUMENT_SOURCE}' archiving completed.")
+        print("-" * 60)
+
+    # Final summary
+    print("\n" + "="*60)
+    print(f"--- Stage 5 Completed Successfully ---")
+    print(f"--- Processed {len(all_sources_processed)} sources ---")
+    print(f"--- Created deployment files from {len(sources_to_process)} sources ---")
+    if sources_to_process:
+        processed_names = [s['name'] for s in sources_to_process]
+        print(f"--- Sources with deployment data: {', '.join(processed_names)} ---")
+    print(f"--- Successfully archived {len(sources_archived)} sources ---")
+    if sources_archived:
+        print(f"--- Sources archived: {', '.join(sources_archived)} ---")
+    print("="*60 + "\n")
