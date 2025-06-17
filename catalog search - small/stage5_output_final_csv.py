@@ -528,35 +528,22 @@ def main_processing_stage5():
     # --- Create Timestamped Deployment Files ---
     print("[5] Creating Timestamped Deployment Files for IT...")
     
-    # Define deployment paths with timestamps
-    deployment_dir_relative = os.path.join(NAS_DEPLOYMENT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
+    # Define deployment paths - directly in deployment folder (no subfolder)
     
     # Timestamped filenames
     catalog_filename = f"{DEPLOYMENT_CATALOG_PREFIX}_{timestamp}.csv"
     content_filename = f"{DEPLOYMENT_CONTENT_PREFIX}_{timestamp}.csv"
-    metadata_filename = f"metadata_{timestamp}.json"
-    summary_filename = f"summary_{timestamp}.json"
     
-    catalog_output_path = os.path.join(deployment_dir_relative, catalog_filename).replace('\\', '/')
-    content_output_path = os.path.join(deployment_dir_relative, content_filename).replace('\\', '/')
-    metadata_output_path = os.path.join(deployment_dir_relative, metadata_filename).replace('\\', '/')
-    summary_output_path = os.path.join(deployment_dir_relative, summary_filename).replace('\\', '/')
-    
-    # Generate metadata and reports
-    deployment_metadata = generate_deployment_metadata(final_catalog_df, final_content_df, timestamp)
-    summary_report = generate_summary_report(final_catalog_df, final_content_df, all_issues, timestamp)
+    catalog_output_path = os.path.join(NAS_DEPLOYMENT_FOLDER_PATH, catalog_filename).replace('\\', '/')
+    content_output_path = os.path.join(NAS_DEPLOYMENT_FOLDER_PATH, content_filename).replace('\\', '/')
     
     # Convert DataFrames to CSV strings
     catalog_csv_content = final_catalog_df.to_csv(index=False, na_rep='NULL')
     content_csv_content = final_content_df.to_csv(index=False, na_rep='NULL')
-    metadata_json_content = json.dumps(deployment_metadata, indent=2)
-    summary_json_content = json.dumps(summary_report, indent=2)
     
     print(f"   Generated timestamped deployment files:")
     print(f"     - {catalog_filename}")
     print(f"     - {content_filename}")
-    print(f"     - {metadata_filename}")
-    print(f"     - {summary_filename}")
     print("-" * 60)
 
     # --- Write Deployment Files to NAS ---
@@ -564,9 +551,7 @@ def main_processing_stage5():
     
     files_to_write = [
         (catalog_output_path, catalog_csv_content, f"Timestamped catalog CSV ({catalog_filename})"),
-        (content_output_path, content_csv_content, f"Timestamped content CSV ({content_filename})"),
-        (metadata_output_path, metadata_json_content, f"Deployment metadata ({metadata_filename})"),
-        (summary_output_path, summary_json_content, f"Summary report ({summary_filename})")
+        (content_output_path, content_csv_content, f"Timestamped content CSV ({content_filename})")
     ]
     
     success_count = 0
@@ -597,13 +582,11 @@ def main_processing_stage5():
     print(f"   Deployment Timestamp: {timestamp}")
     print(f"   Catalog Records: {len(final_catalog_df)}")
     print(f"   Content Records: {len(final_content_df)}")
-    print(f"   Deployment Location: {NAS_PARAMS['share']}/{deployment_dir_relative}")
+    print(f"   Deployment Location: {NAS_PARAMS['share']}/{NAS_DEPLOYMENT_FOLDER_PATH}")
     print(f"   Validation Issues: {len(all_issues)}")
     print(f"   Files Ready for IT Pickup:")
     print(f"     - {catalog_filename}")
     print(f"     - {content_filename}")
-    print(f"     - {metadata_filename}")
-    print(f"     - {summary_filename}")
     if archive_success:
         print(f"   Processing run archived successfully")
     
