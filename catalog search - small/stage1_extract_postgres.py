@@ -670,11 +670,26 @@ if __name__ == "__main__":
 
         # --- Identify Files Only in DB (Potentially Deleted/Moved on NAS) ---
         # Files present only in the DB ('right_only' in the merge)
-        # Note: This script currently *does not* automatically delete these from the DB.
-        # It only identifies DB records to delete when a file is *updated* on the NAS.
+        # These should be added to the deletion list since they no longer exist on NAS
         deleted_files_db = comparison_df[comparison_df['_merge'] == 'right_only']
         if not deleted_files_db.empty:
-            print(f"      Note: Found {len(deleted_files_db)} files in DB but not on NAS (potentially deleted/moved). No action taken by this script.")
+            print(f"      Found {len(deleted_files_db)} files in DB but not on NAS. Adding to deletion list.")
+            # Get DB details for files that need to be deleted because they no longer exist on NAS
+            db_cols_to_keep = ['id', 'file_name', 'file_path_db', 'document_source', 'document_type', 'document_name']
+            # Ensure all required columns exist before selecting
+            existing_db_cols = [col for col in db_cols_to_keep if col in deleted_files_db.columns]
+            if len(existing_db_cols) != len(db_cols_to_keep):
+                missing_cols = set(db_cols_to_keep) - set(existing_db_cols)
+                print(f"   [WARNING] Could not find expected columns {missing_cols} in merged data for deletion list. Check merge logic.")
+            # Select the deleted files from DB
+            deleted_files_to_remove = deleted_files_db[existing_db_cols].copy()
+            # Rename only the column that definitely has a suffix
+            deleted_files_to_remove.rename(columns={'file_path_db': 'file_path'}, inplace=True)
+            # Combine with existing files_to_delete (from updated files)
+            files_to_delete = pd.concat([files_to_delete, deleted_files_to_remove], ignore_index=True)
+            print(f"      Added {len(deleted_files_to_remove)} DB records to deletion list (files no longer on NAS).")
+        else:
+            print(f"      No files found in DB but not on NAS.")
         # --- End of Incremental Update Comparison Logic ---
 
     # --- Final Summary of Comparison (Applies to both modes) ---
@@ -690,7 +705,7 @@ if __name__ == "__main__":
 
     print(f"\n   Comparison Summary:")
     print(f"      - NAS Files to Process (New or Updated): {len(files_to_process)}")
-    print(f"      - Existing DB Records to Delete (Updated Files): {len(files_to_delete)}")
+    print(f"      - Existing DB Records to Delete (Updated Files + Missing Files): {len(files_to_delete)}")
     print(f"      - Files Found Unchanged (Timestamp Match): {unchanged_count}") # Added this line
     print("-" * 60)
 

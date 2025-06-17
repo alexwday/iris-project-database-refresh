@@ -392,7 +392,9 @@ def process_single_page(di_client, page_info, max_retries=3, retry_delay=5):
 def process_pages_batch(di_client, page_files, max_workers=5, max_retries=3, retry_delay=5):
     """Processes multiple PDF pages concurrently using Azure Document Intelligence."""
     print(f"   Processing batch of {len(page_files)} pages with Azure DI (max {max_workers} concurrent)...")
-    page_results = []
+    
+    # Initialize results dictionary to preserve order
+    page_results_dict = {}
     
     # Process pages concurrently
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -407,7 +409,8 @@ def process_pages_batch(di_client, page_files, max_workers=5, max_retries=3, ret
             page_info = future_to_page[future]
             try:
                 result = future.result()
-                page_results.append(result)
+                # Store by page number to maintain order
+                page_results_dict[result['page_number']] = result
                 
                 if result['success']:
                     print(f"      Page {result['page_number']} processed successfully.")
@@ -417,14 +420,14 @@ def process_pages_batch(di_client, page_files, max_workers=5, max_retries=3, ret
             except Exception as e:
                 page_num = page_info['page_number']
                 print(f"      [ERROR] Exception in future for page {page_num}: {e}")
-                page_results.append({
+                page_results_dict[page_num] = {
                     'page_number': page_num,
                     'markdown_content': None,
                     'success': False
-                })
+                }
     
-    # Sort results by page number to maintain order
-    page_results.sort(key=lambda x: x['page_number'])
+    # Convert to ordered list by page number
+    page_results = [page_results_dict[page_num] for page_num in sorted(page_results_dict.keys())]
     
     # Remove the 'success' field from results for compatibility
     for result in page_results:
