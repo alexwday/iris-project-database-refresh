@@ -24,6 +24,7 @@ import pandas as pd
 import json
 import sys
 import os
+import time
 from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 import io
@@ -220,10 +221,14 @@ def read_csv_from_nas(share_name, nas_path_relative):
         if conn:
             conn.close()
 
-def write_csv_to_nas(share_name, nas_path_relative, df):
-    """Write a DataFrame as CSV to NAS."""
+def write_csv_to_nas(share_name, nas_path_relative, df, max_retries=3):
+    """Write a DataFrame as CSV to NAS with improved error handling for large files."""
     conn = None
+    temp_file_path = None
+    
     try:
+        print(f"   Preparing to write CSV with {len(df)} records ({df.memory_usage(deep=True).sum() / 1024 / 1024:.1f} MB in memory)")
+        
         conn = create_nas_connection()
         if not conn:
             return False
@@ -234,21 +239,68 @@ def write_csv_to_nas(share_name, nas_path_relative, df):
             print(f"   [ERROR] Failed to ensure CSV directory exists: {dir_path}")
             return False
 
-        # Convert DataFrame to CSV string
-        csv_content = df.to_csv(index=False)
-        csv_bytes = csv_content.encode('utf-8')
-        file_obj = io.BytesIO(csv_bytes)
-
-        # Write to NAS
-        bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
-        print(f"   Successfully wrote {bytes_written} bytes to NAS: {share_name}/{nas_path_relative}")
-        return True
+        # Use temporary file approach for large DataFrames to avoid memory issues
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as temp_file:
+            temp_file_path = temp_file.name
+            
+            # Write CSV to temporary file in chunks to manage memory
+            print(f"   Writing CSV to temporary file...")
+            df.to_csv(temp_file, index=False, chunksize=10000)
+        
+        # Read the temporary file and upload to NAS with retry logic
+        for attempt in range(max_retries):
+            try:
+                with open(temp_file_path, 'rb') as f:
+                    csv_bytes = f.read()
+                    file_size_mb = len(csv_bytes) / 1024 / 1024
+                    print(f"   Uploading CSV file ({file_size_mb:.1f} MB) to NAS (attempt {attempt + 1}/{max_retries})...")
+                    
+                    file_obj = io.BytesIO(csv_bytes)
+                    bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
+                    print(f"   ✓ Successfully wrote {bytes_written:,} bytes to NAS: {share_name}/{nas_path_relative}")
+                    return True
+                    
+            except Exception as e:
+                error_msg = str(e).lower()
+                if attempt < max_retries - 1:
+                    if "timeout" in error_msg or "connection" in error_msg:
+                        wait_time = (attempt + 1) * 5  # Progressive backoff
+                        print(f"   Network issue on attempt {attempt + 1}, retrying in {wait_time}s: {e}")
+                        time.sleep(wait_time)
+                        # Reconnect for next attempt
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                        conn = create_nas_connection()
+                        if not conn:
+                            print(f"   [ERROR] Failed to reconnect to NAS")
+                            return False
+                    else:
+                        print(f"   Unexpected error on attempt {attempt + 1}, retrying: {e}")
+                        time.sleep(2)
+                else:
+                    print(f"   [ERROR] Failed to write CSV after {max_retries} attempts: {e}")
+                    return False
+        
+        return False
+        
     except Exception as e:
-        print(f"   [ERROR] Failed to write CSV to NAS '{share_name}/{nas_path_relative}': {e}")
+        print(f"   [ERROR] Critical error during CSV write preparation: {e}")
         return False
     finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass
+        
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except:
+                pass
 
 def load_master_csv(filename, document_source=None):
     """Load a master CSV file from NAS and optionally filter by document source."""
