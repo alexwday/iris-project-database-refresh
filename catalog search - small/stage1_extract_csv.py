@@ -677,8 +677,8 @@ if __name__ == "__main__":
                     files_to_delete = pd.concat([files_to_delete, deleted_files_to_remove], ignore_index=True)
                     print(f"      Added {len(deleted_files_to_remove)} CSV records to deletion list (files no longer on NAS).")
 
-                    # --- Combine New and Updated Files for Processing ---
-                    files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
+                # --- Combine New and Updated Files for Processing ---
+                files_to_process = pd.concat([new_files, updated_files_nas], ignore_index=True)
 
             # --- Final Summary ---
             unchanged_count = 0
