@@ -21,6 +21,8 @@ import json
 import tempfile
 import time
 import re
+import warnings
+import logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- Use pysmb instead of smbclient ---
@@ -36,6 +38,14 @@ from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, Documen
 # Removed httpx import
 
 # Removed unused psycopg2 import
+
+# Suppress common PDF warnings that don't affect processing
+warnings.filterwarnings("ignore", message=".*wrong pointing object.*")
+warnings.filterwarnings("ignore", message=".*invalid pdf header.*")
+warnings.filterwarnings("ignore", message=".*PdfReadWarning.*")
+
+# Configure pypdf logging to reduce noise
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # ==============================================================================
 # --- Configuration ---
