@@ -873,7 +873,7 @@ def generate_embeddings(texts, client, max_batch_size=50):
 def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative_path,
                            stage3_catalog_output_relative_path, stage3_content_output_relative_path,
                            stage3_anonymization_report_relative_path, # Added report path
-                           ca_bundle_relative_path, refresh_flag_relative_path):
+                           ca_bundle_relative_path, refresh_flag_relative_path, detail_level, document_source):
     """Handles the core logic for Stage 3: CA bundle, loading data, processing MD files."""
     print(f"--- Starting Main Processing for Stage 3 ---")
     temp_cert_file_path = None # Store path instead of file object
@@ -1098,10 +1098,10 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
 
                 # --- Call GPT Summarizer (with detail level, source, and filename) ---
                 # Use configured detail level
-                print(f"   DEBUG: Using configured DETAIL_LEVEL: {DETAIL_LEVEL}")
+                print(f"   DEBUG: Using configured detail_level: {detail_level}")
                 # Extract filename from JSON path for reference
                 original_filename = os.path.basename(json_relative_path).replace('.json', '')
-                description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, DETAIL_LEVEL, DOCUMENT_SOURCE, original_filename)
+                description, usage, anonymization_data = call_gpt_summarizer(client, combined_markdown, detail_level, document_source, original_filename)
 
                 # Check if None was returned (indicates an error in call_gpt_summarizer)
                 if description is None or usage is None or anonymization_data is None:
@@ -1122,7 +1122,7 @@ def main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative
                 # Extract key fields (ensure they exist in metadata)
                 doc_name = original_metadata.get('file_name', document_name) # Fallback to document_name if needed
                 doc_base_name = os.path.splitext(doc_name)[0] # Get filename without extension
-                doc_source = DOCUMENT_SOURCE # Use configured source
+                doc_source = document_source # Use configured source
                 doc_type = DOCUMENT_TYPE   # Use configured type
 
                 # --- Process Pages Directly from Structured Data ---
@@ -1386,7 +1386,7 @@ if __name__ == "__main__":
                 main_processing_stage3(stage1_metadata_relative_path, stage2_md_dir_relative_path,
                                        stage3_catalog_output_relative_path, stage3_content_output_relative_path,
                                        stage3_anonymization_report_relative_path, # Pass new report path
-                                       ca_bundle_relative_path, refresh_flag_relative_path)
+                                       ca_bundle_relative_path, refresh_flag_relative_path, DETAIL_LEVEL, DOCUMENT_SOURCE)
                 sources_with_summaries.append(DOCUMENT_SOURCE)
             except Exception as e:
                 print(f"   [ERROR] Summary generation failed for source '{DOCUMENT_SOURCE}': {e}")

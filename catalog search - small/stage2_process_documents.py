@@ -836,7 +836,6 @@ if __name__ == "__main__":
                 print("-" * 60)
 
                 # --- Execute Main Processing if Not Skipped ---
-                should_skip = False # Reset for each source
                 if should_skip:
                     print(f"   Stage 2 Skipped for source '{DOCUMENT_SOURCE}' (No files to process from Stage 1)")
                 else:

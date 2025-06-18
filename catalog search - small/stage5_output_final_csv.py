@@ -696,8 +696,6 @@ def main_processing_stage5_deployment():
     print("[7] Deployment files created successfully. Archiving will be done per-source.")
     print("-" * 60)
     
-    return timestamp  # Return timestamp for use in archiving
-
     # --- Final Summary ---
     print("[8] Deployment Summary...")
     print(f"   Document Sources: ALL_SOURCES_COMBINED")
@@ -712,10 +710,8 @@ def main_processing_stage5_deployment():
     print(f"   Note: Individual source archiving will be handled separately")
     
     print("-" * 60)
-    print("\n" + "="*60)
-    print(f"--- Stage 5 Completed Successfully ---")
-    print("--- Deployment files ready for IT pickup ---")
-    print("="*60 + "\n")
+    
+    return timestamp  # Return timestamp for use in archiving
 
 # ==============================================================================
 # --- Script Entry Point ---

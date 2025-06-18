@@ -502,9 +502,9 @@ def main_processing_stage4(delete_list_relative_path, catalog_list_relative_path
 
     expected_content_count = after_delete_content_count + len(content_entries)
     if final_content_count == expected_content_count:
-         print(f"   OK: Final content count ({final_content_count}) matches expected count ({after_delete_content_count} + {len(content_entries)} = {expected_content_count}).")
+        print(f"   OK: Final content count ({final_content_count}) matches expected count ({after_delete_content_count} + {len(content_entries)} = {expected_content_count}).")
     else:
-         print(f"   WARNING: Final content count ({final_content_count}) does NOT match expected count ({expected_content_count}).")
+        print(f"   WARNING: Final content count ({final_content_count}) does NOT match expected count ({expected_content_count}).")
 
     print("-" * 60)
 
