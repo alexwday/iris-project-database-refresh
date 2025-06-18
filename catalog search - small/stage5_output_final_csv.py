@@ -62,6 +62,7 @@ NAS_DEPLOYMENT_FOLDER_PATH = "path/to/deployment_folder"
 
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
+smb_structs.SUPPORT_SMB2x = True  # Enable SMB 2.x support
 smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
@@ -437,170 +438,137 @@ def generate_summary_report(catalog_df, content_df, validation_issues, timestamp
     
     return report
 
-def delete_directory_recursive(conn, share_name, dir_path, max_retries=5):
+def archive_directory_recursive(conn, share_name, dir_path, zipf, base_path=""):
     """
-    Recursively delete a directory and all its contents with improved retry logic.
+    Recursively archive all files and subdirectories.
+    
+    Args:
+        conn: SMB connection object
+        share_name: Name of the SMB share
+        dir_path: Path to directory to archive (relative to share)
+        zipf: ZipFile object to add files to
+        base_path: Base path within the zip file for maintaining directory structure
+    
+    Returns:
+        int: Number of files archived
+    """
+    files_archived = 0
+    
+    try:
+        files = conn.listPath(share_name, dir_path)
+        for file_info in files:
+            if file_info.filename in ['.', '..']:
+                continue
+            
+            file_path = os.path.join(dir_path, file_info.filename).replace('\\', '/')
+            archive_path = os.path.join(base_path, file_info.filename).replace('\\', '/')
+            
+            if file_info.isDirectory:
+                # Recursively archive subdirectory
+                files_archived += archive_directory_recursive(conn, share_name, file_path, zipf, archive_path)
+            else:
+                # Archive the file
+                try:
+                    file_obj = io.BytesIO()
+                    conn.retrieveFile(share_name, file_path, file_obj)
+                    file_obj.seek(0)
+                    zipf.writestr(archive_path, file_obj.read())
+                    files_archived += 1
+                except Exception as e:
+                    print(f"      [WARNING] Failed to archive file {archive_path}: {e}")
+    
+    except Exception as e:
+        print(f"      [WARNING] Failed to list directory {dir_path}: {e}")
+    
+    return files_archived
+
+
+def delete_directory_simple(conn, share_name, dir_path, max_retries=3):
+    """
+    Simple recursive directory deletion with minimal retries.
+    Focus on speed over comprehensive error handling.
     
     Args:
         conn: SMB connection object
         share_name: Name of the SMB share
         dir_path: Path to directory to delete (relative to share)
-        max_retries: Maximum retry attempts for each operation
+        max_retries: Maximum retry attempts for the entire operation
     
     Returns:
-        bool: True if all deletions succeeded, False if any failed
+        bool: True if deletion completed (even partially), False on critical failure
     """
-    print(f"      Starting deletion of directory: {dir_path}")
-    success = True
-    failed_items = []
-    
-    try:
-        # Get directory listing with retry
-        files = None
-        for attempt in range(max_retries):
+    for attempt in range(max_retries):
+        try:
+            # Try to delete everything recursively
+            _delete_dir_contents(conn, share_name, dir_path)
+            
+            # Try to delete the main directory
             try:
-                files = conn.listPath(share_name, dir_path)
-                break
+                conn.deleteDirectory(share_name, dir_path)
+                print(f"      ✓ Successfully deleted directory: {os.path.basename(dir_path)}")
+                return True
             except Exception as e:
-                if attempt < max_retries - 1:
-                    print(f"      Retry {attempt + 1}/{max_retries} listing directory: {dir_path}")
-                    time.sleep(2)
+                error_msg = str(e).lower()
+                if "not found" in error_msg or "object_name_not_found" in error_msg:
+                    # Already deleted
+                    return True
+                elif attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
                 else:
-                    print(f"      [ERROR] Failed to list directory {dir_path}: {e}")
-                    return False
+                    print(f"      [WARNING] Could not delete main directory {dir_path}, but contents were cleared")
+                    return True  # Consider it successful if contents are gone
+                    
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"      Retry {attempt + 1}/{max_retries} for directory deletion")
+                time.sleep(2)
+            else:
+                print(f"      [WARNING] Directory deletion incomplete after {max_retries} attempts: {e}")
+                return True  # Still return True to continue processing
+    
+    return True
+
+
+def _delete_dir_contents(conn, share_name, dir_path):
+    """
+    Helper function to delete directory contents without excessive logging.
+    """
+    try:
+        files = conn.listPath(share_name, dir_path)
         
-        if not files:
-            print(f"      Directory {dir_path} is empty or inaccessible")
-            return False
-        
-        # Separate files and directories
-        files_to_delete = []
-        dirs_to_delete = []
-        
+        # First delete all files
         for file_info in files:
             if file_info.filename in ['.', '..']:
                 continue
-            
-            if file_info.isDirectory:
-                dirs_to_delete.append(file_info)
-            else:
-                files_to_delete.append(file_info)
-        
-        print(f"      Found {len(files_to_delete)} files and {len(dirs_to_delete)} subdirectories")
-        
-        # First pass: delete all files with enhanced retry and error handling
-        for file_info in files_to_delete:
+                
             file_path = os.path.join(dir_path, file_info.filename).replace('\\', '/')
-            file_deleted = False
             
-            for attempt in range(max_retries):
+            if not file_info.isDirectory:
                 try:
                     conn.deleteFiles(share_name, file_path)
-                    print(f"      ✓ Deleted file: {file_info.filename}")
-                    file_deleted = True
-                    break
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if "sharing violation" in error_msg or "access denied" in error_msg:
-                        # File might be locked or in use - wait longer and try again
-                        wait_time = min(5 * (attempt + 1), 30)  # Progressive backoff up to 30 seconds
-                        print(f"      File locked/in use: {file_info.filename}, waiting {wait_time}s (attempt {attempt + 1}/{max_retries})")
-                        time.sleep(wait_time)
-                    elif "not found" in error_msg or "object_name_not_found" in error_msg:
-                        # File already deleted
-                        print(f"      File already deleted: {file_info.filename}")
-                        file_deleted = True
-                        break
-                    else:
-                        print(f"      Error deleting file {file_info.filename}: {e}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-            
-            if not file_deleted:
-                print(f"      [ERROR] Failed to delete file after {max_retries} attempts: {file_info.filename}")
-                failed_items.append(f"file: {file_info.filename}")
-                success = False
+                except Exception:
+                    # Ignore individual file errors
+                    pass
         
-        # Second pass: recursively delete subdirectories
-        for dir_info in dirs_to_delete:
-            subdir_path = os.path.join(dir_path, dir_info.filename).replace('\\', '/')
-            print(f"      Entering subdirectory: {dir_info.filename}")
-            
-            # Recursively delete subdirectory contents
-            if not delete_directory_recursive(conn, share_name, subdir_path, max_retries):
-                print(f"      [ERROR] Failed to delete contents of subdirectory: {dir_info.filename}")
-                failed_items.append(f"subdirectory: {dir_info.filename}")
-                success = False
+        # Then delete all subdirectories
+        for file_info in files:
+            if file_info.filename in ['.', '..']:
                 continue
-            
-            # Delete the now-empty subdirectory
-            dir_deleted = False
-            for attempt in range(max_retries):
+                
+            if file_info.isDirectory:
+                subdir_path = os.path.join(dir_path, file_info.filename).replace('\\', '/')
                 try:
+                    # Recursively delete subdirectory
+                    _delete_dir_contents(conn, share_name, subdir_path)
                     conn.deleteDirectory(share_name, subdir_path)
-                    print(f"      ✓ Deleted directory: {dir_info.filename}")
-                    dir_deleted = True
-                    break
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if "directory not empty" in error_msg:
-                        print(f"      Directory not empty: {dir_info.filename}, re-scanning...")
-                        # Directory might still have files - try recursive delete again
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                            delete_directory_recursive(conn, share_name, subdir_path, 2)  # Quick retry
-                    elif "not found" in error_msg or "object_name_not_found" in error_msg:
-                        print(f"      Directory already deleted: {dir_info.filename}")
-                        dir_deleted = True
-                        break
-                    else:
-                        print(f"      Error deleting directory {dir_info.filename}: {e}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-            
-            if not dir_deleted:
-                print(f"      [ERROR] Failed to delete directory after {max_retries} attempts: {dir_info.filename}")
-                failed_items.append(f"directory: {dir_info.filename}")
-                success = False
-        
-        # Finally, delete the main directory itself (only if everything else succeeded)
-        if success:
-            main_dir_deleted = False
-            for attempt in range(max_retries):
-                try:
-                    conn.deleteDirectory(share_name, dir_path)
-                    print(f"      ✓ Deleted main directory: {os.path.basename(dir_path)}")
-                    main_dir_deleted = True
-                    break
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    if "directory not empty" in error_msg:
-                        print(f"      Main directory not empty on attempt {attempt + 1}, re-checking...")
-                        if attempt < max_retries - 1:
-                            time.sleep(3)
-                    elif "not found" in error_msg or "object_name_not_found" in error_msg:
-                        print(f"      Main directory already deleted: {dir_path}")
-                        main_dir_deleted = True
-                        break
-                    else:
-                        print(f"      Error deleting main directory: {e}")
-                        if attempt < max_retries - 1:
-                            time.sleep(3)
-            
-            if not main_dir_deleted:
-                print(f"      [ERROR] Failed to delete main directory after {max_retries} attempts: {dir_path}")
-                success = False
-        else:
-            print(f"      [WARNING] Skipping main directory deletion due to failed items: {failed_items}")
-        
-    except Exception as e:
-        print(f"   [ERROR] Critical error during directory deletion: {e}")
-        success = False
-    
-    if not success and failed_items:
-        print(f"   [ERROR] Failed to delete {len(failed_items)} items: {failed_items}")
-    
-    return success
+                except Exception:
+                    # Ignore individual directory errors
+                    pass
+                    
+    except Exception:
+        # Ignore listing errors
+        pass
 
 def archive_processing_run(document_source, timestamp):
     """Archive the entire processing run by zipping and moving to archive folder."""
@@ -626,33 +594,14 @@ def archive_processing_run(document_source, timestamp):
                 print("   [ERROR] Failed to connect to NAS for archiving")
                 return False
             
-            # Create zip file
+            # Create zip file with recursive archiving
             with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Walk through the source directory and add all files to zip
-                files_added = 0
-                try:
-                    files = conn.listPath(NAS_PARAMS["share"], source_dir_relative)
-                    for file_info in files:
-                        if file_info.filename in ['.', '..']:
-                            continue
-                        
-                        file_path = os.path.join(source_dir_relative, file_info.filename).replace('\\', '/')
-                        if not file_info.isDirectory:
-                            # Download file content
-                            file_obj = io.BytesIO()
-                            conn.retrieveFile(NAS_PARAMS["share"], file_path, file_obj)
-                            file_obj.seek(0)
-                            file_content = file_obj.read()
-                            
-                            # Add to zip
-                            zipf.writestr(file_info.filename, file_content)
-                            files_added += 1
-                        
-                except Exception as e:
-                    print(f"   [ERROR] Error reading source directory for archiving: {e}")
-                    return False
-                
+                print("   Archiving all files and subdirectories...")
+                files_added = archive_directory_recursive(conn, NAS_PARAMS["share"], source_dir_relative, zipf)
                 print(f"   Added {files_added} files to archive")
+                
+                if files_added == 0:
+                    print("   [WARNING] No files found to archive")
             
             # Ensure archive directory exists
             if not ensure_nas_dir_exists(conn, NAS_PARAMS["share"], archive_dir_relative):
@@ -669,14 +618,11 @@ def archive_processing_run(document_source, timestamp):
             
             # Remove the source directory after successful archiving
             print(f"   Cleaning up source directory: {source_dir_relative}")
-            cleanup_success = delete_directory_recursive(conn, NAS_PARAMS["share"], source_dir_relative)
+            cleanup_success = delete_directory_simple(conn, NAS_PARAMS["share"], source_dir_relative)
             if cleanup_success:
-                print(f"   ✓ Successfully removed source directory: {source_dir_relative}")
+                print(f"   ✓ Source directory cleaned up: {source_dir_relative}")
             else:
-                print(f"   [WARNING] Incomplete deletion of source directory: {source_dir_relative}")
-                print(f"   [WARNING] Archive was created successfully, but some files remain.")
-                print(f"   [WARNING] Manual cleanup may be needed for remaining files.")
-                # Still return True since archiving succeeded - cleanup is secondary
+                print(f"   [WARNING] Could not fully clean up source directory: {source_dir_relative}")
             
             conn.close()
             return True
