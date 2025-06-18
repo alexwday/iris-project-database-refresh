@@ -567,14 +567,28 @@ if __name__ == "__main__":
                 print("\n   --- Incremental Update Mode ---")
                 if csv_df.empty and nas_df.empty:
                     print("   Result: Both CSV catalog and NAS list are empty. No actions needed.")
+                    
+                    # Initialize variables needed later in the flow
+                    files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
+                    files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
+                    comparison_df = pd.DataFrame()  # Empty comparison_df since no files to compare
                 elif nas_df.empty:
                     print("   Result: NAS list is empty. No files to process.")
+                    
+                    # Initialize variables needed later in the flow
+                    files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
+                    files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
+                    comparison_df = pd.DataFrame()  # Empty comparison_df since no files to compare
                 elif csv_df.empty:
                     print("   Result: CSV catalog is empty. All NAS files are considered 'new'.")
                     new_cols = ['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']
                     existing_new_cols = [col for col in new_cols if col in nas_df.columns]
                     files_to_process = nas_df[existing_new_cols].copy()
                     files_to_process['reason'] = 'new'
+                    
+                    # Initialize variables needed later in the flow
+                    files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
+                    comparison_df = pd.DataFrame()  # Empty comparison_df since no CSV to compare against
                 else:
                     # --- Perform the Comparison using Merge ---
                     print("   Performing comparison based on 'file_name'...")
