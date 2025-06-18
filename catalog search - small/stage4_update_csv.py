@@ -465,10 +465,12 @@ def main_processing_stage4(delete_list_relative_path, catalog_list_relative_path
             catalog_deleted = original_catalog_len - len(catalog_df)
             print(f"      Deleted {catalog_deleted} records from catalog CSV")
 
-            # Delete from content
+            # Delete from content - now uses shared IDs so logic matches catalog deletion exactly
             original_content_len = len(content_df)
             for delete_type, delete_value in delete_keys:
-                if delete_type == 'key':
+                if delete_type == 'id':
+                    content_df = content_df[content_df['id'] != delete_value]
+                elif delete_type == 'key':
                     doc_source, doc_type, doc_name = delete_value
                     mask = (
                         (content_df['document_source'] == doc_source) &
@@ -491,49 +493,74 @@ def main_processing_stage4(delete_list_relative_path, catalog_list_relative_path
     # --- Insertion Phase ---
     print("[8] Inserting New/Updated Records...")
 
-    # Insert Catalog Entries
-    if not catalog_entries:
-        print("   No catalog entries to insert.")
+    # Insert Catalog and Content Entries with Shared IDs
+    if not catalog_entries and not content_entries:
+        print("   No entries to insert.")
     else:
-        print(f"   Inserting {len(catalog_entries)} catalog entries...")
+        # Get the starting ID from the maximum of both tables to ensure uniqueness
+        next_shared_id = max(get_next_id(catalog_df), get_next_id(content_df))
         
-        # Prepare new catalog records
-        new_catalog_records = []
-        next_catalog_id = get_next_id(catalog_df)
-        
-        for entry in catalog_entries:
-            # Add system fields
-            entry['id'] = next_catalog_id
-            entry['created_at'] = datetime.utcnow().isoformat() + 'Z'
-            new_catalog_records.append(entry)
-            next_catalog_id += 1
-        
-        # Append to catalog DataFrame
-        new_catalog_df = pd.DataFrame(new_catalog_records)
-        catalog_df = pd.concat([catalog_df, new_catalog_df], ignore_index=True)
-        print(f"   Successfully added {len(new_catalog_records)} records to catalog CSV")
+        # Insert Catalog Entries
+        if catalog_entries:
+            print(f"   Inserting {len(catalog_entries)} catalog entries...")
+            
+            # Prepare new catalog records with shared IDs
+            new_catalog_records = []
+            catalog_id_mapping = {}  # Track file -> shared_id mapping
+            
+            for entry in catalog_entries:
+                # Create unique key for this file
+                file_key = (entry['document_source'], entry['document_type'], entry['document_name'])
+                
+                # Assign shared ID for this file
+                shared_id = next_shared_id
+                catalog_id_mapping[file_key] = shared_id
+                
+                # Add system fields
+                entry['id'] = shared_id
+                entry['created_at'] = datetime.utcnow().isoformat() + 'Z'
+                new_catalog_records.append(entry)
+                next_shared_id += 1
+            
+            # Append to catalog DataFrame
+            new_catalog_df = pd.DataFrame(new_catalog_records)
+            catalog_df = pd.concat([catalog_df, new_catalog_df], ignore_index=True)
+            print(f"   Successfully added {len(new_catalog_records)} records to catalog CSV")
+        else:
+            print("   No catalog entries to insert.")
+            catalog_id_mapping = {}
 
-    # Insert Content Entries
-    if not content_entries:
-        print("   No content entries to insert.")
-    else:
-        print(f"   Inserting {len(content_entries)} content entries...")
-        
-        # Prepare new content records
-        new_content_records = []
-        next_content_id = get_next_id(content_df)
-        
-        for entry in content_entries:
-            # Add system fields
-            entry['id'] = next_content_id
-            entry['created_at'] = datetime.utcnow().isoformat() + 'Z'
-            new_content_records.append(entry)
-            next_content_id += 1
-        
-        # Append to content DataFrame
-        new_content_df = pd.DataFrame(new_content_records)
-        content_df = pd.concat([content_df, new_content_df], ignore_index=True)
-        print(f"   Successfully added {len(new_content_records)} records to content CSV")
+        # Insert Content Entries with same IDs as their corresponding catalog entries
+        if content_entries:
+            print(f"   Inserting {len(content_entries)} content entries...")
+            
+            # Prepare new content records with shared IDs
+            new_content_records = []
+            
+            for entry in content_entries:
+                # Create unique key for this file
+                file_key = (entry['document_source'], entry['document_type'], entry['document_name'])
+                
+                # Use the same shared ID as the catalog entry for this file
+                if file_key in catalog_id_mapping:
+                    shared_id = catalog_id_mapping[file_key]
+                else:
+                    # This shouldn't happen if catalog and content are properly paired
+                    print(f"   [WARNING] No catalog entry found for content entry: {file_key}")
+                    shared_id = next_shared_id  # Fallback to next available ID
+                    next_shared_id += 1
+                
+                # Add system fields
+                entry['id'] = shared_id
+                entry['created_at'] = datetime.utcnow().isoformat() + 'Z'
+                new_content_records.append(entry)
+            
+            # Append to content DataFrame
+            new_content_df = pd.DataFrame(new_content_records)
+            content_df = pd.concat([content_df, new_content_df], ignore_index=True)
+            print(f"   Successfully added {len(new_content_records)} records to content CSV")
+        else:
+            print("   No content entries to insert.")
 
     print("-" * 60)
 
