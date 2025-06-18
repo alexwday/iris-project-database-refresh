@@ -328,6 +328,10 @@ def prepare_final_csv(df, csv_type):
 
 def generate_deployment_metadata(catalog_df, content_df, timestamp, sources_included):
     """Generate deployment metadata for IT."""
+    # Build the delete query without nested f-strings
+    source_list = ', '.join([f"'{src}'" for src in sources_included])
+    delete_query = f"DELETE FROM apg_catalog WHERE document_source IN ({source_list}); DELETE FROM apg_content WHERE document_source IN ({source_list});"
+    
     metadata = {
         "deployment_info": {
             "timestamp": timestamp,
@@ -353,7 +357,7 @@ def generate_deployment_metadata(catalog_df, content_df, timestamp, sources_incl
         },
         "instructions": {
             "import_order": ["Delete existing records for document_source", "Import catalog CSV", "Import content CSV"],
-            "delete_query": f"DELETE FROM apg_catalog WHERE document_source IN ({', '.join([f\"'{src}'\" for src in sources_included])}); DELETE FROM apg_content WHERE document_source IN ({', '.join([f\"'{src}'\" for src in sources_included])});",
+            "delete_query": delete_query,
             "notes": [
                 "CSV files are formatted for PostgreSQL COPY command",
                 "Timestamp columns are in UTC format",
