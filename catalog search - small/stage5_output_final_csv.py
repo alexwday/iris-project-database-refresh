@@ -851,7 +851,7 @@ if __name__ == "__main__":
                 print(f"   [WARNING] Failed to archive source '{DOCUMENT_SOURCE}', but continuing with other sources.")
         except Exception as e:
             print(f"   [ERROR] Archiving failed for source '{DOCUMENT_SOURCE}': {e}")
-                print(f"   Continuing with other sources.")
+            print(f"   Continuing with other sources.")
         
         # Track this source as processed
         all_sources_processed.append(DOCUMENT_SOURCE)
