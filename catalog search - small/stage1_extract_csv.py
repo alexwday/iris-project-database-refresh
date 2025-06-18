@@ -571,14 +571,14 @@ if __name__ == "__main__":
                     # Initialize variables needed later in the flow
                     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
-                    comparison_df = pd.DataFrame()  # Empty comparison_df since no files to compare
+                    comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
                 elif nas_df.empty:
                     print("   Result: NAS list is empty. No files to process.")
                     
                     # Initialize variables needed later in the flow
                     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
-                    comparison_df = pd.DataFrame()  # Empty comparison_df since no files to compare
+                    comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
                 elif csv_df.empty:
                     print("   Result: CSV catalog is empty. All NAS files are considered 'new'.")
                     new_cols = ['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']
@@ -588,7 +588,7 @@ if __name__ == "__main__":
                     
                     # Initialize variables needed later in the flow
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
-                    comparison_df = pd.DataFrame()  # Empty comparison_df since no CSV to compare against
+                    comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
                 else:
                     # --- Perform the Comparison using Merge ---
                     print("   Performing comparison based on 'file_name'...")
