@@ -713,16 +713,22 @@ if __name__ == "__main__":
                 if not conn_flag:
                     print("   [WARNING] Failed to connect to NAS to manage flag files. Skipping flag operations.")
                 else:
-                    # Skip flag logic
-                    if files_to_process.empty:
-                        print(f"   No files to process found. Creating skip flag file: '{skip_flag_file_name}'")
+                    # Skip flag logic - only skip if no files to process AND no files to delete
+                    if files_to_process.empty and files_to_delete.empty:
+                        print(f"   No files to process and no files to delete found. Creating skip flag file: '{skip_flag_file_name}'")
                         try:
                             conn_flag.storeFile(NAS_PARAMS["share"], skip_flag_relative_path, io.BytesIO(b''))
                             print(f"   Successfully created skip flag file: {skip_flag_relative_path}")
                         except Exception as e:
                             print(f"   [WARNING] Error creating skip flag file '{skip_flag_relative_path}': {e}")
                     else:
-                        print(f"   Files found for processing ({len(files_to_process)}). Ensuring skip flag does not exist.")
+                        action_reason = []
+                        if not files_to_process.empty:
+                            action_reason.append(f"{len(files_to_process)} files to process")
+                        if not files_to_delete.empty:
+                            action_reason.append(f"{len(files_to_delete)} files to delete")
+                        
+                        print(f"   Work found: {', '.join(action_reason)}. Ensuring skip flag does not exist.")
                         try:
                             conn_flag.deleteFiles(NAS_PARAMS["share"], skip_flag_relative_path)
                             print(f"   Removed potentially existing skip flag file: {skip_flag_relative_path}")

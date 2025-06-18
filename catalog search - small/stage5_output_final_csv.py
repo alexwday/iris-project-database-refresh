@@ -824,34 +824,33 @@ if __name__ == "__main__":
         print(f"Archiving Document Source: {DOCUMENT_SOURCE}")
         print(f"{'='*60}\n")
         
-        # Check if this source should be archived (same logic as deployment check)
+        # Always perform archiving and cleanup to ensure folders are cleaned up,
+        # regardless of whether files were processed in this run
         source_base_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, DOCUMENT_SOURCE).replace('\\', '/')
         skip_flag_relative_path = os.path.join(source_base_dir_relative, '_SKIP_SUBSEQUENT_STAGES.flag').replace('\\', '/')
         
-        should_skip = False
+        skip_flag_exists = False
         try:
             if check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
-                print(f"   Skip flag found. No processing run to archive for '{DOCUMENT_SOURCE}'.")
-                should_skip = True
+                print(f"   Skip flag found for '{DOCUMENT_SOURCE}', but still proceeding with archiving for cleanup.")
+                skip_flag_exists = True
             else:
                 print(f"   No skip flag found. Proceeding with archiving for '{DOCUMENT_SOURCE}'.")
         except Exception as e:
             print(f"   [WARNING] Error checking skip flag for '{DOCUMENT_SOURCE}': {e}")
             print(f"   Proceeding with archiving attempt.")
         
-        if should_skip:
-            print(f"   Archiving skipped for source '{DOCUMENT_SOURCE}' (No processing run to archive)")
-        else:
-            try:
-                print(f"   Archiving processing run for source '{DOCUMENT_SOURCE}'...")
-                archive_success = archive_processing_run(DOCUMENT_SOURCE, deployment_timestamp)
-                if archive_success:
-                    sources_archived.append(DOCUMENT_SOURCE)
-                    print(f"   Successfully archived source '{DOCUMENT_SOURCE}'")
-                else:
-                    print(f"   [WARNING] Failed to archive source '{DOCUMENT_SOURCE}', but continuing with other sources.")
-            except Exception as e:
-                print(f"   [ERROR] Archiving failed for source '{DOCUMENT_SOURCE}': {e}")
+        # Always archive and cleanup - prior stages may have created subfolders that need cleanup
+        try:
+            print(f"   Archiving processing run for source '{DOCUMENT_SOURCE}'...")
+            archive_success = archive_processing_run(DOCUMENT_SOURCE, deployment_timestamp)
+            if archive_success:
+                sources_archived.append(DOCUMENT_SOURCE)
+                print(f"   Successfully archived source '{DOCUMENT_SOURCE}'")
+            else:
+                print(f"   [WARNING] Failed to archive source '{DOCUMENT_SOURCE}', but continuing with other sources.")
+        except Exception as e:
+            print(f"   [ERROR] Archiving failed for source '{DOCUMENT_SOURCE}': {e}")
                 print(f"   Continuing with other sources.")
         
         # Track this source as processed
