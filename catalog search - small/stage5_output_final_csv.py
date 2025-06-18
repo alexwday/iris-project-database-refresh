@@ -777,7 +777,7 @@ if __name__ == "__main__":
     # --- Step 1: Create Deployment Files (Once for All Sources) ---
     print("[1] Creating final deployment files from all processed sources...")
     
-    # Check if any sources have content to process
+    # Check if any sources have content to process (for deployment files only)
     sources_to_process = []
     for source_config in sources:
         DOCUMENT_SOURCE = source_config['name']
@@ -787,27 +787,29 @@ if __name__ == "__main__":
         try:
             if not check_nas_path_exists(NAS_PARAMS["share"], skip_flag_relative_path):
                 sources_to_process.append(source_config)
-                print(f"   Source '{DOCUMENT_SOURCE}' has content to include")
+                print(f"   Source '{DOCUMENT_SOURCE}' has content to include in deployment")
             else:
-                print(f"   Source '{DOCUMENT_SOURCE}' was skipped (no files to process)")
+                print(f"   Source '{DOCUMENT_SOURCE}' was skipped (no files to process, but will still be archived)")
         except:
             # Assume source has content if we can't check
             sources_to_process.append(source_config)
             print(f"   Source '{DOCUMENT_SOURCE}' included (skip flag check failed)")
     
-    if not sources_to_process:
-        print("\n" + "="*60)
-        print(f"--- Stage 5 Skipped (No sources had files to process) ---")
-        print("="*60 + "\n")
-        sys.exit(0)
+    print(f"   Found {len(sources_to_process)} sources with content for deployment")
     
-    print(f"   Found {len(sources_to_process)} sources with content to process")
+    # Always proceed with deployment and archiving - even if no sources have new content,
+    # we still need to archive and clean up any folders created during Stage 1
     print("-" * 60)
 
     # --- Execute Deployment File Creation (Once) ---
     try:
-        deployment_timestamp = main_processing_stage5_deployment()
-        print(f"   Deployment files created successfully with timestamp: {deployment_timestamp}")
+        if sources_to_process:
+            deployment_timestamp = main_processing_stage5_deployment()
+            print(f"   Deployment files created successfully with timestamp: {deployment_timestamp}")
+        else:
+            print(f"   No sources have new content - skipping deployment file creation")
+            deployment_timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            print(f"   Using timestamp for archiving: {deployment_timestamp}")
     except Exception as e:
         print(f"\n[ERROR] Stage 5 deployment file creation failed: {e}")
         sys.exit(1)
