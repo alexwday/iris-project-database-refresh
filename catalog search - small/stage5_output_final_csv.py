@@ -353,7 +353,7 @@ def generate_deployment_metadata(catalog_df, content_df, timestamp, sources_incl
         },
         "instructions": {
             "import_order": ["Delete existing records for document_source", "Import catalog CSV", "Import content CSV"],
-            "delete_query": f"DELETE FROM apg_catalog WHERE document_source IN ({', '.join([f"'{src}'" for src in sources_included])}); DELETE FROM apg_content WHERE document_source IN ({', '.join([f"'{src}'" for src in sources_included])});",
+            "delete_query": f"DELETE FROM apg_catalog WHERE document_source IN ({', '.join([f\"'{src}'\" for src in sources_included])}); DELETE FROM apg_content WHERE document_source IN ({', '.join([f\"'{src}'\" for src in sources_included])});",
             "notes": [
                 "CSV files are formatted for PostgreSQL COPY command",
                 "Timestamp columns are in UTC format",
