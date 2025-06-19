@@ -311,12 +311,27 @@ def prepare_final_csv(df, csv_type):
             # Format as ISO string with timezone
             df_final[col] = df_final[col].dt.strftime('%Y-%m-%d %H:%M:%S+00')
     
-    # Handle embedding columns (convert back to JSON string if needed)
+    # Handle embedding columns (format for PostgreSQL vector type)
     embedding_cols = ['document_usage_embedding', 'document_description_embedding']
     for col in embedding_cols:
         if col in df_final.columns:
-            # Ensure embedding data is properly formatted as JSON string or NULL
-            df_final[col] = df_final[col].apply(lambda x: json.dumps(x) if pd.notna(x) and x != '' else None)
+            # Format for PostgreSQL vector type: [1,2,3] not "[1,2,3]"
+            def format_vector(x):
+                if pd.isna(x) or x == '' or x is None:
+                    return None
+                if isinstance(x, str):
+                    # If already a string, remove any extra quotes and ensure proper format
+                    x = x.strip().strip('"')
+                    if x.startswith('[') and x.endswith(']'):
+                        return x
+                    else:
+                        return None
+                elif isinstance(x, (list, tuple)):
+                    # Convert list/tuple to vector format
+                    return '[' + ','.join(map(str, x)) + ']'
+                else:
+                    return None
+            df_final[col] = df_final[col].apply(format_vector)
     
     # Clean text fields
     text_cols = ['document_description', 'document_usage', 'section_summary', 'section_content']
