@@ -304,34 +304,38 @@ def prepare_final_csv(df, csv_type):
         df_final['page_number'] = pd.to_numeric(df_final['page_number'], errors='coerce').astype('Int64')
     
     # Format timestamp columns for PostgreSQL (excluding created_at which was removed)
-    timestamp_cols = ['date_created', 'date_last_modified']
-    for col in timestamp_cols:
-        if col in df_final.columns:
-            df_final[col] = pd.to_datetime(df_final[col], errors='coerce', utc=True)
-            # Format as ISO string with timezone
-            df_final[col] = df_final[col].dt.strftime('%Y-%m-%d %H:%M:%S+00')
+    # Note: Only catalog table has date_created/date_last_modified columns
+    if csv_type == "catalog":
+        timestamp_cols = ['date_created', 'date_last_modified']
+        for col in timestamp_cols:
+            if col in df_final.columns:
+                df_final[col] = pd.to_datetime(df_final[col], errors='coerce', utc=True)
+                # Format as ISO string with timezone
+                df_final[col] = df_final[col].dt.strftime('%Y-%m-%d %H:%M:%S+00')
     
     # Handle embedding columns (format for PostgreSQL vector type)
-    embedding_cols = ['document_usage_embedding', 'document_description_embedding']
-    for col in embedding_cols:
-        if col in df_final.columns:
-            # Format for PostgreSQL vector type: [1,2,3] not "[1,2,3]"
-            def format_vector(x):
-                if pd.isna(x) or x == '' or x is None:
-                    return None
-                if isinstance(x, str):
-                    # If already a string, remove any extra quotes and ensure proper format
-                    x = x.strip().strip('"')
-                    if x.startswith('[') and x.endswith(']'):
-                        return x
+    # Note: Only catalog table has embedding columns
+    if csv_type == "catalog":
+        embedding_cols = ['document_usage_embedding', 'document_description_embedding']
+        for col in embedding_cols:
+            if col in df_final.columns:
+                # Format for PostgreSQL vector type: [1,2,3] not "[1,2,3]"
+                def format_vector(x):
+                    if pd.isna(x) or x == '' or x is None:
+                        return None
+                    if isinstance(x, str):
+                        # If already a string, remove any extra quotes and ensure proper format
+                        x = x.strip().strip('"')
+                        if x.startswith('[') and x.endswith(']'):
+                            return x
+                        else:
+                            return None
+                    elif isinstance(x, (list, tuple)):
+                        # Convert list/tuple to vector format
+                        return '[' + ','.join(map(str, x)) + ']'
                     else:
                         return None
-                elif isinstance(x, (list, tuple)):
-                    # Convert list/tuple to vector format
-                    return '[' + ','.join(map(str, x)) + ']'
-                else:
-                    return None
-            df_final[col] = df_final[col].apply(format_vector)
+                df_final[col] = df_final[col].apply(format_vector)
     
     # Clean text fields
     text_cols = ['document_description', 'document_usage', 'section_summary', 'section_content']
