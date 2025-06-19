@@ -236,9 +236,10 @@ def load_master_csv(filename):
             print(f"   CSV file {filename} is empty")
             return df
 
-        # Handle timestamp columns
+        # Handle timestamp columns (only process columns that actually exist)
         if not df.empty:
-            for col in ["created_at", "date_created", "date_last_modified"]:
+            timestamp_cols = ["created_at", "date_created", "date_last_modified"]
+            for col in timestamp_cols:
                 if col in df.columns:
                     df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
 
@@ -326,6 +327,26 @@ def prepare_final_csv(df, csv_type):
         if field in df_final.columns:
             df_final = df_final.drop(field, axis=1)
             print(f"   Removed auto-generated field: {field}")
+    
+    # Remove table-specific columns that don't belong in each table
+    if csv_type == "content":
+        # Content table should NOT have catalog-only columns
+        catalog_only_fields = [
+            "date_created", "date_last_modified", "file_name", "file_type", 
+            "file_size", "file_path", "file_link", "document_description", 
+            "document_usage", "document_usage_embedding", "document_description_embedding"
+        ]
+        for field in catalog_only_fields:
+            if field in df_final.columns:
+                df_final = df_final.drop(field, axis=1)
+                print(f"   Removed catalog-only field from content table: {field}")
+    elif csv_type == "catalog":
+        # Catalog table should NOT have content-only columns  
+        content_only_fields = ["section_id", "section_name", "section_summary", "section_content", "page_number"]
+        for field in content_only_fields:
+            if field in df_final.columns:
+                df_final = df_final.drop(field, axis=1)
+                print(f"   Removed content-only field from catalog table: {field}")
 
     # Ensure proper data types for remaining fields
 
