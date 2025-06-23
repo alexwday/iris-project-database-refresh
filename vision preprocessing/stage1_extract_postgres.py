@@ -58,9 +58,9 @@ NAS_BASE_INPUT_PATH = "path/to/your/base_input_folder"
 NAS_OUTPUT_FOLDER_PATH = "path/to/your/output_folder"
 
 # --- Processing Configuration ---
-# Define the specific document source to process in this run.
-# This value is used for filtering the DB query and constructing NAS paths.
-DOCUMENT_SOURCE = 'internal_cheatsheets' # Corrected document source
+# The specific document source to process (name of the subfolder on NAS).
+DOCUMENT_SOURCE = 'internal_reports' # Change this as needed
+
 # The name of the database table containing the file catalog.
 DB_TABLE_NAME = 'apg_catalog'
 
