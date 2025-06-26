@@ -94,8 +94,8 @@ def get_db_connection():
         )
         logging.info(f"Database connection established to {DB_NAME} on {DB_HOST}:{DB_PORT}")
         
-        # Set connection to autocommit mode to avoid transaction issues
-        conn.set_session(autocommit=True)
+        # Don't use autocommit - named cursors need transactions
+        # conn.set_session(autocommit=True)
         
         # Register pgvector type if available
         if PGVECTOR_AVAILABLE:
@@ -110,8 +110,8 @@ def get_db_connection():
 def fetch_all_records(conn, table_name):
     """Fetches all records from the specified table."""
     try:
+        # Get column information first (doesn't need named cursor)
         with conn.cursor(cursor_factory=DictCursor) as cur:
-            # Get column information first
             cur.execute("""
                 SELECT column_name, data_type 
                 FROM information_schema.columns 
@@ -125,10 +125,16 @@ def fetch_all_records(conn, table_name):
             cur.execute(f"SELECT COUNT(*) FROM {table_name};")
             record_count = cur.fetchone()[0]
             logging.info(f"Table contains {record_count} records")
-            
-            # Fetch all data with server-side cursor for large datasets
-            logging.info("Starting data fetch... This may take a while for large datasets.")
-            
+        
+        # Commit the metadata queries
+        conn.commit()
+        
+        # Fetch all data with server-side cursor for large datasets
+        logging.info("Starting data fetch... This may take a while for large datasets.")
+        
+        # For very large datasets, use a named cursor with proper transaction handling
+        if record_count > 50000:  # Use batch fetching for large datasets
+            logging.info(f"Using batch fetching for {record_count} records")
             # Use a named cursor for server-side processing
             with conn.cursor(name='fetch_all_cursor', cursor_factory=DictCursor) as named_cur:
                 named_cur.itersize = 10000  # Fetch 10k rows at a time
@@ -143,15 +149,27 @@ def fetch_all_records(conn, table_name):
                     records.extend(batch)
                     batch_num += 1
                     logging.info(f"Fetched batch {batch_num} ({len(records)} records so far)")
-                
-            logging.info(f"Successfully fetched all {len(records)} records from {table_name}")
-            
-            return records, columns_info
+        else:
+            # For smaller datasets, fetch all at once
+            logging.info(f"Using direct fetch for {record_count} records")
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute(f"SELECT * FROM {table_name} ORDER BY sequence_number;")
+                records = cur.fetchall()
+                logging.info(f"Fetched all {len(records)} records")
+        
+        # Commit the transaction
+        conn.commit()
+        
+        logging.info(f"Successfully fetched all {len(records)} records from {table_name}")
+        
+        return records, columns_info
     except psycopg2.Error as e:
         logging.error(f"Database error fetching data from {table_name}: {e}")
+        conn.rollback()  # Rollback on error
         return None, None
     except Exception as e:
         logging.error(f"Unexpected error fetching data: {e}")
+        conn.rollback()  # Rollback on error
         return None, None
 
 # ==============================================================================
