@@ -26,14 +26,6 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 
-# Try to import pgvector if available
-try:
-    from pgvector.psycopg2 import register_vector
-    PGVECTOR_AVAILABLE = True
-except ImportError:
-    PGVECTOR_AVAILABLE = False
-    logging.warning("pgvector not installed. Vector handling may be limited.")
-
 # ==============================================================================
 # Configuration
 # ==============================================================================
@@ -88,20 +80,9 @@ def get_db_connection():
             port=DB_PORT,
             dbname=DB_NAME,
             user=DB_USER,
-            password=DB_PASSWORD,
-            connect_timeout=30,  # 30 second connection timeout
-            options='-c statement_timeout=600000'  # 10 minute statement timeout
+            password=DB_PASSWORD
         )
         logging.info(f"Database connection established to {DB_NAME} on {DB_HOST}:{DB_PORT}")
-        
-        # Don't use autocommit - named cursors need transactions
-        # conn.set_session(autocommit=True)
-        
-        # Register pgvector type if available
-        if PGVECTOR_AVAILABLE:
-            register_vector(conn)
-            logging.info("pgvector type registered")
-        
         return conn
     except psycopg2.Error as e:
         logging.error(f"Database connection error: {e}")
@@ -110,8 +91,8 @@ def get_db_connection():
 def fetch_all_records(conn, table_name):
     """Fetches all records from the specified table."""
     try:
-        # Get column information first (doesn't need named cursor)
         with conn.cursor(cursor_factory=DictCursor) as cur:
+            # Get column information first
             cur.execute("""
                 SELECT column_name, data_type 
                 FROM information_schema.columns 
@@ -121,55 +102,14 @@ def fetch_all_records(conn, table_name):
             columns_info = cur.fetchall()
             logging.info(f"Found {len(columns_info)} columns in {table_name}")
             
-            # Get record count first
-            cur.execute(f"SELECT COUNT(*) FROM {table_name};")
-            record_count = cur.fetchone()[0]
-            logging.info(f"Table contains {record_count} records")
-        
-        # Commit the metadata queries
-        conn.commit()
-        
-        # Fetch all data with server-side cursor for large datasets
-        logging.info("Starting data fetch... This may take a while for large datasets.")
-        
-        # For very large datasets, use a named cursor with proper transaction handling
-        if record_count > 50000:  # Use batch fetching for large datasets
-            logging.info(f"Using batch fetching for {record_count} records")
-            # Use a named cursor for server-side processing
-            with conn.cursor(name='fetch_all_cursor', cursor_factory=DictCursor) as named_cur:
-                named_cur.itersize = 10000  # Fetch 10k rows at a time
-                named_cur.execute(f"SELECT * FROM {table_name} ORDER BY sequence_number;")
-                
-                records = []
-                batch_num = 0
-                while True:
-                    batch = named_cur.fetchmany(10000)
-                    if not batch:
-                        break
-                    records.extend(batch)
-                    batch_num += 1
-                    logging.info(f"Fetched batch {batch_num} ({len(records)} records so far)")
-        else:
-            # For smaller datasets, fetch all at once
-            logging.info(f"Using direct fetch for {record_count} records")
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute(f"SELECT * FROM {table_name} ORDER BY sequence_number;")
-                records = cur.fetchall()
-                logging.info(f"Fetched all {len(records)} records")
-        
-        # Commit the transaction
-        conn.commit()
-        
-        logging.info(f"Successfully fetched all {len(records)} records from {table_name}")
-        
-        return records, columns_info
+            # Fetch all data
+            cur.execute(f"SELECT * FROM {table_name} ORDER BY sequence_number;")
+            records = cur.fetchall()
+            logging.info(f"Fetched {len(records)} records from {table_name}")
+            
+            return records, columns_info
     except psycopg2.Error as e:
-        logging.error(f"Database error fetching data from {table_name}: {e}")
-        conn.rollback()  # Rollback on error
-        return None, None
-    except Exception as e:
-        logging.error(f"Unexpected error fetching data: {e}")
-        conn.rollback()  # Rollback on error
+        logging.error(f"Error fetching data from {table_name}: {e}")
         return None, None
 
 # ==============================================================================
