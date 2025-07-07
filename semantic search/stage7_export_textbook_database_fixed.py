@@ -4,7 +4,7 @@ Stage 7: Export Textbook Database to CSV (Fixed Version)
 
 Purpose:
 Export all records from iris_textbook_chunks table exactly as stored in PostgreSQL,
-only blanking out auto-generated fields (id, created_at).
+only blanking out auto-generated fields (id, created_at, text_search_vector).
 The output CSV should be directly importable back into PostgreSQL.
 
 Input:
@@ -93,10 +93,10 @@ def export_to_csv_with_copy(conn, table_name, output_path):
             columns = [row[0] for row in cur.fetchall()]
             logging.info(f"Found {len(columns)} columns in {table_name}")
             
-            # Create a query that selects all columns but replaces id and created_at with NULL
+            # Create a query that selects all columns but replaces auto-generated fields with NULL
             select_parts = []
             for col in columns:
-                if col in ['id', 'created_at']:
+                if col in ['id', 'created_at', 'text_search_vector']:
                     select_parts.append(f"NULL as {col}")
                 else:
                     select_parts.append(col)
@@ -257,7 +257,7 @@ def run_stage7_fixed():
         print(f"- Arrays remain in PostgreSQL format")
         print(f"- Embeddings remain as PostgreSQL vectors")
         print(f"- NULL values are preserved")
-        print(f"- Only 'id' and 'created_at' are blanked out")
+        print(f"- Only auto-generated fields are blanked out: 'id', 'created_at', 'text_search_vector'")
         
         return True
         
