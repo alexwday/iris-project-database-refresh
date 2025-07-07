@@ -123,9 +123,11 @@ def export_to_csv_with_copy(conn, table_name, output_path):
 def verify_export(output_path, expected_count):
     """Verify the exported CSV file."""
     try:
-        # Count rows (excluding header)
+        # Count rows properly using CSV reader (handles multi-line fields)
         with open(output_path, 'r', encoding='utf-8') as f:
-            row_count = sum(1 for line in f) - 1  # Subtract header
+            reader = csv.reader(f)
+            next(reader)  # Skip header
+            row_count = sum(1 for row in reader)
         
         logging.info(f"CSV contains {row_count} data rows (expected: {expected_count})")
         
