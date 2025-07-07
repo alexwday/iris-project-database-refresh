@@ -134,19 +134,75 @@ def verify_export(output_path, expected_count):
         logging.info(f"File size: {file_size_mb:.2f} MB")
         
         # Preview first few rows
-        logging.info("\n--- Preview of First 5 Rows ---")
+        preview_rows = 5
+        print(f"\n--- Preview of First {preview_rows} Rows ---")
         with open(output_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
+            
             for i, row in enumerate(reader):
-                if i >= 5:
+                if i >= preview_rows:
                     break
-                logging.info(f"\nRow {i+1}:")
-                logging.info(f"  document_id: {row.get('document_id', 'N/A')}")
-                logging.info(f"  sequence_number: {row.get('sequence_number', 'N/A')}")
-                logging.info(f"  chapter_name: {row.get('chapter_name', 'N/A')[:50]}...")
-                logging.info(f"  embedding: {'<present>' if row.get('embedding') else '<empty>'}")
-                logging.info(f"  id: {row.get('id', 'N/A')} (should be empty)")
-                logging.info(f"  created_at: {row.get('created_at', 'N/A')} (should be empty)")
+                
+                print(f"\n{'='*80}")
+                print(f"Row {i+1}:")
+                print(f"{'='*80}")
+                
+                # Display fields in organized groups
+                print("\n1. Document & Position Info:")
+                print(f"   document_id: {row.get('document_id', 'N/A')}")
+                print(f"   chapter_number: {row.get('chapter_number', 'N/A')}")
+                print(f"   section_number: {row.get('section_number', 'N/A')}")
+                print(f"   part_number: {row.get('part_number', 'N/A')}")
+                print(f"   sequence_number: {row.get('sequence_number', 'N/A')}")
+                
+                print("\n2. Chapter Info:")
+                print(f"   chapter_name: {row.get('chapter_name', 'N/A')[:80]}{'...' if len(row.get('chapter_name', '')) > 80 else ''}")
+                print(f"   chapter_tags: {row.get('chapter_tags', 'N/A')}")
+                print(f"   chapter_summary: {row.get('chapter_summary', 'N/A')[:100]}{'...' if len(row.get('chapter_summary', '')) > 100 else ''}")
+                print(f"   chapter_token_count: {row.get('chapter_token_count', 'N/A')}")
+                
+                print("\n3. Section Info:")
+                print(f"   section_title: {row.get('section_title', 'N/A')[:80]}{'...' if len(row.get('section_title', '')) > 80 else ''}")
+                print(f"   section_hierarchy: {row.get('section_hierarchy', 'N/A')}")
+                print(f"   section_start_page: {row.get('section_start_page', 'N/A')}")
+                print(f"   section_end_page: {row.get('section_end_page', 'N/A')}")
+                print(f"   section_importance_score: {row.get('section_importance_score', 'N/A')}")
+                print(f"   section_token_count: {row.get('section_token_count', 'N/A')}")
+                
+                print("\n4. Arrays & References:")
+                print(f"   section_standard: {row.get('section_standard', 'N/A')}")
+                print(f"   section_standard_codes: {row.get('section_standard_codes', 'N/A')}")
+                print(f"   section_references: {row.get('section_references', 'N/A')}")
+                
+                print("\n5. Content & Embedding:")
+                content = row.get('content', 'N/A')
+                print(f"   content: {content[:150]}{'...' if len(content) > 150 else ''}")
+                print(f"   content_length: {len(content)} chars")
+                
+                embedding = row.get('embedding', '')
+                if embedding:
+                    # Show just the first few values and total count
+                    if embedding.startswith('[') and embedding.endswith(']'):
+                        try:
+                            # Extract first few numbers
+                            values = embedding[1:-1].split(',')[:5]
+                            preview = '[' + ','.join(values) + f',... ({len(embedding[1:-1].split(","))} total values)]'
+                            print(f"   embedding: {preview}")
+                        except:
+                            print(f"   embedding: <present, {len(embedding)} chars>")
+                    else:
+                        print(f"   embedding: <present, {len(embedding)} chars>")
+                else:
+                    print(f"   embedding: <empty>")
+                
+                print("\n6. Auto-generated Fields (should be empty):")
+                print(f"   id: '{row.get('id', '')}' {'✓ empty' if not row.get('id') else '✗ NOT EMPTY'}")
+                print(f"   created_at: '{row.get('created_at', '')}' {'✓ empty' if not row.get('created_at') else '✗ NOT EMPTY'}")
+                print(f"   text_search_vector: '{row.get('text_search_vector', '')}' {'✓ empty' if not row.get('text_search_vector') else '✗ NOT EMPTY'}")
+        
+        print(f"\n{'='*80}")
+        print(f"Total rows in CSV: {row_count}")
+        print(f"{'='*80}")
         
         return row_count == expected_count
         
