@@ -673,9 +673,16 @@ def main():
             for i, file_info in enumerate(files_to_process):
                 start_time = time.time()
                 file_name = file_info.get('file_name', 'Unknown')
-                file_path_nas = file_info.get('file_path_nas', '')
+                # The JSON has 'file_path' not 'file_path_nas' - this is already relative to share root
+                file_path_from_base = file_info.get('file_path', '')
+                
+                if not file_name or not file_path_from_base:
+                    print(f"   [ERROR] Missing file_name or file_path in file info. Skipping.")
+                    error_count += 1
+                    continue
                 
                 print(f"\n--- Processing file {i+1}/{len(files_to_process)}: {file_name} ---")
+                print(f"   File path: {file_path_from_base}")
                 
                 # Define output path
                 output_json_filename = os.path.splitext(file_name)[0] + '.json'
@@ -686,8 +693,8 @@ def main():
                 
                 try:
                     # Download file from NAS
-                    print(f"   Downloading from NAS: {file_path_nas}")
-                    local_file_path = download_file_from_nas(share_name, file_path_nas, temp_dir)
+                    print(f"   Downloading from NAS: {share_name}/{file_path_from_base}")
+                    local_file_path = download_file_from_nas(share_name, file_path_from_base, temp_dir)
                     
                     if not local_file_path:
                         print(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
