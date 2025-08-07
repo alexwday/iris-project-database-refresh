@@ -663,6 +663,11 @@ def main():
             continue
         
         print(f"   Found {len(files_to_process)} file(s) to process.")
+        
+        # Debug: Show first file info to verify structure
+        if files_to_process and len(files_to_process) > 0:
+            print(f"   [DEBUG] First file info structure: {files_to_process[0]}")
+        
         print("-" * 60)
         
         # Process each file
@@ -672,16 +677,34 @@ def main():
         with tempfile.TemporaryDirectory() as temp_dir:
             for i, file_info in enumerate(files_to_process):
                 start_time = time.time()
+                
+                # Debug the entire file_info structure
+                print(f"\n--- Processing file {i+1}/{len(files_to_process)} ---")
+                print(f"   [DEBUG] File info: {file_info}")
+                
                 file_name = file_info.get('file_name', 'Unknown')
                 # The JSON has 'file_path' not 'file_path_nas' - this is already relative to share root
                 file_path_from_base = file_info.get('file_path', '')
                 
-                if not file_name or not file_path_from_base:
-                    print(f"   [ERROR] Missing file_name or file_path in file info. Skipping.")
+                # Check all possible field names in case there's variation
+                if not file_path_from_base:
+                    # Try other possible field names
+                    file_path_from_base = file_info.get('file_path_nas', '')
+                    if not file_path_from_base:
+                        file_path_from_base = file_info.get('path', '')
+                
+                if not file_name:
+                    print(f"   [ERROR] Missing file_name in file info: {file_info}")
+                    error_count += 1
+                    continue
+                    
+                if not file_path_from_base:
+                    print(f"   [ERROR] Missing file_path in file info: {file_info}")
+                    print(f"   Available keys: {list(file_info.keys())}")
                     error_count += 1
                     continue
                 
-                print(f"\n--- Processing file {i+1}/{len(files_to_process)}: {file_name} ---")
+                print(f"   File name: {file_name}")
                 print(f"   File path: {file_path_from_base}")
                 
                 # Define output path
