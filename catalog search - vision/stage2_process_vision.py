@@ -276,28 +276,76 @@ def read_json_from_nas(share_name, nas_path_relative):
             except:
                 pass
 
-def download_file_from_nas(share_name, nas_path_relative, local_path):
-    """Downloads a file from NAS to a local path."""
+def download_file_from_nas(share_name, nas_path_relative, local_temp_dir):
+    """Downloads a file from NAS to a local temporary directory using pysmb with read-only access."""
+    local_file_path = os.path.join(local_temp_dir, os.path.basename(nas_path_relative))
+    print(f"   Attempting to download from NAS: {share_name}/{nas_path_relative} to {local_file_path}")
     conn = None
-    try:
-        conn = create_nas_connection()
-        if not conn:
-            return False
-        
-        with open(local_path, 'wb') as local_file:
-            conn.retrieveFile(share_name, nas_path_relative, local_file, timeout=120)
-        
-        print(f"   Downloaded {nas_path_relative} from NAS to {local_path}")
-        return True
-    except Exception as e:
-        print(f"   [ERROR] Failed to download from NAS: {e}")
-        return False
-    finally:
-        if conn:
+    
+    # Add retry logic for file-in-use errors
+    max_retries = 3
+    retry_delay = 2  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            conn = create_nas_connection()
+            if not conn:
+                return None
+            
+            # Use retrieveFileFromOffset with read-only intent
+            file_obj = io.BytesIO()
+            
+            # First get file attributes to check accessibility
             try:
+                file_attrs = conn.getAttributes(share_name, nas_path_relative)
+                print(f"   File size: {file_attrs.file_size} bytes")
+            except Exception as attr_err:
+                print(f"   [WARNING] Could not get file attributes: {attr_err}")
+            
+            # Attempt to retrieve the file
+            # Using retrieveFileFromOffset which can be more tolerant of locked files
+            file_attributes, filesize = conn.retrieveFileFromOffset(
+                share_name, 
+                nas_path_relative, 
+                file_obj,
+                offset=0,  # Start from beginning
+                max_length=-1  # Read entire file
+            )
+            
+            # Write the retrieved content to local file
+            file_obj.seek(0)
+            with open(local_file_path, 'wb') as local_f:
+                local_f.write(file_obj.read())
+            
+            print(f"   Successfully downloaded {filesize} bytes to: {local_file_path}")
+            return local_file_path
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            # Check for sharing violation or access denied errors
+            if any(err in error_str for err in ['sharing violation', 'access denied', 'locked', 'in use']):
+                print(f"   [Attempt {attempt + 1}/{max_retries}] File appears to be in use: {e}")
+                if attempt < max_retries - 1:
+                    print(f"      Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"   [ERROR] Failed to download after {max_retries} attempts - file may be locked.")
+            else:
+                print(f"   [ERROR] Unexpected error downloading from NAS '{share_name}/{nas_path_relative}': {e}")
+            
+            # Clean up potentially partially downloaded file
+            if os.path.exists(local_file_path):
+                try:
+                    os.remove(local_file_path)
+                except OSError:
+                    pass
+            return None
+        finally:
+            if conn:
                 conn.close()
-            except:
-                pass
+    
+    return None  # If all retries failed
 
 # ==============================================================================
 # --- Vision Processing Functions ---
@@ -638,10 +686,10 @@ def main():
                 
                 try:
                     # Download file from NAS
-                    local_file_path = os.path.join(temp_dir, file_name)
                     print(f"   Downloading from NAS: {file_path_nas}")
+                    local_file_path = download_file_from_nas(share_name, file_path_nas, temp_dir)
                     
-                    if not download_file_from_nas(share_name, file_path_nas, local_file_path):
+                    if not local_file_path:
                         print(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
                         error_count += 1
                         continue
