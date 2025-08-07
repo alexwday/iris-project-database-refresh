@@ -569,6 +569,8 @@ if __name__ == "__main__":
                     print("   Result: Both CSV catalog and NAS list are empty. No actions needed.")
                     
                     # Initialize variables needed later in the flow
+                    new_files = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
+                    updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
                     comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
@@ -576,6 +578,8 @@ if __name__ == "__main__":
                     print("   Result: NAS list is empty. No files to process.")
                     
                     # Initialize variables needed later in the flow
+                    new_files = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
+                    updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_process = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
                     comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
@@ -583,10 +587,11 @@ if __name__ == "__main__":
                     print("   Result: CSV catalog is empty. All NAS files are considered 'new'.")
                     new_cols = ['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created']
                     existing_new_cols = [col for col in new_cols if col in nas_df.columns]
-                    files_to_process = nas_df[existing_new_cols].copy()
-                    files_to_process['reason'] = 'new'
+                    new_files = nas_df[existing_new_cols].copy()
+                    new_files['reason'] = 'new'
                     
                     # Initialize variables needed later in the flow
+                    updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
                     comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
                 else:
