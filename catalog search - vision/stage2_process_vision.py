@@ -618,6 +618,9 @@ def process_pages_batch(pdf_path, page_numbers, temp_dir, max_workers=3):
     page_results.sort(key=lambda x: x["page_number"])
     return page_results
 
+# --- CA Bundle Configuration ---
+CA_BUNDLE_FILENAME = 'rbc-ca-bundle.cer'  # CA bundle filename
+
 # ==============================================================================
 # --- Main Processing Logic ---
 # ==============================================================================
@@ -627,203 +630,289 @@ def main():
     print("--- Running Stage 2: Process Documents with Vision Model ---")
     print("="*60 + "\n")
     
-    # Load document sources configuration
-    sources = load_document_sources()
-    if not sources:
-        print("[ERROR] No document sources configured to process!")
-        sys.exit(1)
+    # Variables for CA bundle handling
+    temp_cert_file_path = None
+    original_requests_ca_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+    original_ssl_cert_file = os.environ.get('SSL_CERT_FILE')
     
-    print(f"[1] Processing {len(sources)} document source(s)...")
-    print("-" * 60)
-    
-    overall_processed = 0
-    overall_errors = 0
-    
-    for source_config in sources:
-        document_source = source_config['name']
-        detail_level = source_config['detail_level']
+    try:
+        # --- Download and Set Custom CA Bundle ---
+        print("[1] Setting up Custom CA Bundle...")
+        ca_bundle_relative_path = os.path.join(NAS_OUTPUT_FOLDER_PATH, CA_BUNDLE_FILENAME).replace('\\', '/')
         
-        print(f"\n--- Processing source: {document_source} (detail: {detail_level}) ---")
-        
-        # Define paths
-        share_name = NAS_PARAMS["share"]
-        stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, document_source).replace('\\', '/')
-        files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
-        stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2B_outputs').replace('\\', '/')
-        
-        print(f"   Stage 1 Output Dir: {stage1_output_dir_relative}")
-        print(f"   Stage 2 Output Dir: {stage2_output_dir_relative}")
-        
-        # Load files to process from Stage 1
-        print(f"[2] Loading Stage 1 file list...")
-        files_to_process = read_json_from_nas(share_name, files_to_process_json_relative)
-        
-        if not files_to_process:
-            print(f"   [WARNING] No files to process from Stage 1 for source '{document_source}'. Skipping.")
-            continue
-        
-        print(f"   Found {len(files_to_process)} file(s) to process.")
-        
-        # Debug: Show first file info to verify structure
-        if files_to_process and len(files_to_process) > 0:
-            print(f"   [DEBUG] First file info structure: {files_to_process[0]}")
+        # Create connection to check for CA bundle
+        conn = create_nas_connection()
+        if conn:
+            try:
+                # Try to read CA bundle from NAS
+                file_obj = io.BytesIO()
+                conn.retrieveFile(NAS_PARAMS["share"], ca_bundle_relative_path, file_obj, timeout=60)
+                file_obj.seek(0)
+                ca_bundle_bytes = file_obj.read()
+                
+                if ca_bundle_bytes:
+                    # Create a temporary file to store the certificate
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".cer", mode='wb') as temp_cert_file:
+                        temp_cert_file.write(ca_bundle_bytes)
+                        temp_cert_file_path = temp_cert_file.name
+                        print(f"   Downloaded CA bundle to temporary file: {temp_cert_file_path}")
+                    
+                    # Set the environment variables
+                    os.environ['REQUESTS_CA_BUNDLE'] = temp_cert_file_path
+                    os.environ['SSL_CERT_FILE'] = temp_cert_file_path
+                    print(f"   Set REQUESTS_CA_BUNDLE and SSL_CERT_FILE environment variables.")
+                else:
+                    print(f"   [WARNING] CA bundle file is empty. Proceeding without custom CA bundle.")
+            except Exception as e:
+                print(f"   [WARNING] CA Bundle not found or error reading: {e}. Proceeding without custom CA bundle.")
+            finally:
+                conn.close()
+        else:
+            print(f"   [WARNING] Could not connect to NAS to retrieve CA bundle. Proceeding without custom CA bundle.")
         
         print("-" * 60)
         
-        # Process each file
-        processed_count = 0
-        error_count = 0
+        # Load document sources configuration
+        sources = load_document_sources()
+        if not sources:
+            print("[ERROR] No document sources configured to process!")
+            sys.exit(1)
         
-        with tempfile.TemporaryDirectory() as temp_dir:
-            for i, file_info in enumerate(files_to_process):
-                start_time = time.time()
+        print(f"[2] Processing {len(sources)} document source(s)...")
+        print("-" * 60)
+        
+        overall_processed = 0
+        overall_errors = 0
+        
+        for source_config in sources:
+            document_source = source_config['name']
+            detail_level = source_config['detail_level']
+            
+            print(f"\n--- Processing source: {document_source} (detail: {detail_level}) ---")
+            
+            # Define paths
+            share_name = NAS_PARAMS["share"]
+            stage1_output_dir_relative = os.path.join(NAS_OUTPUT_FOLDER_PATH, document_source).replace('\\', '/')
+            files_to_process_json_relative = os.path.join(stage1_output_dir_relative, '1C_nas_files_to_process.json').replace('\\', '/')
+            stage2_output_dir_relative = os.path.join(stage1_output_dir_relative, '2B_outputs').replace('\\', '/')
+            
+            print(f"   Stage 1 Output Dir: {stage1_output_dir_relative}")
+            print(f"   Stage 2 Output Dir: {stage2_output_dir_relative}")
+            
+            # Load files to process from Stage 1
+            print(f"[3] Loading Stage 1 file list from: {share_name}/{files_to_process_json_relative}")
+            files_to_process = read_json_from_nas(share_name, files_to_process_json_relative)
+            
+            if files_to_process is None:
+                print(f"   [ERROR] Failed to read Stage 1 JSON file for source '{document_source}'. Skipping.")
+                continue
+            
+            if not files_to_process:
+                print(f"   [WARNING] Stage 1 JSON is empty for source '{document_source}'. No files to process.")
+                continue
+        
+            print(f"   Found {len(files_to_process)} file(s) to process.")
+            print(f"   [DEBUG] Type of files_to_process: {type(files_to_process)}")
+        
+            # Debug: Show first file info to verify structure
+            if files_to_process and len(files_to_process) > 0:
+                print(f"   [DEBUG] First file info structure: {files_to_process[0]}")
+                print(f"   [DEBUG] Type of first element: {type(files_to_process[0])}")
+                if isinstance(files_to_process[0], dict):
+                    print(f"   [DEBUG] Keys in first file: {list(files_to_process[0].keys())}")
+        
+            print("-" * 60)
+        
+            # Process each file
+            processed_count = 0
+            error_count = 0
+        
+            with tempfile.TemporaryDirectory() as temp_dir:
+                for i, file_info in enumerate(files_to_process):
+                    start_time = time.time()
                 
-                # Debug the entire file_info structure
-                print(f"\n--- Processing file {i+1}/{len(files_to_process)} ---")
-                print(f"   [DEBUG] File info: {file_info}")
+                    # Debug the entire file_info structure
+                    print(f"\n--- Processing file {i+1}/{len(files_to_process)} ---")
+                    print(f"   [DEBUG] File info: {file_info}")
                 
-                file_name = file_info.get('file_name', 'Unknown')
-                # The JSON has 'file_path' not 'file_path_nas' - this is already relative to share root
-                file_path_from_base = file_info.get('file_path', '')
+                    file_name = file_info.get('file_name', 'Unknown')
+                    # The JSON has 'file_path' not 'file_path_nas' - this is already relative to share root
+                    file_path_from_base = file_info.get('file_path', '')
                 
-                # Check all possible field names in case there's variation
-                if not file_path_from_base:
-                    # Try other possible field names
-                    file_path_from_base = file_info.get('file_path_nas', '')
+                    # Check all possible field names in case there's variation
                     if not file_path_from_base:
-                        file_path_from_base = file_info.get('path', '')
+                        # Try other possible field names
+                        file_path_from_base = file_info.get('file_path_nas', '')
+                        if not file_path_from_base:
+                            file_path_from_base = file_info.get('path', '')
                 
-                if not file_name:
-                    print(f"   [ERROR] Missing file_name in file info: {file_info}")
-                    error_count += 1
-                    continue
-                    
-                if not file_path_from_base:
-                    print(f"   [ERROR] Missing file_path in file info: {file_info}")
-                    print(f"   Available keys: {list(file_info.keys())}")
-                    error_count += 1
-                    continue
-                
-                print(f"   File name: {file_name}")
-                print(f"   File path: {file_path_from_base}")
-                
-                # Define output path
-                output_json_filename = os.path.splitext(file_name)[0] + '.json'
-                output_json_relative_path = os.path.join(stage2_output_dir_relative, output_json_filename).replace('\\', '/')
-                
-                file_has_error = False
-                local_file_path = None
-                
-                try:
-                    # Download file from NAS
-                    print(f"   Downloading from NAS: {share_name}/{file_path_from_base}")
-                    local_file_path = download_file_from_nas(share_name, file_path_from_base, temp_dir)
-                    
-                    if not local_file_path:
-                        print(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
+                    if not file_name:
+                        print(f"   [ERROR] Missing file_name in file info: {file_info}")
                         error_count += 1
                         continue
                     
-                    # Process PDF
-                    structured_result = None
-                    
-                    if file_name.lower().endswith('.pdf'):
-                        try:
-                            reader = fitz.open(local_file_path)
-                            page_count = len(reader)
-                            reader.close()
-                            
-                            print(f"   PDF detected with {page_count} pages. Using vision processing.")
-                            
-                            # Process pages in batches
-                            page_numbers = list(range(page_count))
-                            page_results = process_pages_batch(
-                                local_file_path, 
-                                page_numbers, 
-                                temp_dir,
-                                max_workers=MAX_CONCURRENT_PAGES
-                            )
-                            
-                            # Filter out vision_passes from final output (keep them for debugging if needed)
-                            cleaned_pages = []
-                            for page in page_results:
-                                cleaned_pages.append({
-                                    "page_number": page["page_number"],
-                                    "markdown_content": page.get("markdown_content", "")
-                                })
-                            
-                            # Create structured result matching catalog search format
-                            structured_result = {
-                                "document_name": file_name,
-                                "total_pages": page_count,
-                                "pages": cleaned_pages
-                            }
-                            
-                            # Check for failed pages
-                            failed_pages = [p for p in page_results if p.get('markdown_content') is None]
-                            if failed_pages:
-                                print(f"   [WARNING] {len(failed_pages)} pages failed to process.")
-                            else:
-                                print(f"   All {page_count} pages processed successfully.")
-                                
-                        except Exception as e:
-                            print(f"   [ERROR] Failed to process PDF {file_name}: {e}")
-                            file_has_error = True
-                    
-                    else:
-                        # For non-PDF files, we might need different handling
-                        print(f"   [WARNING] Non-PDF file detected: {file_name}. Vision processing not implemented for this type.")
-                        file_has_error = True
-                    
-                    # Save results to NAS
-                    if structured_result and not file_has_error:
-                        print(f"   Saving structured JSON output to NAS...")
-                        
-                        json_bytes = json.dumps(structured_result, indent=4).encode('utf-8')
-                        if not write_to_nas(share_name, output_json_relative_path, json_bytes):
-                            print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
-                            file_has_error = True
-                        else:
-                            print(f"   Successfully saved JSON with {structured_result['total_pages']} pages.")
-                    
-                except Exception as e:
-                    print(f"   [ERROR] Unexpected error processing file {file_name}: {e}")
-                    file_has_error = True
-                
-                finally:
-                    # Cleanup
-                    if local_file_path and os.path.exists(local_file_path):
-                        try:
-                            os.remove(local_file_path)
-                        except OSError as e:
-                            print(f"   [WARNING] Failed to remove temporary file: {e}")
-                    
-                    # Update counters
-                    if file_has_error:
+                    if not file_path_from_base:
+                        print(f"   [ERROR] Missing file_path in file info: {file_info}")
+                        print(f"   Available keys: {list(file_info.keys())}")
                         error_count += 1
-                        print(f"--- Finished file {i+1} (ERROR) ---")
-                    else:
-                        processed_count += 1
-                        print(f"--- Finished file {i+1} (Success) ---")
+                        continue
+                
+                    print(f"   File name: {file_name}")
+                    print(f"   File path: {file_path_from_base}")
+                
+                    # Define output path
+                    output_json_filename = os.path.splitext(file_name)[0] + '.json'
+                    output_json_relative_path = os.path.join(stage2_output_dir_relative, output_json_filename).replace('\\', '/')
+                
+                    file_has_error = False
+                    local_file_path = None
+                
+                    try:
+                        # Download file from NAS
+                        print(f"   Downloading from NAS: {share_name}/{file_path_from_base}")
+                        local_file_path = download_file_from_nas(share_name, file_path_from_base, temp_dir)
                     
-                    end_time = time.time()
-                    print(f"--- Time taken: {end_time - start_time:.2f} seconds ---")
+                        if not local_file_path:
+                            print(f"   [ERROR] Failed to download {file_name} from NAS. Skipping.")
+                            error_count += 1
+                            continue
+                    
+                        # Process PDF
+                        structured_result = None
+                    
+                        if file_name.lower().endswith('.pdf'):
+                            try:
+                                reader = fitz.open(local_file_path)
+                                page_count = len(reader)
+                                reader.close()
+                            
+                                print(f"   PDF detected with {page_count} pages. Using vision processing.")
+                            
+                                # Process pages in batches
+                                page_numbers = list(range(page_count))
+                                page_results = process_pages_batch(
+                                    local_file_path, 
+                                    page_numbers, 
+                                    temp_dir,
+                                    max_workers=MAX_CONCURRENT_PAGES
+                                )
+                            
+                                # Filter out vision_passes from final output (keep them for debugging if needed)
+                                cleaned_pages = []
+                                for page in page_results:
+                                    cleaned_pages.append({
+                                        "page_number": page["page_number"],
+                                        "markdown_content": page.get("markdown_content", "")
+                                    })
+                            
+                                # Create structured result matching catalog search format
+                                structured_result = {
+                                    "document_name": file_name,
+                                    "total_pages": page_count,
+                                    "pages": cleaned_pages
+                                }
+                            
+                                # Check for failed pages
+                                failed_pages = [p for p in page_results if p.get('markdown_content') is None]
+                                if failed_pages:
+                                    print(f"   [WARNING] {len(failed_pages)} pages failed to process.")
+                                else:
+                                    print(f"   All {page_count} pages processed successfully.")
+                                
+                            except Exception as e:
+                                print(f"   [ERROR] Failed to process PDF {file_name}: {e}")
+                                file_has_error = True
+                    
+                        else:
+                            # For non-PDF files, we might need different handling
+                            print(f"   [WARNING] Non-PDF file detected: {file_name}. Vision processing not implemented for this type.")
+                            file_has_error = True
+                    
+                        # Save results to NAS
+                        if structured_result and not file_has_error:
+                            print(f"   Saving structured JSON output to NAS...")
+                        
+                            json_bytes = json.dumps(structured_result, indent=4).encode('utf-8')
+                            if not write_to_nas(share_name, output_json_relative_path, json_bytes):
+                                print(f"   [ERROR] Failed to write JSON file for {file_name} to NAS.")
+                                file_has_error = True
+                            else:
+                                print(f"   Successfully saved JSON with {structured_result['total_pages']} pages.")
+                    
+                    except Exception as e:
+                        print(f"   [ERROR] Unexpected error processing file {file_name}: {e}")
+                        file_has_error = True
+                
+                    finally:
+                        # Cleanup
+                        if local_file_path and os.path.exists(local_file_path):
+                            try:
+                                os.remove(local_file_path)
+                            except OSError as e:
+                                print(f"   [WARNING] Failed to remove temporary file: {e}")
+                    
+                        # Update counters
+                        if file_has_error:
+                            error_count += 1
+                            print(f"--- Finished file {i+1} (ERROR) ---")
+                        else:
+                            processed_count += 1
+                            print(f"--- Finished file {i+1} (Success) ---")
+                    
+                        end_time = time.time()
+                        print(f"--- Time taken: {end_time - start_time:.2f} seconds ---")
         
-        # Summary for this source
-        print(f"\n--- Summary for source '{document_source}' ---")
-        print(f"   Files processed successfully: {processed_count}")
-        print(f"   Files with errors: {error_count}")
-        print(f"   Total files: {len(files_to_process)}")
+            # Summary for this source
+            print(f"\n--- Summary for source '{document_source}' ---")
+            print(f"   Files processed successfully: {processed_count}")
+            print(f"   Files with errors: {error_count}")
+            print(f"   Total files: {len(files_to_process)}")
         
-        overall_processed += processed_count
-        overall_errors += error_count
+            overall_processed += processed_count
+            overall_errors += error_count
     
-    # Final summary
-    print("\n" + "="*60)
-    print("--- Stage 2 Completed ---")
-    print(f"Total files processed successfully: {overall_processed}")
-    print(f"Total files with errors: {overall_errors}")
-    print("="*60 + "\n")
+        # Final summary
+        print("\n" + "="*60)
+        print("--- Stage 2 Completed ---")
+        print(f"Total files processed successfully: {overall_processed}")
+        print(f"Total files with errors: {overall_errors}")
+        print("="*60 + "\n")
+    
+    finally:
+        # Clean up the temporary certificate file and restore environment variables
+        print("\n--- Cleaning up ---")
+        
+        if temp_cert_file_path and os.path.exists(temp_cert_file_path):
+            try:
+                os.remove(temp_cert_file_path)
+                print(f"   Removed temporary CA bundle file: {temp_cert_file_path}")
+            except OSError as e:
+                print(f"   [WARNING] Failed to remove temporary CA bundle file {temp_cert_file_path}: {e}")
+        
+        # Restore REQUESTS_CA_BUNDLE
+        current_requests_bundle = os.environ.get('REQUESTS_CA_BUNDLE')
+        if original_requests_ca_bundle is None:
+            if current_requests_bundle == temp_cert_file_path:
+                if 'REQUESTS_CA_BUNDLE' in os.environ:
+                    del os.environ['REQUESTS_CA_BUNDLE']
+                    print("   Unset REQUESTS_CA_BUNDLE environment variable.")
+        else:
+            if current_requests_bundle != original_requests_ca_bundle:
+                os.environ['REQUESTS_CA_BUNDLE'] = original_requests_ca_bundle
+                print(f"   Restored original REQUESTS_CA_BUNDLE environment variable.")
+        
+        # Restore SSL_CERT_FILE
+        current_ssl_cert = os.environ.get('SSL_CERT_FILE')
+        if original_ssl_cert_file is None:
+            if current_ssl_cert == temp_cert_file_path:
+                if 'SSL_CERT_FILE' in os.environ:
+                    del os.environ['SSL_CERT_FILE']
+                    print("   Unset SSL_CERT_FILE environment variable.")
+        else:
+            if current_ssl_cert != original_ssl_cert_file:
+                os.environ['SSL_CERT_FILE'] = original_ssl_cert_file
+                print(f"   Restored original SSL_CERT_FILE environment variable.")
 
 if __name__ == "__main__":
     main()

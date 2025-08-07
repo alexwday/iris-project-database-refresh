@@ -704,6 +704,10 @@ if __name__ == "__main__":
 
             # Save files to process
             print(f"   Saving 'files to process' list to: '{os.path.basename(process_output_relative_file)}'...")
+            print(f"   [DEBUG] files_to_process shape: {files_to_process.shape}")
+            print(f"   [DEBUG] files_to_process columns: {list(files_to_process.columns)}")
+            if not files_to_process.empty:
+                print(f"   [DEBUG] First file entry: {files_to_process.iloc[0].to_dict()}")
             process_json_string = files_to_process.to_json(orient='records', indent=4, date_format='iso')
             if not write_json_to_nas(NAS_PARAMS["share"], process_output_relative_file, process_json_string):
                 print("   [CRITICAL ERROR] Failed to write 'files to process' JSON to NAS. Exiting.")
