@@ -42,6 +42,7 @@ import socket # For gethostname
 # --- End pysmb import ---
 
 from openai import OpenAI  # For markdown synthesis
+import requests  # For OAuth token request
 
 # Suppress common PDF warnings that don't affect processing
 warnings.filterwarnings("ignore", message=".*wrong pointing object.*")
@@ -61,11 +62,19 @@ VISION_MODEL_NAME = 'qwen-2-vl' # Adjust if needed
 MAX_TOKENS = 1500 # Max tokens for vision model response
 IMAGE_DPI = 150 # DPI for converting PDF pages to images
 
+# --- OAuth Configuration for GPT API ---
+# OAuth authentication parameters (matching catalog search stage 3)
+OAUTH_CONFIG = {
+    "token_url": "YOUR_OAUTH_TOKEN_ENDPOINT_URL",  # Replace with actual OAuth token endpoint
+    "client_id": "YOUR_CLIENT_ID",  # Replace with actual client ID
+    "client_secret": "YOUR_CLIENT_SECRET",  # Replace with actual client secret
+    "scope": "api://YourResource/.default"  # Replace with actual scope
+}
+
 # --- GPT Configuration for Markdown Synthesis ---
 GPT_CONFIG = {
-    "base_url": "https://your-aoai-endpoint.openai.azure.com/", # Replace with actual endpoint
-    "api_key": "YOUR_API_KEY",  # Replace with actual API key
-    "markdown_synthesis_model": "gpt-4o", # Model for synthesizing markdown from vision passes
+    "base_url": "https://your-aoai-endpoint.openai.azure.com/",  # Replace with actual endpoint
+    "markdown_synthesis_model": "gpt-4o",  # Model for synthesizing markdown from vision passes
 }
 
 # --- NAS Configuration (Should match Stage 1 or be loaded) ---
@@ -304,7 +313,7 @@ def encode_image(image_path):
         return None
 
 def call_vision_api(image_path, prompt_text):
-    """Calls the vision model API for a given image and prompt."""
+    """Calls the local vision model API for a given image and prompt."""
     base64_image = encode_image(image_path)
     if not base64_image:
         return None
@@ -325,43 +334,126 @@ def call_vision_api(image_path, prompt_text):
     }
 
     max_retries = 3
-    retry_delay = 5
+    retry_delay = 5  # seconds
+    
+    print(f"      Sending request to Vision API with prompt type: {prompt_text[:50]}...")  # Log prompt start
 
     for attempt in range(max_retries):
         try:
-            response = requests.post(VISION_API_URL, headers=headers, json=payload, timeout=120)
-            response.raise_for_status()
+            response = requests.post(VISION_API_URL, headers=headers, json=payload, timeout=120)  # Added timeout
+            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
             
             result = response.json()
-            response_text = result.get('choices', [{}])[0].get('message', {}).get('content', 'Error: No content found')
-            return response_text
+            response_text = result.get('choices', [{}])[0].get('message', {}).get('content', 'Error: No content found in API response structure')
+            print(f"      Received successful response from Vision API (Attempt {attempt + 1}).")
+            return response_text  # Success, return response
 
         except requests.exceptions.Timeout:
-            print(f"   [WARNING] Timeout on attempt {attempt + 1}/{max_retries}")
+            print(f"      [WARNING] Timeout error calling Vision API (Attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay}s...")
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
             else:
+                print(f"      [ERROR] Timeout error calling Vision API after {max_retries} attempts.")
                 return "Error: API call timed out after retries."
         
+        except requests.exceptions.RequestException as e:
+            status_code = e.response.status_code if hasattr(e, 'response') and e.response is not None else None
+            print(f"      [WARNING] RequestException calling Vision API (Attempt {attempt + 1}/{max_retries}). Status: {status_code}. Error: {e}")
+            
+            # Decide whether to retry based on status code
+            # Retry on server errors (5xx), potentially rate limits (429)
+            # Do NOT retry on client errors like 400, 401, 403, 404
+            if status_code and (500 <= status_code < 600 or status_code == 429):
+                if attempt < max_retries - 1:
+                    print(f"      Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"      [ERROR] API call failed with status {status_code} after {max_retries} attempts.")
+                    return f"Error: API call failed after retries - Status {status_code}"
+            else:
+                # Non-retryable client error or unknown error
+                print(f"      [ERROR] Non-retryable API error. Status: {status_code}. Error: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    print(f"      Response body: {e.response.text}")
+                return f"Error: API call failed - {str(e)}"  # Return specific error
+        
+        except (KeyError, IndexError, json.JSONDecodeError) as e:
+            # Error parsing the successful response
+            print(f"      [ERROR] Unexpected response format or JSON decode error from Vision API: {e}")
+            # Do not retry format errors
+            return "Error: Unexpected API response format."
+        
         except Exception as e:
-            print(f"   [ERROR] Vision API error on attempt {attempt + 1}: {e}")
+            # Catch-all for other unexpected errors
+            print(f"      [ERROR] An unexpected error occurred during Vision API call attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
+                print(f"      Retrying in {retry_delay}s...")
                 time.sleep(retry_delay)
             else:
-                return f"Error: API call failed - {str(e)}"
+                print(f"      [ERROR] Unexpected error persisted after {max_retries} attempts.")
+                return "Error: An unexpected error occurred after retries."
     
-    return "Error: Failed to get response after all retries."
+    # Should not be reached if logic is correct, but as a fallback:
+    print(f"      [ERROR] Exited retry loop unexpectedly.")
+    return "Error: Failed to get response after all retries (unexpected loop exit)."
+
+def get_oauth_token():
+    """Retrieves an OAuth access token using client credentials flow."""
+    print("      Requesting OAuth access token for GPT...")
+    token_url = OAUTH_CONFIG['token_url']
+    payload = {
+        'client_id': OAUTH_CONFIG['client_id'],
+        'client_secret': OAUTH_CONFIG['client_secret'],
+        'grant_type': 'client_credentials'
+    }
+    # Add scope if defined and not empty
+    if OAUTH_CONFIG.get('scope'):
+        payload['scope'] = OAUTH_CONFIG['scope']
+    
+    try:
+        response = requests.post(token_url, data=payload)
+        response.raise_for_status()
+        token_data = response.json()
+        access_token = token_data.get('access_token')
+        if not access_token:
+            print("      [ERROR] 'access_token' not found in OAuth response.")
+            return None
+        print("      OAuth token obtained successfully.")
+        return access_token
+    except requests.exceptions.RequestException as e:
+        print(f"      [ERROR] Failed to get OAuth token: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"      Response status: {e.response.status_code}")
+            print(f"      Response body: {e.response.text}")
+        return None
+    except Exception as e:
+        print(f"      [ERROR] Unexpected error during OAuth token request: {e}")
+        return None
+
+# Global variable to cache OAuth token
+_cached_oauth_token = None
+_token_expiry_time = 0
 
 def synthesize_vision_to_markdown(page_vision_data, page_number):
     """
     Synthesizes vision model analysis passes into coherent markdown.
     Adapted from original stage3_generate_markdown_and_summaries.py
     """
+    global _cached_oauth_token, _token_expiry_time
+    
     try:
-        # Initialize OpenAI client for markdown synthesis
+        # Check if we need a new OAuth token (expires every ~50 minutes)
+        current_time = time.time()
+        if current_time >= _token_expiry_time:
+            _cached_oauth_token = get_oauth_token()
+            if not _cached_oauth_token:
+                return f"Error: Failed to obtain OAuth token for page {page_number}"
+            _token_expiry_time = current_time + (50 * 60)  # Assume 50 min validity
+        
+        # Initialize OpenAI client with OAuth token
         client = OpenAI(
             base_url=GPT_CONFIG["base_url"],
-            api_key=GPT_CONFIG["api_key"]
+            api_key=_cached_oauth_token
         )
         
         # Combine vision pass results into a structured input string
