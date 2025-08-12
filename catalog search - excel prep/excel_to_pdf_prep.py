@@ -313,7 +313,7 @@ def create_pdf_from_row(row_data, row_number):
         # Create header row
         header = Table(
             [[Paragraph(title, section_header_style)]],
-            colWidths=[7*inch]
+            colWidths=[6.5*inch]
         )
         header.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), header_color),
@@ -325,12 +325,12 @@ def create_pdf_from_row(row_data, row_number):
         
         # Combine header and content
         container_data = [[header], [content_table]]
-        container = Table(container_data, colWidths=[7*inch])
+        container = Table(container_data, colWidths=[6.5*inch])
         container.setStyle(TableStyle([
             ('BACKGROUND', (0, 1), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
-            ('LEFTPADDING', (0, 1), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 1), (-1, -1), 8),
+            ('LEFTPADDING', (0, 1), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 1), (-1, -1), 12),  # Increased right padding
             ('TOPPADDING', (0, 1), (-1, -1), 8),
             ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
             ('LEFTPADDING', (0, 0), (-1, 0), 0),
@@ -433,11 +433,11 @@ def create_pdf_from_row(row_data, row_number):
                     # Two items in row
                     table_data.append([row[0][0], row[0][1], row[1][0], row[1][1]])
             
-            standards_table = Table(table_data, colWidths=[1.2*inch, 2.3*inch, 1.2*inch, 2.3*inch])
+            standards_table = Table(table_data, colWidths=[1.1*inch, 2.1*inch, 1.1*inch, 2.1*inch])
             standards_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
                 ('TOPPADDING', (0, 0), (-1, -1), 2),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
             ]))
@@ -474,11 +474,11 @@ def create_pdf_from_row(row_data, row_number):
             ])
         
         if issue_data:
-            issue_table = Table(issue_data, colWidths=[1.5*inch, 5.5*inch])
+            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
             issue_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
@@ -516,11 +516,11 @@ def create_pdf_from_row(row_data, row_number):
             ])
         
         if technical_data:
-            technical_table = Table(technical_data, colWidths=[1.5*inch, 5.5*inch])
+            technical_table = Table(technical_data, colWidths=[1.5*inch, 4.8*inch])
             technical_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
@@ -575,11 +575,11 @@ def create_pdf_from_row(row_data, row_number):
                 table_data.append([row2[0][0], row2[0][1], row2[1][0], row2[1][1]])
         
         if table_data:
-            approval_table = Table(table_data, colWidths=[1.5*inch, 2*inch, 1.5*inch, 2*inch])
+            approval_table = Table(table_data, colWidths=[1.4*inch, 1.9*inch, 1.4*inch, 1.9*inch])
             approval_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ]))
@@ -635,11 +635,11 @@ def create_pdf_from_row(row_data, row_number):
             ])
         
         if doc_data:
-            doc_table = Table(doc_data, colWidths=[1.5*inch, 5.5*inch])
+            doc_table = Table(doc_data, colWidths=[1.5*inch, 4.8*inch])
             doc_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
