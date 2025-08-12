@@ -184,14 +184,19 @@ def create_pdf_from_row(row_data, row_number):
     def get_value_simple(data, col_index):
         """Simple value getter for header/footer use"""
         try:
-            if col_index < len(data):
-                value = data.iloc[col_index]
-                if pd.isna(value) or value is None:
-                    return None
-                return str(value).strip()
-        except:
-            pass
-        return None
+            # Proper bounds checking for DataFrame columns
+            if col_index < 0 or col_index >= len(data):
+                return None
+            value = data.iloc[col_index]
+            if pd.isna(value) or value is None:
+                return None
+            return str(value).strip()
+        except (IndexError, KeyError) as e:
+            print(f"[DEBUG] Cannot access column {col_index} in header/footer: {e}")
+            return None
+        except Exception as e:
+            print(f"[DEBUG] Unexpected error in get_value_simple for column {col_index}: {e}")
+            return None
     
     # Get field values for header/footer use
     year = get_value_simple(row_data, 0)
@@ -345,16 +350,21 @@ def create_pdf_from_row(row_data, row_number):
     # Helper function to safely get value
     def get_value(col_index):
         try:
-            if col_index < len(row_data):
-                value = row_data.iloc[col_index]
-                if pd.isna(value) or value is None:
-                    return None
-                value_str = str(value).strip()
-                if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
-                    return None
-                return value_str
+            # Proper bounds checking for DataFrame columns
+            if col_index < 0 or col_index >= len(row_data):
+                return None
+            value = row_data.iloc[col_index]
+            if pd.isna(value) or value is None:
+                return None
+            value_str = str(value).strip()
+            if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
+                return None
+            return value_str
+        except (IndexError, KeyError) as e:
+            print(f"[DEBUG] Cannot access column {col_index}: {e}")
             return None
-        except:
+        except Exception as e:
+            print(f"[DEBUG] Unexpected error accessing column {col_index}: {e}")
             return None
     
     # Helper function to format value for display
@@ -756,6 +766,54 @@ def save_pdf_to_nas(conn, share_name, file_path, pdf_content):
         print(f"[ERROR] Failed to write PDF to NAS '{file_path}': {e}")
         return False
 
+def validate_dataframe_structure(df):
+    """Validate DataFrame has minimum required structure."""
+    if df is None:
+        return False, "DataFrame is None"
+    
+    if df.empty:
+        return False, "DataFrame is empty"
+    
+    if len(df.columns) < 1:
+        return False, "DataFrame has no columns"
+    
+    # Warn about missing columns but don't fail
+    expected_columns = 23  # A-W (0-22)
+    if len(df.columns) < expected_columns:
+        print(f"[WARNING] Expected {expected_columns} columns (A-W), found {len(df.columns)} columns")
+        print("Some fields may be missing in generated PDFs")
+        print("Missing columns will be treated as empty values")
+    
+    return True, "Valid"
+
+def detect_header_row(df):
+    """Safely detect if first row is a header."""
+    if df is None or df.empty or len(df) == 0:
+        return False
+    
+    try:
+        # Get first row values safely
+        first_row = df.iloc[0]
+        header_indicators = ['year', 'month', 'ifrs', 'gaap', 'standard', 'product', 
+                            'platform', 'accounting', 'conclusion', 'preparer']
+        
+        # Check if any of the first few cells contain header-like text
+        found_indicators = 0
+        cols_to_check = min(5, len(first_row))  # Check first 5 columns max
+        
+        for i in range(cols_to_check):
+            if pd.notna(first_row.iloc[i]):
+                cell_value = str(first_row.iloc[i]).lower().strip()
+                if any(indicator in cell_value for indicator in header_indicators):
+                    found_indicators += 1
+        
+        # If we find 2 or more header indicators, it's likely a header row
+        return found_indicators >= 2
+        
+    except Exception as e:
+        print(f"[DEBUG] Error in header detection: {e}")
+        return False
+
 # ==============================================================================
 # --- Main Execution Logic ---
 # ==============================================================================
@@ -801,22 +859,21 @@ def main():
         
         print(f"Excel file loaded successfully: {len(df)} rows, {len(df.columns)} columns")
         
-        # We use positional indices (0-22 for columns A-W), so we need at least 23 columns
-        # Extra columns at the end don't matter since we won't access them
-        MIN_REQUIRED_COLUMNS = 23
-        if len(df.columns) < MIN_REQUIRED_COLUMNS:
-            print(f"[WARNING] Excel has {len(df.columns)} columns, expected at least {MIN_REQUIRED_COLUMNS}")
-            print("Some fields may be missing in the generated PDFs")
+        # Validate DataFrame structure
+        is_valid, validation_message = validate_dataframe_structure(df)
+        if not is_valid:
+            print(f"[CRITICAL ERROR] {validation_message}")
+            sys.exit(1)
         
-        # Check if first row is header
-        is_header_row = False
-        if len(df) > 0:
-            first_cell = str(df.iloc[0, 0]).lower()
-            # Also check other expected header values to be more certain
-            second_cell = str(df.iloc[0, 1]).lower() if len(df.columns) > 1 else ""
-            if first_cell == 'year' or (first_cell == 'year' and second_cell == 'month'):
-                is_header_row = True
-                print("First row appears to be a header row - will skip it")
+        print(f"DataFrame structure validation: {validation_message}")
+        print(f"DataFrame shape: {len(df)} rows × {len(df.columns)} columns")
+        
+        # Check if first row is header using improved detection
+        is_header_row = detect_header_row(df)
+        if is_header_row:
+            print("First row detected as header row - will skip it")
+        else:
+            print("First row appears to be data - will process all rows")
         
         # Process each row
         print(f"\n[4] Converting rows to PDF documents...")
@@ -835,9 +892,14 @@ def main():
             # Example: If header at row 1, first data row (index 1) is Excel row 2
             excel_row_number = index + 2 if is_header_row else index + 1
             
-            print(f"\nProcessing row {excel_row_number}...")
+            print(f"\nProcessing row {excel_row_number} (index {index})... [Columns available: {len(row)}]")
             
             try:
+                # Check if row has any data (not all NaN)
+                if row.notna().sum() == 0:
+                    print(f"Row {excel_row_number} is empty - skipping")
+                    continue
+                
                 # Create PDF from row
                 pdf_content = create_pdf_from_row(row, excel_row_number)
                 
@@ -852,6 +914,7 @@ def main():
                     
             except Exception as e:
                 print(f"[ERROR] Failed to process row {excel_row_number}: {e}")
+                print(f"[DEBUG] Error details: {type(e).__name__}: {str(e)}")
                 error_count += 1
         
         # Summary
