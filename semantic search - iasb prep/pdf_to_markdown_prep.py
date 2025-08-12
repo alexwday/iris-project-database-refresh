@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Stage 0: PDF to Markdown Conversion (NAS-Integrated Version)
+IASB Prep: PDF to Markdown Conversion for IASB Documents
 
 Purpose:
-Processes PDF files from a NAS directory and converts each page to markdown
-using Azure Document Intelligence. Stores the converted pages in a JSON file
-with metadata including file path, filename, page number, and cleaned content.
+Processes a single IASB PDF file from a NAS directory and converts each page to markdown
+using Azure Document Intelligence. Outputs a flat JSON array with document metadata
+and page content, removing only PageNumber tags while preserving other Azure tags.
 
-Input: PDF files in NAS_INPUT_PATH on the NAS drive
-Output: JSON file on the NAS containing page-by-page markdown conversions
-        (e.g., 'semantic_search/pipeline_output/stage0/stage0_markdown_pages.json')
+Input: Single PDF file in NAS_INPUT_PATH on the NAS drive (errors if multiple PDFs)
+Output: Flat JSON array on the NAS containing page-by-page records
+        (e.g., 'semantic_search/prep_output/iasb/iasb_prep_output.json')
 """
 
 import os
@@ -67,22 +67,21 @@ NAS_PARAMS = {
 }
 
 # --- Directory Paths (Relative to NAS Share) ---
-# Path on NAS where PDF files are stored (relative to share root)
-# This should match where Stage 1 expects markdown files
-NAS_INPUT_PATH = "semantic_search/1_chapters_md"  # TODO: Adjust to your PDF source folder
+# Path on NAS where IASB PDF file is stored (relative to share root)
+NAS_INPUT_PATH = "semantic_search/source_documents/iasb"  # TODO: Adjust to your IASB PDF location
 # Path on NAS where output will be saved (relative to share root)
-NAS_OUTPUT_PATH = "semantic_search/pipeline_output/stage0"
+NAS_OUTPUT_PATH = "semantic_search/prep_output/iasb"
 # Path on NAS where logs will be saved
-NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
-OUTPUT_FILENAME = "stage0_markdown_pages.json"
+NAS_LOG_PATH = "semantic_search/prep_output/iasb/logs"
+OUTPUT_FILENAME = "iasb_prep_output.json"
 
 # --- CA Bundle Configuration ---
 # Path on NAS where the SSL certificate is stored (relative to share root)
 NAS_SSL_CERT_PATH = "certificates/rbc-ca-bundle.cer"  # TODO: Adjust to match your NAS location
 SSL_LOCAL_PATH = "/tmp/rbc-ca-bundle.cer"  # Temp path for cert
 
-# --- Document ID ---
-DOCUMENT_ID = "EY_GUIDE_2024_PLACEHOLDER"  # TODO: Set appropriate document ID
+# --- Document Configuration ---
+DOCUMENT_ID = "IASB_STANDARDS_2024"  # TODO: Set appropriate document ID for this IASB document
 
 # --- Azure Document Intelligence Configuration (Hardcoded) ---
 AZURE_DI_ENDPOINT = "YOUR_DI_ENDPOINT"  # TODO: Replace with actual endpoint
@@ -256,44 +255,26 @@ def setup_logging():
     return temp_log_path
 
 # ==============================================================================
-# Azure Tag Removal Patterns
+# PageNumber Tag Removal (Preserving other Azure tags)
 # ==============================================================================
 
-# Patterns for Azure Document Intelligence tags to remove
-AZURE_TAG_PATTERNS = [
+# Patterns for PageNumber tags only
+PAGE_NUMBER_PATTERNS = [
     # Page number tags with various formats
     re.compile(r'<!--\s*PageNumber[:\s]*["\']?\d+["\']?\s*-->', re.IGNORECASE),
     re.compile(r'<!--\s*PageNumber[:\s]*Page\s*\d+\s*-->', re.IGNORECASE),
     re.compile(r'<!--\s*PageNumber="?\d+"?\s*-->', re.IGNORECASE),
-    
-    # Page footer tags
-    re.compile(r'<!--\s*PageFooter[:\s]*.*?-->', re.IGNORECASE | re.DOTALL),
-    
-    # Page header tags
-    re.compile(r'<!--\s*PageHeader[:\s]*.*?-->', re.IGNORECASE | re.DOTALL),
-    
-    # Page break tags
-    re.compile(r'<!--\s*PageBreak\s*-->', re.IGNORECASE),
-    
-    # Generic page tags
-    re.compile(r'<!--\s*Page[:\s]*\d+\s*-->', re.IGNORECASE),
-    
-    # Selected tags that Azure DI sometimes adds
-    re.compile(r':selected:', re.IGNORECASE),
-    
-    # Any other HTML comment tags containing "Page"
-    re.compile(r'<!--[^>]*Page[^>]*-->', re.IGNORECASE)
 ]
 
-def clean_azure_tags(content: str) -> str:
-    """Removes Azure Document Intelligence tags from markdown content."""
+def clean_page_number_tags(content: str) -> str:
+    """Removes only PageNumber tags from markdown content, preserving other Azure tags."""
     if not content:
         return content
     
     cleaned_content = content
     
-    # Apply all removal patterns
-    for pattern in AZURE_TAG_PATTERNS:
+    # Only remove PageNumber patterns
+    for pattern in PAGE_NUMBER_PATTERNS:
         cleaned_content = pattern.sub('', cleaned_content)
     
     # Clean up extra newlines created by tag removal
@@ -312,12 +293,11 @@ def extract_individual_pages(local_pdf_path: str, temp_dir: str) -> List[Dict]:
     """Extracts each page of a PDF as individual PDF files."""
     page_files = []
     base_name = os.path.splitext(os.path.basename(local_pdf_path))[0]
-    logging.info(f"Extracting individual pages from: {os.path.basename(local_pdf_path)}")
     
     try:
         reader = PdfReader(local_pdf_path)
         total_pages = len(reader.pages)
-        logging.info(f"Total pages to extract: {total_pages}")
+        logging.info(f"Extracting {total_pages} pages from PDF...")
         
         for page_num in range(total_pages):
             writer = PdfWriter()
@@ -335,7 +315,7 @@ def extract_individual_pages(local_pdf_path: str, temp_dir: str) -> List[Dict]:
                 'original_pdf': local_pdf_path
             })
         
-        logging.info(f"Successfully extracted {len(page_files)} individual pages")
+        logging.info(f"Page extraction complete: {len(page_files)} pages ready for processing")
         return page_files
         
     except Exception as e:
@@ -351,7 +331,9 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
     
     for attempt in range(max_retries):
         try:
-            logging.debug(f"DI Analysis Attempt {attempt + 1}/{max_retries} for {os.path.basename(page_file_path)}")
+            # Only log if there's a retry
+            if attempt > 0:
+                logging.debug(f"DI Analysis Retry {attempt + 1}/{max_retries} for {os.path.basename(page_file_path)}")
             
             with open(page_file_path, "rb") as f:
                 document_bytes = f.read()
@@ -363,24 +345,21 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
             )
             result = poller.result()
             
-            logging.debug(f"DI analysis successful on attempt {attempt + 1}")
             return result
             
         except Exception as e:
             last_exception = e
-            logging.warning(f"DI analysis attempt {attempt + 1} failed: {e}")
-            
             if attempt < max_retries - 1:
                 logging.debug(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                logging.error(f"DI analysis failed after {max_retries} attempts")
+                logging.error(f"DI analysis failed for page after {max_retries} attempts: {e}")
     
     return None
 
 def process_single_page(di_client: DocumentIntelligenceClient, 
                        page_info: Dict) -> Dict:
-    """Processes a single PDF page and returns cleaned markdown."""
+    """Processes a single PDF page and returns markdown with only PageNumber tags removed."""
     page_num = page_info['page_number']
     page_path = page_info['file_path']
     original_pdf = page_info['original_pdf']
@@ -390,8 +369,8 @@ def process_single_page(di_client: DocumentIntelligenceClient,
         result = analyze_document_with_di(di_client, page_path)
         
         if result and result.content:
-            # Clean the content of Azure tags
-            cleaned_content = clean_azure_tags(result.content)
+            # Clean only PageNumber tags, preserve other Azure tags
+            cleaned_content = clean_page_number_tags(result.content)
             
             return {
                 'success': True,
@@ -422,9 +401,12 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
                        page_files: List[Dict],
                        max_workers: int = 5) -> List[Dict]:
     """Processes multiple PDF pages concurrently."""
-    logging.info(f"Processing batch of {len(page_files)} pages (max {max_workers} concurrent)")
+    total_pages = len(page_files)
+    logging.info(f"Starting Azure DI processing for {total_pages} pages (max {max_workers} concurrent)")
     
     results = []
+    pages_processed = 0
+    failed_pages = []
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all page processing tasks
@@ -436,20 +418,27 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
         # Collect results as they complete
         for future in tqdm(as_completed(future_to_page), total=len(page_files), desc="Processing pages"):
             page_info = future_to_page[future]
+            pages_processed += 1
+            
             try:
                 result = future.result()
                 results.append(result)
                 
-                if result['success']:
-                    logging.debug(f"Page {result['page_number']} processed successfully")
-                else:
+                if not result['success']:
+                    failed_pages.append(result['page_number'])
                     logging.warning(f"Page {result['page_number']} failed: {result.get('error', 'Unknown error')}")
+                
+                # Progress update every 100 pages
+                if pages_processed % 100 == 0:
+                    logging.info(f"Progress: {pages_processed}/{total_pages} pages processed")
                     
             except Exception as e:
-                logging.error(f"Exception for page {page_info['page_number']}: {e}")
+                page_num = page_info['page_number']
+                failed_pages.append(page_num)
+                logging.error(f"Exception for page {page_num}: {e}")
                 results.append({
                     'success': False,
-                    'page_number': page_info['page_number'],
+                    'page_number': page_num,
                     'content': None,
                     'original_file': os.path.basename(page_info['original_pdf']),
                     'error': str(e)
@@ -459,7 +448,10 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
     results.sort(key=lambda x: x['page_number'])
     
     successful = sum(1 for r in results if r['success'])
-    logging.info(f"Batch processing completed: {successful}/{len(page_files)} pages successful")
+    logging.info(f"Azure DI processing completed: {successful}/{total_pages} pages successful")
+    
+    if failed_pages:
+        logging.warning(f"Failed pages: {failed_pages}")
     
     return results
 
@@ -527,12 +519,12 @@ def process_pdf_file(local_pdf_path: str,
 # Main Processing Function
 # ==============================================================================
 
-def run_stage0():
-    """Main function to execute Stage 0 processing with NAS integration."""
+def run_iasb_prep():
+    """Main function to execute IASB document preprocessing."""
     # Setup logging
     temp_log_path = setup_logging()
     
-    logging.info("--- Starting Stage 0: PDF to Markdown Conversion (NAS-Integrated) ---")
+    logging.info("--- Starting IASB Prep: PDF to Markdown Conversion ---")
     
     share_name = NAS_PARAMS["share"]
     output_path_relative = os.path.join(NAS_OUTPUT_PATH, OUTPUT_FILENAME).replace('\\', '/')
@@ -545,10 +537,15 @@ def run_stage0():
     pdf_files = [f for f in nas_files if f.filename.lower().endswith('.pdf') and not f.isDirectory]
     
     if not pdf_files:
-        logging.warning(f"No PDF files found in {share_name}/{NAS_INPUT_PATH}")
+        logging.error(f"No PDF files found in {share_name}/{NAS_INPUT_PATH}")
         return
     
-    logging.info(f"Found {len(pdf_files)} PDF files to process")
+    if len(pdf_files) > 1:
+        logging.error(f"Error: Multiple PDF files found ({len(pdf_files)}). IASB prep expects exactly one PDF file.")
+        logging.error(f"Files found: {[f.filename for f in pdf_files]}")
+        return
+    
+    logging.info(f"Found 1 PDF file to process: {pdf_files[0].filename}")
     
     # Initialize Azure DI client
     logging.info("Initializing Azure Document Intelligence client...")
@@ -562,51 +559,52 @@ def run_stage0():
         logging.error(f"Failed to initialize Azure DI client: {e}")
         return
     
-    # Process all PDF files
+    # Process the single PDF file
     all_pages_data = []
     
     # Create temporary directory for downloads and processing
     with tempfile.TemporaryDirectory() as temp_dir:
         logging.info(f"Using temporary directory: {temp_dir}")
         
-        for pdf_file_info in tqdm(pdf_files, desc="Processing PDFs"):
-            filename = pdf_file_info.filename
-            nas_file_path = os.path.join(NAS_INPUT_PATH, filename).replace('\\', '/')
-            
-            logging.info(f"Downloading {filename} from NAS...")
-            
-            # Download PDF from NAS to temp directory
-            local_pdf_path = download_from_nas(share_name, nas_file_path, temp_dir)
-            
-            if not local_pdf_path:
-                logging.error(f"Failed to download {filename} from NAS. Skipping.")
-                continue
-            
-            # Process this PDF
-            pdf_result = process_pdf_file(local_pdf_path, nas_file_path, filename, di_client, temp_dir)
-            
-            # Add pages to overall collection
-            for page in pdf_result['pages']:
-                all_pages_data.append({
-                    'document_id': DOCUMENT_ID,
-                    'filename': pdf_result['filename'],
-                    'filepath': nas_file_path,  # Store NAS path
-                    'page_number': page['page_number'],
-                    'content': page['content']
-                })
-            
-            if pdf_result['success']:
-                logging.info(f"Successfully processed {pdf_result['filename']}: "
-                           f"{pdf_result['successful_pages']}/{pdf_result['total_pages']} pages")
-            else:
-                logging.error(f"Failed to process {pdf_result['filename']}: {pdf_result.get('error', 'Unknown error')}")
-            
-            # Clean up downloaded PDF
-            try:
-                if os.path.exists(local_pdf_path):
-                    os.remove(local_pdf_path)
-            except OSError:
-                pass
+        # Process the single PDF
+        pdf_file_info = pdf_files[0]
+        filename = pdf_file_info.filename
+        nas_file_path = os.path.join(NAS_INPUT_PATH, filename).replace('\\', '/')
+        
+        logging.info(f"Downloading {filename} from NAS...")
+        
+        # Download PDF from NAS to temp directory
+        local_pdf_path = download_from_nas(share_name, nas_file_path, temp_dir)
+        
+        if not local_pdf_path:
+            logging.error(f"Failed to download {filename} from NAS. Exiting.")
+            return
+        
+        # Process this PDF
+        pdf_result = process_pdf_file(local_pdf_path, nas_file_path, filename, di_client, temp_dir)
+        
+        # Create flat JSON array with all fields per record
+        for page in pdf_result['pages']:
+            all_pages_data.append({
+                'document_id': DOCUMENT_ID,
+                'filename': pdf_result['filename'],
+                'filepath': nas_file_path,  # Store NAS path
+                'page_number': page['page_number'],
+                'content': page['content']
+            })
+        
+        if pdf_result['success']:
+            logging.info(f"Successfully processed {pdf_result['filename']}: "
+                       f"{pdf_result['successful_pages']}/{pdf_result['total_pages']} pages")
+        else:
+            logging.error(f"Failed to process {pdf_result['filename']}: {pdf_result.get('error', 'Unknown error')}")
+        
+        # Clean up downloaded PDF
+        try:
+            if os.path.exists(local_pdf_path):
+                os.remove(local_pdf_path)
+        except OSError:
+            pass
     
     # Save all pages data to NAS
     logging.info(f"Saving {len(all_pages_data)} pages to NAS: {share_name}/{output_path_relative}")
@@ -622,7 +620,7 @@ def run_stage0():
     
     # Upload log file to NAS
     try:
-        log_file_name = f"stage0_pdf_to_markdown_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file_name = f"iasb_prep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_path_relative = os.path.join(NAS_LOG_PATH, log_file_name).replace('\\', '/')
         
         # Close logging handlers to flush content
@@ -645,15 +643,16 @@ def run_stage0():
         print(f"Error handling log file: {e}")
     
     # Final summary
-    print("--- Stage 0 Summary ---")
-    print(f"PDF files processed: {len(pdf_files)}")
+    print("--- IASB Prep Summary ---")
+    print(f"Document ID: {DOCUMENT_ID}")
+    print(f"PDF file processed: {filename}")
     print(f"Total pages extracted: {len(all_pages_data)}")
     print(f"Output file: {share_name}/{output_path_relative}")
-    print("--- Stage 0 Completed ---")
+    print("--- IASB Prep Completed ---")
 
 # ==============================================================================
 # Main Execution Block
 # ==============================================================================
 
 if __name__ == "__main__":
-    run_stage0()
+    run_iasb_prep()

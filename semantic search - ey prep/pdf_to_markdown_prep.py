@@ -293,12 +293,11 @@ def extract_individual_pages(local_pdf_path: str, temp_dir: str) -> List[Dict]:
     """Extracts each page of a PDF as individual PDF files."""
     page_files = []
     base_name = os.path.splitext(os.path.basename(local_pdf_path))[0]
-    logging.info(f"Extracting individual pages from: {os.path.basename(local_pdf_path)}")
     
     try:
         reader = PdfReader(local_pdf_path)
         total_pages = len(reader.pages)
-        logging.info(f"Total pages to extract: {total_pages}")
+        logging.info(f"Extracting {total_pages} pages from PDF...")
         
         for page_num in range(total_pages):
             writer = PdfWriter()
@@ -316,7 +315,7 @@ def extract_individual_pages(local_pdf_path: str, temp_dir: str) -> List[Dict]:
                 'original_pdf': local_pdf_path
             })
         
-        logging.info(f"Successfully extracted {len(page_files)} individual pages")
+        logging.info(f"Page extraction complete: {len(page_files)} pages ready for processing")
         return page_files
         
     except Exception as e:
@@ -332,7 +331,9 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
     
     for attempt in range(max_retries):
         try:
-            logging.debug(f"DI Analysis Attempt {attempt + 1}/{max_retries} for {os.path.basename(page_file_path)}")
+            # Only log if there's a retry
+            if attempt > 0:
+                logging.debug(f"DI Analysis Retry {attempt + 1}/{max_retries} for {os.path.basename(page_file_path)}")
             
             with open(page_file_path, "rb") as f:
                 document_bytes = f.read()
@@ -344,18 +345,15 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
             )
             result = poller.result()
             
-            logging.debug(f"DI analysis successful on attempt {attempt + 1}")
             return result
             
         except Exception as e:
             last_exception = e
-            logging.warning(f"DI analysis attempt {attempt + 1} failed: {e}")
-            
             if attempt < max_retries - 1:
                 logging.debug(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                logging.error(f"DI analysis failed after {max_retries} attempts")
+                logging.error(f"DI analysis failed for page after {max_retries} attempts: {e}")
     
     return None
 
@@ -403,9 +401,12 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
                        page_files: List[Dict],
                        max_workers: int = 5) -> List[Dict]:
     """Processes multiple PDF pages concurrently."""
-    logging.info(f"Processing batch of {len(page_files)} pages (max {max_workers} concurrent)")
+    total_pages = len(page_files)
+    logging.info(f"Starting Azure DI processing for {total_pages} pages (max {max_workers} concurrent)")
     
     results = []
+    pages_processed = 0
+    failed_pages = []
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all page processing tasks
@@ -417,20 +418,27 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
         # Collect results as they complete
         for future in tqdm(as_completed(future_to_page), total=len(page_files), desc="Processing pages"):
             page_info = future_to_page[future]
+            pages_processed += 1
+            
             try:
                 result = future.result()
                 results.append(result)
                 
-                if result['success']:
-                    logging.debug(f"Page {result['page_number']} processed successfully")
-                else:
+                if not result['success']:
+                    failed_pages.append(result['page_number'])
                     logging.warning(f"Page {result['page_number']} failed: {result.get('error', 'Unknown error')}")
+                
+                # Progress update every 100 pages
+                if pages_processed % 100 == 0:
+                    logging.info(f"Progress: {pages_processed}/{total_pages} pages processed")
                     
             except Exception as e:
-                logging.error(f"Exception for page {page_info['page_number']}: {e}")
+                page_num = page_info['page_number']
+                failed_pages.append(page_num)
+                logging.error(f"Exception for page {page_num}: {e}")
                 results.append({
                     'success': False,
-                    'page_number': page_info['page_number'],
+                    'page_number': page_num,
                     'content': None,
                     'original_file': os.path.basename(page_info['original_pdf']),
                     'error': str(e)
@@ -440,7 +448,10 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
     results.sort(key=lambda x: x['page_number'])
     
     successful = sum(1 for r in results if r['success'])
-    logging.info(f"Batch processing completed: {successful}/{len(page_files)} pages successful")
+    logging.info(f"Azure DI processing completed: {successful}/{total_pages} pages successful")
+    
+    if failed_pages:
+        logging.warning(f"Failed pages: {failed_pages}")
     
     return results
 
