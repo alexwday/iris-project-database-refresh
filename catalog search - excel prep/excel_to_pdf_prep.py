@@ -21,6 +21,7 @@ from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
+from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak, 
                                 Table, TableStyle, KeepTogether, HRFlowable, 
                                 FrameBreak, KeepInFrame, Flowable, NextPageTemplate,
@@ -179,6 +180,19 @@ def create_pdf_from_row(row_data, row_number):
     """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
     
+    # Helper function to safely get value (simple version for header/footer)
+    def get_value_simple(data, col_index):
+        """Simple value getter for header/footer use"""
+        try:
+            if col_index < len(data):
+                value = data.iloc[col_index]
+                if pd.isna(value) or value is None:
+                    return None
+                return str(value).strip()
+        except:
+            pass
+        return None
+    
     # Get field values for header/footer use
     year = get_value_simple(row_data, 0)
     month = get_value_simple(row_data, 1)
@@ -224,18 +238,6 @@ def create_pdf_from_row(row_data, row_number):
             
             # Restore the state
             self.canv.restoreState()
-    
-    def get_value_simple(data, col_index):
-        """Simple value getter for header/footer use"""
-        try:
-            if col_index < len(data):
-                value = data.iloc[col_index]
-                if pd.isna(value) or value is None:
-                    return None
-                return str(value).strip()
-        except:
-            pass
-        return None
     
     # Create document with custom template
     doc = APGWikiDocTemplate(
