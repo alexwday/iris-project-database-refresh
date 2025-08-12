@@ -21,9 +21,10 @@ from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, KeepTogether
+from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER, TA_RIGHT
 from reportlab.lib import colors
+from reportlab.platypus import HRFlowable
 import openpyxl
 
 # ==============================================================================
@@ -59,49 +60,31 @@ smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
-# Excel column mapping organized by sections
-# Based on actual Excel columns A-W (0-22 in zero-based indexing)
-COLUMN_SECTIONS = {
-    'Date Information': {
-        'Year': 0,  # Column A
-        'Month': 1  # Column B
-    },
-    'Accounting Standards': {
-        'IFRS Standard': 2,  # Column C
-        'US GAAP': 3,  # Column D
-        'Other Related IFRS/US GAAP Standards': 4,  # Column E
-        'Financial Instruments Subtopic': 5  # Column F
-    },
-    'Product & Platform Details': {
-        'Related Product': 6,  # Column G
-        'Related Platform': 7  # Column H
-    },
-    'Issue Analysis & Conclusion': {
-        'Accounting Question/Issue': 8,  # Column I
-        'Conclusion Reached': 9,  # Column J
-        'Key Facts & Circumstances': 10  # Column K
-    },
-    'Guidance & References': {
-        'Specific Guidance Reference (Paragraph #s)': 11,  # Column L
-        'IFRS/US GAAP Differences Identified': 12,  # Column M
-        'Benchmarking': 13  # Column N
-    },
-    'Review & Approval': {
-        'Preparer': 14,  # Column O
-        'Stakeholder Concurrence Obtained': 15,  # Column P
-        'PwC Concurrence Obtained': 16,  # Column Q
-        'APG Senior Director Reviewer': 22  # Column W
-    },
-    'Documentation & Files': {
-        'Server Link': 17,  # Column R
-        'Key File Name(s)': 18  # Column S
-    },
-    'CAPM Updates': {
-        'CAPM Update Required/Completed': 19,  # Column T
-        'CAPM Publication Date': 20,  # Column U
-        'Related CAPM': 21  # Column V
-    }
-}
+# Excel column mapping (A-W, 0-22 in zero-based indexing)
+# Column layout based on actual Excel structure:
+# A: Year
+# B: Month  
+# C: IFRS standard
+# D: US GAAP
+# E: Other related IFRS/US GAAP standards
+# F: If related to financial instruments state subtopic
+# G: Related product
+# H: Related platform
+# I: Accounting question of the Issue
+# J: Conclusion reached
+# K: Key facts/circumstances leading to conclusion
+# L: Specific guidance reference paragraph #'s
+# M: IFRS/US GAAP differences identified
+# N: Benchmarking
+# O: Preparer
+# P: Stakeholder concurrence obtained
+# Q: PwC concurrence obtained
+# R: Server link
+# S: Key file name(s) on the server location
+# T: Is CAPM update required and completed
+# U: If CAPM was updated when was it published
+# V: Related CAPM
+# W: Initial and date of APG Senior Director reviewer
 
 # ==============================================================================
 # --- Helper Functions ---
@@ -191,148 +174,372 @@ def read_excel_from_nas(conn, share_name, file_path):
         return None
 
 def create_pdf_from_row(row_data, row_number):
-    """Create a PDF document from a single Excel row."""
+    """Create a professionally formatted PDF document from a single Excel row."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=18,
+        rightMargin=0.75*inch,
+        leftMargin=0.75*inch,
+        topMargin=0.75*inch,
+        bottomMargin=0.5*inch,
     )
     
     # Container for the 'Flowable' objects
     story = []
     
-    # Define styles for professional formatting
+    # Define professional color scheme
+    PRIMARY_COLOR = colors.HexColor('#1E3A8A')  # Deep navy blue
+    ACCENT_COLOR = colors.HexColor('#0D9488')   # Professional teal
+    BG_COLOR = colors.HexColor('#F8FAFC')       # Light gray
+    TEXT_COLOR = colors.HexColor('#374151')      # Charcoal
+    LINK_COLOR = colors.HexColor('#2563EB')      # Standard blue
+    
+    # Define comprehensive styles
     styles = getSampleStyleSheet()
+    
     title_style = ParagraphStyle(
-        'CustomTitle',
+        'Title',
         parent=styles['Heading1'],
         fontSize=18,
-        textColor=colors.HexColor('#1a1a1a'),
-        spaceAfter=20,
+        textColor=PRIMARY_COLOR,
+        spaceAfter=8,
         alignment=TA_LEFT,
         fontName='Helvetica-Bold'
     )
     
-    section_style = ParagraphStyle(
+    subtitle_style = ParagraphStyle(
+        'Subtitle',
+        parent=styles['Normal'],
+        fontSize=11,
+        textColor=ACCENT_COLOR,
+        spaceAfter=4,
+        alignment=TA_LEFT,
+        fontName='Helvetica'
+    )
+    
+    section_heading_style = ParagraphStyle(
         'SectionHeading',
-        parent=styles['Heading1'],
-        fontSize=13,
-        textColor=colors.HexColor('#003366'),
-        spaceAfter=10,
-        spaceBefore=16,
-        fontName='Helvetica-Bold',
-        borderWidth=0,
-        borderPadding=0,
-        borderColor=colors.HexColor('#003366'),
-        borderRadius=0
-    )
-    
-    heading_style = ParagraphStyle(
-        'CustomHeading',
         parent=styles['Heading2'],
-        fontSize=10,
-        textColor=colors.HexColor('#444444'),
-        spaceAfter=3,
+        fontSize=12,
+        textColor=PRIMARY_COLOR,
+        spaceAfter=8,
+        spaceBefore=12,
         fontName='Helvetica-Bold',
-        leftIndent=12
+        leftIndent=0,
+        alignment=TA_LEFT
     )
     
-    body_style = ParagraphStyle(
-        'CustomBody',
+    field_label_style = ParagraphStyle(
+        'FieldLabel',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=ACCENT_COLOR,
+        spaceAfter=2,
+        fontName='Helvetica-Bold',
+        leftIndent=0
+    )
+    
+    field_value_style = ParagraphStyle(
+        'FieldValue',
         parent=styles['BodyText'],
         fontSize=10,
         alignment=TA_LEFT,
-        spaceAfter=10,
-        leftIndent=24,
-        textColor=colors.HexColor('#333333')
+        spaceAfter=8,
+        leftIndent=0,
+        textColor=TEXT_COLOR,
+        fontName='Times-Roman'
+    )
+    
+    summary_box_style = ParagraphStyle(
+        'SummaryBox',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=TEXT_COLOR,
+        fontName='Helvetica',
+        leftIndent=6,
+        rightIndent=6,
+        alignment=TA_LEFT
+    )
+    
+    link_style = ParagraphStyle(
+        'LinkStyle',
+        parent=field_value_style,
+        textColor=LINK_COLOR,
+        fontSize=9,
+        fontName='Courier'
     )
     
     metadata_style = ParagraphStyle(
         'Metadata',
         parent=styles['Normal'],
-        fontSize=9,
-        textColor=colors.HexColor('#666666'),
-        spaceAfter=3
+        fontSize=8,
+        textColor=colors.HexColor('#9CA3AF'),
+        alignment=TA_RIGHT
     )
     
-    # Helper function to format value
+    # Helper function to safely get value
+    def get_value(col_index):
+        try:
+            if col_index < len(row_data):
+                value = row_data.iloc[col_index]
+                if pd.isna(value) or value is None:
+                    return None
+                value_str = str(value).strip()
+                if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
+                    return None
+                return value_str
+            return None
+        except:
+            return None
+    
+    # Helper function to format value for display
     def format_value(value):
-        if pd.isna(value) or value is None:
-            return "N/A"
-        value_str = str(value).strip()
-        if not value_str or value_str.lower() in ['nan', 'none', 'null']:
-            return "N/A"
-        # Escape HTML special characters for reportlab
-        value_str = value_str.replace('&', '&amp;')
-        value_str = value_str.replace('<', '&lt;')
-        value_str = value_str.replace('>', '&gt;')
-        value_str = value_str.replace('"', '&quot;')
-        value_str = value_str.replace("'", '&#39;')
-        # Handle newlines - preserve formatting
-        value_str = value_str.replace('\n', '<br/>')
-        # Handle multiple spaces
-        value_str = value_str.replace('  ', '&nbsp;&nbsp;')
-        return value_str
+        if value is None:
+            return ""
+        # Escape HTML special characters
+        value = str(value).replace('&', '&amp;')
+        value = value.replace('<', '&lt;')
+        value = value.replace('>', '&gt;')
+        value = value.replace('"', '&quot;')
+        value = value.replace("'", '&#39;')
+        # Handle newlines
+        value = value.replace('\n', '<br/>')
+        return value
     
-    # Add title with entry number
-    story.append(Paragraph(f"APG Wiki Entry #{row_number}", title_style))
+    # Get all field values
+    year = get_value(0)
+    month = get_value(1)
+    ifrs_standard = get_value(2)
+    us_gaap = get_value(3)
+    other_standards = get_value(4)
+    fi_subtopic = get_value(5)
+    related_product = get_value(6)
+    related_platform = get_value(7)
+    accounting_question = get_value(8)
+    conclusion = get_value(9)
+    key_facts = get_value(10)
+    guidance_ref = get_value(11)
+    differences = get_value(12)
+    benchmarking = get_value(13)
+    preparer = get_value(14)
+    stakeholder_concurrence = get_value(15)
+    pwc_concurrence = get_value(16)
+    server_link = get_value(17)
+    key_files = get_value(18)
+    capm_required = get_value(19)
+    capm_date = get_value(20)
+    related_capm = get_value(21)
+    apg_reviewer = get_value(22)
     
-    # Add metadata section
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", metadata_style))
-    story.append(Paragraph(f"Source: Internal APG Wiki Database", metadata_style))
-    story.append(Spacer(1, 0.3*inch))
+    # HEADER SECTION
+    story.append(Paragraph("APG Wiki Entry", title_style))
     
-    # Add a horizontal line for visual separation
-    from reportlab.platypus import HRFlowable
-    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
+    # Add date and entry number
+    date_str = f"{month or 'N/A'} {year or 'N/A'}"
+    story.append(Paragraph(f"Entry #{row_number} | {date_str}", subtitle_style))
+    
+    # Add reviewer info if available
+    if apg_reviewer:
+        story.append(Paragraph(f"Reviewed by: {format_value(apg_reviewer)}", metadata_style))
+    
     story.append(Spacer(1, 0.2*inch))
     
-    # Process each section with improved formatting
-    for section_name, fields in COLUMN_SECTIONS.items():
-        # Check if section has any non-empty values
-        has_content = False
-        for field_name, col_index in fields.items():
-            try:
-                value = row_data.iloc[col_index] if col_index < len(row_data) else None
-                if value and not pd.isna(value) and str(value).strip():
-                    has_content = True
-                    break
-            except:
-                pass
+    # EXECUTIVE SUMMARY BOX
+    summary_data = []
+    summary_row = []
+    
+    # Build standards summary
+    standards = []
+    if ifrs_standard:
+        standards.append(f"IFRS: {ifrs_standard}")
+    if us_gaap:
+        standards.append(f"US GAAP: {us_gaap}")
+    
+    if standards or related_product or related_platform:
+        summary_table = Table([
+            [Paragraph("<b>Standards & Products Summary</b>", field_label_style)],
+            [Paragraph(" | ".join(standards) if standards else "No standards specified", summary_box_style)],
+            [Paragraph(f"Product: {related_product or 'N/A'} | Platform: {related_platform or 'N/A'}", summary_box_style)]
+        ], colWidths=[6.5*inch])
         
-        # Only add section if it has content
-        if has_content:
-            # Add section heading with underline effect
-            story.append(Paragraph(f"<u>{section_name}</u>", section_style))
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), BG_COLOR),
+            ('BOX', (0, 0), (-1, -1), 1, PRIMARY_COLOR),
+            ('LEFTPADDING', (0, 0), (-1, -1), 12),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 0.2*inch))
+    
+    # CORE ISSUE ANALYSIS SECTION
+    if accounting_question or conclusion or key_facts:
+        story.append(HRFlowable(width="100%", thickness=0.5, color=ACCENT_COLOR))
+        story.append(Spacer(1, 0.1*inch))
+        story.append(Paragraph("Core Issue Analysis", section_heading_style))
+        
+        # Accounting Question
+        if accounting_question:
+            question_table = Table([
+                [Paragraph("<b>Accounting Question</b>", field_label_style)],
+                [Paragraph(format_value(accounting_question), field_value_style)]
+            ], colWidths=[6.5*inch])
             
-            # Process fields in this section
-            for field_name, col_index in fields.items():
-                # Get value from row safely
-                try:
-                    value = row_data.iloc[col_index] if col_index < len(row_data) else None
-                except (IndexError, KeyError):
-                    value = None
-                    print(f"[WARNING] Could not access column {col_index} for field '{field_name}'.")
-                
-                # Only add field if it has content
-                value_str = format_value(value)
-                if value_str != "Not specified" and value_str != "N/A":
-                    # Add field heading and content
-                    story.append(Paragraph(f"<b>{field_name}:</b>", heading_style))
-                    
-                    # Special formatting for certain fields
-                    if field_name in ['Server Link'] and value_str not in ["Not specified", "N/A"]:
-                        # Format as clickable link if it looks like a URL or path
-                        if value_str.startswith(('http://', 'https://', '\\\\', '//')):
-                            value_str = f'<link href="{value_str}" color="blue">{value_str}</link>'
-                    
-                    story.append(Paragraph(value_str, body_style))
-            
+            question_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), ACCENT_COLOR),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F0FDFA')),
+                ('BOX', (0, 0), (-1, -1), 0.5, ACCENT_COLOR),
+                ('LEFTPADDING', (0, 0), (-1, -1), 10),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(question_table)
             story.append(Spacer(1, 0.15*inch))
+        
+        # Key Facts
+        if key_facts:
+            story.append(Paragraph("<b>Key Facts & Circumstances</b>", field_label_style))
+            story.append(Paragraph(format_value(key_facts), field_value_style))
+            story.append(Spacer(1, 0.1*inch))
+        
+        # Conclusion
+        if conclusion:
+            conclusion_table = Table([
+                [Paragraph("<b>Conclusion Reached</b>", field_label_style)],
+                [Paragraph(format_value(conclusion), field_value_style)]
+            ], colWidths=[6.5*inch])
+            
+            conclusion_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), PRIMARY_COLOR),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#EFF6FF')),
+                ('BOX', (0, 0), (-1, -1), 0.5, PRIMARY_COLOR),
+                ('LEFTPADDING', (0, 0), (-1, -1), 10),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(conclusion_table)
+        
+        story.append(Spacer(1, 0.2*inch))
+    
+    # TECHNICAL DETAILS SECTION
+    if other_standards or fi_subtopic or guidance_ref or differences or benchmarking:
+        story.append(Paragraph("Technical Details & References", section_heading_style))
+        
+        technical_data = []
+        if other_standards:
+            technical_data.append([Paragraph("<b>Other Standards:</b>", field_label_style), 
+                                  Paragraph(format_value(other_standards), field_value_style)])
+        if fi_subtopic:
+            technical_data.append([Paragraph("<b>Financial Instruments:</b>", field_label_style), 
+                                  Paragraph(format_value(fi_subtopic), field_value_style)])
+        if guidance_ref:
+            technical_data.append([Paragraph("<b>Guidance References:</b>", field_label_style), 
+                                  Paragraph(format_value(guidance_ref), field_value_style)])
+        if differences:
+            technical_data.append([Paragraph("<b>IFRS/US GAAP Differences:</b>", field_label_style), 
+                                  Paragraph(format_value(differences), field_value_style)])
+        if benchmarking:
+            technical_data.append([Paragraph("<b>Benchmarking:</b>", field_label_style), 
+                                  Paragraph(format_value(benchmarking), field_value_style)])
+        
+        if technical_data:
+            technical_table = Table(technical_data, colWidths=[1.8*inch, 4.7*inch])
+            technical_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (0, -1), 0),
+                ('LEFTPADDING', (1, 0), (1, -1), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ]))
+            story.append(technical_table)
+            story.append(Spacer(1, 0.2*inch))
+    
+    # REVIEW & APPROVALS SECTION
+    if preparer or stakeholder_concurrence or pwc_concurrence:
+        story.append(Paragraph("Review & Approvals", section_heading_style))
+        
+        approval_data = []
+        if preparer:
+            approval_data.append(["Preparer", format_value(preparer)])
+        if stakeholder_concurrence:
+            status = "✓ Obtained" if stakeholder_concurrence.lower() in ['yes', 'y', 'true'] else format_value(stakeholder_concurrence)
+            approval_data.append(["Stakeholder Concurrence", status])
+        if pwc_concurrence:
+            status = "✓ Obtained" if pwc_concurrence.lower() in ['yes', 'y', 'true'] else format_value(pwc_concurrence)
+            approval_data.append(["PwC Concurrence", status])
+        
+        if approval_data:
+            # Convert to Paragraph objects for the table
+            approval_table_data = []
+            for label, value in approval_data:
+                approval_table_data.append([
+                    Paragraph(f"<b>{label}:</b>", field_label_style),
+                    Paragraph(value, field_value_style)
+                ])
+            
+            approval_table = Table(approval_table_data, colWidths=[2*inch, 4.5*inch])
+            approval_table.setStyle(TableStyle([
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E5E7EB')),
+                ('BACKGROUND', (0, 0), (0, -1), BG_COLOR),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            story.append(approval_table)
+            story.append(Spacer(1, 0.2*inch))
+    
+    # DOCUMENTATION & CAPM SECTION
+    if server_link or key_files or capm_required or capm_date or related_capm:
+        story.append(Paragraph("Documentation & CAPM", section_heading_style))
+        
+        if server_link:
+            story.append(Paragraph("<b>Server Link:</b>", field_label_style))
+            if server_link.startswith(('http://', 'https://', '\\\\', '//')):
+                link_text = f'<link href="{format_value(server_link)}" color="blue">{format_value(server_link)}</link>'
+                story.append(Paragraph(link_text, link_style))
+            else:
+                story.append(Paragraph(format_value(server_link), field_value_style))
+            story.append(Spacer(1, 0.05*inch))
+        
+        if key_files:
+            story.append(Paragraph("<b>Key Files:</b>", field_label_style))
+            story.append(Paragraph(format_value(key_files), field_value_style))
+            story.append(Spacer(1, 0.05*inch))
+        
+        # CAPM Information
+        if capm_required or capm_date or related_capm:
+            capm_data = []
+            if capm_required:
+                capm_data.append([Paragraph("<b>CAPM Update:</b>", field_label_style), 
+                                Paragraph(format_value(capm_required), field_value_style)])
+            if capm_date:
+                capm_data.append([Paragraph("<b>Publication Date:</b>", field_label_style), 
+                                Paragraph(format_value(capm_date), field_value_style)])
+            if related_capm:
+                capm_data.append([Paragraph("<b>Related CAPM:</b>", field_label_style), 
+                                Paragraph(format_value(related_capm), field_value_style)])
+            
+            if capm_data:
+                capm_table = Table(capm_data, colWidths=[1.5*inch, 5*inch])
+                capm_table.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('LEFTPADDING', (0, 0), (0, -1), 0),
+                    ('LEFTPADDING', (1, 0), (1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ]))
+                story.append(capm_table)
+    
+    # FOOTER
+    story.append(Spacer(1, 0.3*inch))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#E5E7EB')))
+    story.append(Spacer(1, 0.05*inch))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", metadata_style))
     
     # Build PDF
     doc.build(story)
