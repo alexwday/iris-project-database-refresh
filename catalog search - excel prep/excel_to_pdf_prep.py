@@ -232,21 +232,21 @@ def create_pdf_from_row(row_data, row_number):
         fontName='Helvetica'
     )
     
-    # Section header style for container titles
+    # Section header style for container titles - reduced size
     section_header_style = ParagraphStyle(
         'SectionHeader',
         parent=styles['Normal'],
-        fontSize=10,
+        fontSize=9,
         textColor=colors.white,
         fontName='Helvetica-Bold',
         alignment=TA_LEFT
     )
     
-    # Field styles for table cells
+    # Field styles for table cells - reduced sizes
     field_label_style = ParagraphStyle(
         'FieldLabel',
         parent=styles['Normal'],
-        fontSize=8,
+        fontSize=7,
         textColor=COLORS['text_secondary'],
         fontName='Helvetica-Bold',
         alignment=TA_LEFT
@@ -255,11 +255,11 @@ def create_pdf_from_row(row_data, row_number):
     field_value_style = ParagraphStyle(
         'FieldValue',
         parent=styles['Normal'],
-        fontSize=9,
+        fontSize=8,
         textColor=COLORS['text_primary'],
         fontName='Helvetica',
         alignment=TA_LEFT,
-        leading=11
+        leading=10
     )
     
     # Special styles
@@ -383,7 +383,9 @@ def create_pdf_from_row(row_data, row_number):
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
     ]))
     story.append(title_table)
-    story.append(Spacer(1, 0.1*inch))
+    story.append(Spacer(1, 0.05*inch))
+    
+    # PAGE 1: Four containers with smaller spacing
     
     # SECTION 1: STANDARDS & PRODUCTS (Container 1 - Blue theme)
     if ifrs_standard or us_gaap or other_standards or related_product or related_platform:
@@ -450,51 +452,9 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['primary']
             )
             story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
+            story.append(Spacer(1, 0.08*inch))
     
-    # SECTION 2: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
-    if accounting_question or conclusion or key_facts:
-        issue_data = []
-        
-        if accounting_question:
-            issue_data.append([
-                Paragraph("Accounting Question", field_label_style),
-                Paragraph(format_value(accounting_question), field_value_style)
-            ])
-        
-        if key_facts:
-            issue_data.append([
-                Paragraph("Key Facts & Circumstances", field_label_style),
-                Paragraph(format_value(key_facts), field_value_style)
-            ])
-        
-        if conclusion:
-            issue_data.append([
-                Paragraph("Conclusion Reached", field_label_style),
-                Paragraph(format_value(conclusion), field_value_style)
-            ])
-        
-        if issue_data:
-            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
-            issue_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
-            ]))
-            
-            container = create_container(
-                "Core Issue Analysis",
-                issue_table,
-                COLORS['container_2'],
-                COLORS['secondary']
-            )
-            story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
-    
-    # SECTION 3: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
+    # SECTION 2: TECHNICAL DETAILS & REFERENCES (Container 2 - Amber theme)
     if guidance_ref or differences or benchmarking:
         technical_data = []
         
@@ -522,8 +482,8 @@ def create_pdf_from_row(row_data, row_number):
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
             ]))
             
@@ -534,9 +494,9 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['warning']
             )
             story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
+            story.append(Spacer(1, 0.08*inch))
     
-    # SECTION 4: REVIEW & APPROVALS (Container 4 - Green theme)
+    # SECTION 3: REVIEW & APPROVALS (Container 3 - Green theme)
     if preparer or stakeholder_concurrence or pwc_concurrence or apg_reviewer:
         approval_data = []
         
@@ -581,8 +541,8 @@ def create_pdf_from_row(row_data, row_number):
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
             ]))
             
             container = create_container(
@@ -592,9 +552,9 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['success']
             )
             story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
+            story.append(Spacer(1, 0.08*inch))
     
-    # SECTION 5: DOCUMENTATION & CAPM (Container 5 - Purple theme)
+    # SECTION 4: DOCUMENTATION (Container 4 - Purple theme) - renamed from "Documentation & CAPM"
     if server_link or key_files or capm_required or capm_date or related_capm:
         doc_data = []
         
@@ -641,19 +601,62 @@ def create_pdf_from_row(row_data, row_number):
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), 4),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            container = create_container(
+                "Documentation",  # Changed from "Documentation & CAPM"
+                doc_table,
+                COLORS['container_5'],
+                COLORS['primary']
+            )
+            story.append(KeepTogether(container))
+    
+    # PAGE BREAK - Move to page 2 for Core Issue Analysis
+    story.append(PageBreak())
+    
+    # PAGE 2: CORE ISSUE ANALYSIS (Container 5 - Cyan theme)
+    if accounting_question or conclusion or key_facts:
+        issue_data = []
+        
+        if accounting_question:
+            issue_data.append([
+                Paragraph("Accounting Question", field_label_style),
+                Paragraph(format_value(accounting_question), field_value_style)
+            ])
+        
+        if key_facts:
+            issue_data.append([
+                Paragraph("Key Facts & Circumstances", field_label_style),
+                Paragraph(format_value(key_facts), field_value_style)
+            ])
+        
+        if conclusion:
+            issue_data.append([
+                Paragraph("Conclusion Reached", field_label_style),
+                Paragraph(format_value(conclusion), field_value_style)
+            ])
+        
+        if issue_data:
+            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
+            issue_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
             ]))
             
             container = create_container(
-                "Documentation & CAPM",
-                doc_table,
-                COLORS['container_5'],
-                COLORS['primary']
+                "Core Issue Analysis",
+                issue_table,
+                COLORS['container_2'],
+                COLORS['secondary']
             )
-            story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
+            story.append(container)
     
     # FOOTER
     story.append(Spacer(1, 0.2*inch))
