@@ -60,43 +60,46 @@ smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
 # Excel column mapping organized by sections
+# Based on actual Excel columns A-W (0-22 in zero-based indexing)
 COLUMN_SECTIONS = {
-    'Record Date': {
-        'Year': 0,
-        'Month': 1
+    'Date Information': {
+        'Year': 0,  # Column A
+        'Month': 1  # Column B
     },
-    'Standards and Classification': {
-        'Standards and Classification': 2,
-        'IFRS Standards': 3,
-        'US GAAP': 4,
-        'Other Related Standards': 5,
-        'Financial Instruments Topics': 6,
-        'Related Product': 7,
-        'Related Platform': 8
+    'Accounting Standards': {
+        'IFRS Standard': 2,  # Column C
+        'US GAAP': 3,  # Column D
+        'Other Related IFRS/US GAAP Standards': 4,  # Column E
+        'Financial Instruments Subtopic': 5  # Column F
     },
-    'Wiki Details': {
-        'Issue Analysis': 9,
-        'Question': 10,
-        'Conclusion': 11,
-        'Key Facts/Circumstances': 12
+    'Product & Platform Details': {
+        'Related Product': 6,  # Column G
+        'Related Platform': 7  # Column H
     },
-    'References and Documentation': {
-        'References and Documentation': 13,
-        'Guidance Reference': 14,
-        'IFRS/US GAAP Differences': 15,
-        'Benchmarking': 16,
-        'Server Link': 17,
-        'Key Files': 18,
-        'Related CAPM': 19
+    'Issue Analysis & Conclusion': {
+        'Accounting Question/Issue': 8,  # Column I
+        'Conclusion Reached': 9,  # Column J
+        'Key Facts & Circumstances': 10  # Column K
     },
-    'Review and Approval Information': {
-        'Review and Approval Information': 20,
-        'Preparer': 21,
-        'Stakeholder Concurrence': 22,
-        'PwC Concurrence': 23,
-        'APG Director Review': 24,
-        'CAPM Update Required': 25,
-        'CAPM Update Date': 26
+    'Guidance & References': {
+        'Specific Guidance Reference (Paragraph #s)': 11,  # Column L
+        'IFRS/US GAAP Differences Identified': 12,  # Column M
+        'Benchmarking': 13  # Column N
+    },
+    'Review & Approval': {
+        'Preparer': 14,  # Column O
+        'Stakeholder Concurrence Obtained': 15,  # Column P
+        'PwC Concurrence Obtained': 16,  # Column Q
+        'APG Senior Director Reviewer': 22  # Column W
+    },
+    'Documentation & Files': {
+        'Server Link': 17,  # Column R
+        'Key File Name(s)': 18  # Column S
+    },
+    'CAPM Updates': {
+        'CAPM Update Required/Completed': 19,  # Column T
+        'CAPM Publication Date': 20,  # Column U
+        'Related CAPM': 21  # Column V
     }
 }
 
@@ -202,97 +205,134 @@ def create_pdf_from_row(row_data, row_number):
     # Container for the 'Flowable' objects
     story = []
     
-    # Define styles
+    # Define styles for professional formatting
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
-        fontSize=16,
-        textColor=colors.HexColor('#003366'),
-        spaceAfter=12,
-        alignment=TA_LEFT
+        fontSize=18,
+        textColor=colors.HexColor('#1a1a1a'),
+        spaceAfter=20,
+        alignment=TA_LEFT,
+        fontName='Helvetica-Bold'
     )
     
     section_style = ParagraphStyle(
         'SectionHeading',
         parent=styles['Heading1'],
-        fontSize=14,
+        fontSize=13,
         textColor=colors.HexColor('#003366'),
-        spaceAfter=8,
-        spaceBefore=12,
-        fontName='Helvetica-Bold'
+        spaceAfter=10,
+        spaceBefore=16,
+        fontName='Helvetica-Bold',
+        borderWidth=0,
+        borderPadding=0,
+        borderColor=colors.HexColor('#003366'),
+        borderRadius=0
     )
     
     heading_style = ParagraphStyle(
         'CustomHeading',
         parent=styles['Heading2'],
-        fontSize=11,
-        textColor=colors.HexColor('#555555'),
-        spaceAfter=4,
+        fontSize=10,
+        textColor=colors.HexColor('#444444'),
+        spaceAfter=3,
         fontName='Helvetica-Bold',
-        leftIndent=15
+        leftIndent=12
     )
     
     body_style = ParagraphStyle(
         'CustomBody',
         parent=styles['BodyText'],
         fontSize=10,
-        alignment=TA_JUSTIFY,
-        spaceAfter=8,
-        leftIndent=30
+        alignment=TA_LEFT,
+        spaceAfter=10,
+        leftIndent=24,
+        textColor=colors.HexColor('#333333')
+    )
+    
+    metadata_style = ParagraphStyle(
+        'Metadata',
+        parent=styles['Normal'],
+        fontSize=9,
+        textColor=colors.HexColor('#666666'),
+        spaceAfter=3
     )
     
     # Helper function to format value
     def format_value(value):
         if pd.isna(value) or value is None:
-            return "Not specified"
+            return "N/A"
         value_str = str(value).strip()
-        if not value_str:
-            return "Not specified"
+        if not value_str or value_str.lower() in ['nan', 'none', 'null']:
+            return "N/A"
         # Escape HTML special characters for reportlab
         value_str = value_str.replace('&', '&amp;')
         value_str = value_str.replace('<', '&lt;')
         value_str = value_str.replace('>', '&gt;')
         value_str = value_str.replace('"', '&quot;')
         value_str = value_str.replace("'", '&#39;')
-        # Handle newlines
+        # Handle newlines - preserve formatting
         value_str = value_str.replace('\n', '<br/>')
+        # Handle multiple spaces
+        value_str = value_str.replace('  ', '&nbsp;&nbsp;')
         return value_str
     
-    # Add title
-    story.append(Paragraph(f"APG Wiki - Row {row_number}", title_style))
-    story.append(Spacer(1, 0.2*inch))
+    # Add title with entry number
+    story.append(Paragraph(f"APG Wiki Entry #{row_number}", title_style))
     
-    # Add metadata
-    story.append(Paragraph(f"<font size=9>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</font>", styles['Normal']))
-    story.append(Paragraph(f"<font size=9>Source: Internal Wiki Excel Data</font>", styles['Normal']))
+    # Add metadata section
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", metadata_style))
+    story.append(Paragraph(f"Source: Internal APG Wiki Database", metadata_style))
     story.append(Spacer(1, 0.3*inch))
     
-    # Process each section
+    # Add a horizontal line for visual separation
+    from reportlab.platypus import HRFlowable
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
+    story.append(Spacer(1, 0.2*inch))
+    
+    # Process each section with improved formatting
     for section_name, fields in COLUMN_SECTIONS.items():
-        # Add section heading
-        story.append(Paragraph(section_name, section_style))
-        
-        # Process fields in this section
+        # Check if section has any non-empty values
+        has_content = False
         for field_name, col_index in fields.items():
-            # Skip section title fields (they're redundant with section headers)
-            if field_name in ['Standards and Classification', 'References and Documentation', 'Review and Approval Information']:
-                continue
-            
-            # Get value from row safely
             try:
                 value = row_data.iloc[col_index] if col_index < len(row_data) else None
-            except (IndexError, KeyError):
-                value = None
-                print(f"[WARNING] Could not access column {col_index} for field '{field_name}'.")
-            
-            value_str = format_value(value)
-            
-            # Add field heading and content
-            story.append(Paragraph(field_name, heading_style))
-            story.append(Paragraph(value_str, body_style))
+                if value and not pd.isna(value) and str(value).strip():
+                    has_content = True
+                    break
+            except:
+                pass
         
-        story.append(Spacer(1, 0.1*inch))
+        # Only add section if it has content
+        if has_content:
+            # Add section heading with underline effect
+            story.append(Paragraph(f"<u>{section_name}</u>", section_style))
+            
+            # Process fields in this section
+            for field_name, col_index in fields.items():
+                # Get value from row safely
+                try:
+                    value = row_data.iloc[col_index] if col_index < len(row_data) else None
+                except (IndexError, KeyError):
+                    value = None
+                    print(f"[WARNING] Could not access column {col_index} for field '{field_name}'.")
+                
+                # Only add field if it has content
+                value_str = format_value(value)
+                if value_str != "Not specified" and value_str != "N/A":
+                    # Add field heading and content
+                    story.append(Paragraph(f"<b>{field_name}:</b>", heading_style))
+                    
+                    # Special formatting for certain fields
+                    if field_name in ['Server Link'] and value_str not in ["Not specified", "N/A"]:
+                        # Format as clickable link if it looks like a URL or path
+                        if value_str.startswith(('http://', 'https://', '\\\\', '//')):
+                            value_str = f'<link href="{value_str}" color="blue">{value_str}</link>'
+                    
+                    story.append(Paragraph(value_str, body_style))
+            
+            story.append(Spacer(1, 0.15*inch))
     
     # Build PDF
     doc.build(story)
@@ -362,9 +402,9 @@ def main():
         
         print(f"Excel file loaded successfully: {len(df)} rows, {len(df.columns)} columns")
         
-        # We use positional indices (0-26), so we only need to ensure we have enough columns
+        # We use positional indices (0-22 for columns A-W), so we need at least 23 columns
         # Extra columns at the end don't matter since we won't access them
-        MIN_REQUIRED_COLUMNS = 27
+        MIN_REQUIRED_COLUMNS = 23
         if len(df.columns) < MIN_REQUIRED_COLUMNS:
             print(f"[WARNING] Excel has {len(df.columns)} columns, expected at least {MIN_REQUIRED_COLUMNS}")
             print("Some fields may be missing in the generated PDFs")
