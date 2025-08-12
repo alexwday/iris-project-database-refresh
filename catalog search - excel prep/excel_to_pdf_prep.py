@@ -21,10 +21,10 @@ from datetime import datetime
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, KeepTogether
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak, 
+                                Table, TableStyle, KeepTogether, HRFlowable, 
+                                FrameBreak, KeepInFrame)
 from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER, TA_RIGHT
-from reportlab.lib import colors
-from reportlab.platypus import HRFlowable
 import openpyxl
 
 # ==============================================================================
@@ -174,108 +174,108 @@ def read_excel_from_nas(conn, share_name, file_path):
         return None
 
 def create_pdf_from_row(row_data, row_number):
-    """Create a professionally formatted PDF document from a single Excel row."""
+    """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        rightMargin=0.75*inch,
-        leftMargin=0.75*inch,
-        topMargin=0.75*inch,
+        rightMargin=0.5*inch,
+        leftMargin=0.5*inch,
+        topMargin=0.5*inch,
         bottomMargin=0.5*inch,
     )
     
     # Container for the 'Flowable' objects
     story = []
     
-    # Define professional color scheme
-    PRIMARY_COLOR = colors.HexColor('#1E3A8A')  # Deep navy blue
-    ACCENT_COLOR = colors.HexColor('#0D9488')   # Professional teal
-    BG_COLOR = colors.HexColor('#F8FAFC')       # Light gray
-    TEXT_COLOR = colors.HexColor('#374151')      # Charcoal
-    LINK_COLOR = colors.HexColor('#2563EB')      # Standard blue
+    # Define sophisticated color palette
+    # Using a professional color scheme with good contrast
+    COLORS = {
+        'primary_dark': colors.HexColor('#1e293b'),     # Slate 800 - Main headers
+        'primary': colors.HexColor('#334155'),          # Slate 700 - Section headers
+        'secondary': colors.HexColor('#0891b2'),        # Cyan 600 - Accents
+        'accent': colors.HexColor('#0e7490'),           # Cyan 700 - Important items
+        'success': colors.HexColor('#059669'),          # Emerald 600 - Approvals
+        'warning': colors.HexColor('#d97706'),          # Amber 600 - Warnings
+        'text_primary': colors.HexColor('#1f2937'),     # Gray 800 - Main text
+        'text_secondary': colors.HexColor('#6b7280'),   # Gray 500 - Secondary text
+        'border': colors.HexColor('#e5e7eb'),           # Gray 200 - Borders
+        'bg_light': colors.HexColor('#f9fafb'),         # Gray 50 - Light backgrounds
+        'bg_section': colors.HexColor('#f3f4f6'),       # Gray 100 - Section backgrounds
+        'container_1': colors.HexColor('#eff6ff'),      # Blue 50 - Standards container
+        'container_2': colors.HexColor('#f0fdfa'),      # Cyan 50 - Issue container
+        'container_3': colors.HexColor('#fef3c7'),      # Amber 100 - Technical container
+        'container_4': colors.HexColor('#ecfdf5'),      # Emerald 50 - Approval container
+        'container_5': colors.HexColor('#fdf4ff'),      # Purple 50 - Documentation container
+    }
     
     # Define comprehensive styles
     styles = getSampleStyleSheet()
     
-    title_style = ParagraphStyle(
-        'Title',
+    # Title styles
+    title_left_style = ParagraphStyle(
+        'TitleLeft',
         parent=styles['Heading1'],
-        fontSize=18,
-        textColor=PRIMARY_COLOR,
-        spaceAfter=8,
+        fontSize=14,
+        textColor=COLORS['primary_dark'],
         alignment=TA_LEFT,
         fontName='Helvetica-Bold'
     )
     
-    subtitle_style = ParagraphStyle(
-        'Subtitle',
+    title_right_style = ParagraphStyle(
+        'TitleRight',
         parent=styles['Normal'],
-        fontSize=11,
-        textColor=ACCENT_COLOR,
-        spaceAfter=4,
-        alignment=TA_LEFT,
+        fontSize=12,
+        textColor=COLORS['text_secondary'],
+        alignment=TA_RIGHT,
         fontName='Helvetica'
     )
     
-    section_heading_style = ParagraphStyle(
-        'SectionHeading',
-        parent=styles['Heading2'],
-        fontSize=12,
-        textColor=PRIMARY_COLOR,
-        spaceAfter=8,
-        spaceBefore=12,
+    # Section header style for container titles
+    section_header_style = ParagraphStyle(
+        'SectionHeader',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.white,
         fontName='Helvetica-Bold',
-        leftIndent=0,
         alignment=TA_LEFT
     )
     
+    # Field styles for table cells
     field_label_style = ParagraphStyle(
         'FieldLabel',
         parent=styles['Normal'],
-        fontSize=9,
-        textColor=ACCENT_COLOR,
-        spaceAfter=2,
+        fontSize=8,
+        textColor=COLORS['text_secondary'],
         fontName='Helvetica-Bold',
-        leftIndent=0
+        alignment=TA_LEFT
     )
     
     field_value_style = ParagraphStyle(
         'FieldValue',
-        parent=styles['BodyText'],
-        fontSize=10,
-        alignment=TA_LEFT,
-        spaceAfter=8,
-        leftIndent=0,
-        textColor=TEXT_COLOR,
-        fontName='Times-Roman'
-    )
-    
-    summary_box_style = ParagraphStyle(
-        'SummaryBox',
         parent=styles['Normal'],
-        fontSize=10,
-        textColor=TEXT_COLOR,
+        fontSize=9,
+        textColor=COLORS['text_primary'],
         fontName='Helvetica',
-        leftIndent=6,
-        rightIndent=6,
-        alignment=TA_LEFT
+        alignment=TA_LEFT,
+        leading=11
     )
     
+    # Special styles
     link_style = ParagraphStyle(
         'LinkStyle',
         parent=field_value_style,
-        textColor=LINK_COLOR,
-        fontSize=9,
+        textColor=COLORS['secondary'],
+        fontSize=8,
         fontName='Courier'
     )
     
-    metadata_style = ParagraphStyle(
-        'Metadata',
+    footer_style = ParagraphStyle(
+        'Footer',
         parent=styles['Normal'],
-        fontSize=8,
-        textColor=colors.HexColor('#9CA3AF'),
-        alignment=TA_RIGHT
+        fontSize=7,
+        textColor=COLORS['text_secondary'],
+        alignment=TA_CENTER
     )
     
     # Helper function to safely get value
@@ -307,6 +307,39 @@ def create_pdf_from_row(row_data, row_number):
         value = value.replace('\n', '<br/>')
         return value
     
+    # Helper function to create a containerized section
+    def create_container(title, content_table, bg_color, header_color):
+        """Creates a containerized section with header and content."""
+        # Create header row
+        header = Table(
+            [[Paragraph(title, section_header_style)]],
+            colWidths=[7*inch]
+        )
+        header.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), header_color),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        
+        # Combine header and content
+        container_data = [[header], [content_table]]
+        container = Table(container_data, colWidths=[7*inch])
+        container.setStyle(TableStyle([
+            ('BACKGROUND', (0, 1), (-1, -1), bg_color),
+            ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
+            ('LEFTPADDING', (0, 1), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 1), (-1, -1), 8),
+            ('TOPPADDING', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (-1, 0), 0),
+            ('RIGHTPADDING', (0, 0), (-1, 0), 0),
+            ('TOPPADDING', (0, 0), (-1, 0), 0),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 0),
+        ]))
+        return container
+    
     # Get all field values
     year = get_value(0)
     month = get_value(1)
@@ -332,214 +365,300 @@ def create_pdf_from_row(row_data, row_number):
     related_capm = get_value(21)
     apg_reviewer = get_value(22)
     
-    # HEADER SECTION
-    story.append(Paragraph("APG Wiki Entry", title_style))
+    # TITLE SECTION - Single line with APG Wiki on left, Row # and date on right
+    date_str = f"{month or ''} {year or ''}"
+    title_table = Table([
+        [
+            Paragraph("APG Wiki", title_left_style),
+            Paragraph(f"Row #{row_number} | {date_str}", title_right_style)
+        ]
+    ], colWidths=[3.5*inch, 3.5*inch])
     
-    # Add date and entry number
-    date_str = f"{month or 'N/A'} {year or 'N/A'}"
-    story.append(Paragraph(f"Entry #{row_number} | {date_str}", subtitle_style))
+    title_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(title_table)
+    story.append(Spacer(1, 0.1*inch))
     
-    # Add reviewer info if available
-    if apg_reviewer:
-        story.append(Paragraph(f"Reviewed by: {format_value(apg_reviewer)}", metadata_style))
-    
-    story.append(Spacer(1, 0.2*inch))
-    
-    # EXECUTIVE SUMMARY BOX
-    summary_data = []
-    summary_row = []
-    
-    # Build standards summary
-    standards = []
-    if ifrs_standard:
-        standards.append(f"IFRS: {ifrs_standard}")
-    if us_gaap:
-        standards.append(f"US GAAP: {us_gaap}")
-    
-    if standards or related_product or related_platform:
-        summary_table = Table([
-            [Paragraph("<b>Standards & Products Summary</b>", field_label_style)],
-            [Paragraph(" | ".join(standards) if standards else "No standards specified", summary_box_style)],
-            [Paragraph(f"Product: {related_product or 'N/A'} | Platform: {related_platform or 'N/A'}", summary_box_style)]
-        ], colWidths=[6.5*inch])
+    # SECTION 1: STANDARDS & PRODUCTS (Container 1 - Blue theme)
+    if ifrs_standard or us_gaap or other_standards or related_product or related_platform:
+        standards_data = []
         
-        summary_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), BG_COLOR),
-            ('BOX', (0, 0), (-1, -1), 1, PRIMARY_COLOR),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ]))
-        story.append(summary_table)
-        story.append(Spacer(1, 0.2*inch))
-    
-    # CORE ISSUE ANALYSIS SECTION
-    if accounting_question or conclusion or key_facts:
-        story.append(HRFlowable(width="100%", thickness=0.5, color=ACCENT_COLOR))
-        story.append(Spacer(1, 0.1*inch))
-        story.append(Paragraph("Core Issue Analysis", section_heading_style))
+        # Row 1: IFRS and US GAAP
+        row = []
+        if ifrs_standard:
+            row.append([Paragraph("IFRS Standard", field_label_style),
+                       Paragraph(format_value(ifrs_standard), field_value_style)])
+        if us_gaap:
+            row.append([Paragraph("US GAAP", field_label_style),
+                       Paragraph(format_value(us_gaap), field_value_style)])
+        if row:
+            standards_data.append(row)
         
-        # Accounting Question
-        if accounting_question:
-            question_table = Table([
-                [Paragraph("<b>Accounting Question</b>", field_label_style)],
-                [Paragraph(format_value(accounting_question), field_value_style)]
-            ], colWidths=[6.5*inch])
-            
-            question_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), ACCENT_COLOR),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F0FDFA')),
-                ('BOX', (0, 0), (-1, -1), 0.5, ACCENT_COLOR),
-                ('LEFTPADDING', (0, 0), (-1, -1), 10),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ]))
-            story.append(question_table)
-            story.append(Spacer(1, 0.15*inch))
-        
-        # Key Facts
-        if key_facts:
-            story.append(Paragraph("<b>Key Facts & Circumstances</b>", field_label_style))
-            story.append(Paragraph(format_value(key_facts), field_value_style))
-            story.append(Spacer(1, 0.1*inch))
-        
-        # Conclusion
-        if conclusion:
-            conclusion_table = Table([
-                [Paragraph("<b>Conclusion Reached</b>", field_label_style)],
-                [Paragraph(format_value(conclusion), field_value_style)]
-            ], colWidths=[6.5*inch])
-            
-            conclusion_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), PRIMARY_COLOR),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#EFF6FF')),
-                ('BOX', (0, 0), (-1, -1), 0.5, PRIMARY_COLOR),
-                ('LEFTPADDING', (0, 0), (-1, -1), 10),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 10),
-                ('TOPPADDING', (0, 0), (-1, -1), 6),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-            ]))
-            story.append(conclusion_table)
-        
-        story.append(Spacer(1, 0.2*inch))
-    
-    # TECHNICAL DETAILS SECTION
-    if other_standards or fi_subtopic or guidance_ref or differences or benchmarking:
-        story.append(Paragraph("Technical Details & References", section_heading_style))
-        
-        technical_data = []
+        # Row 2: Other standards and FI subtopic
+        row = []
         if other_standards:
-            technical_data.append([Paragraph("<b>Other Standards:</b>", field_label_style), 
-                                  Paragraph(format_value(other_standards), field_value_style)])
+            row.append([Paragraph("Other Standards", field_label_style),
+                       Paragraph(format_value(other_standards), field_value_style)])
         if fi_subtopic:
-            technical_data.append([Paragraph("<b>Financial Instruments:</b>", field_label_style), 
-                                  Paragraph(format_value(fi_subtopic), field_value_style)])
+            row.append([Paragraph("FI Subtopic", field_label_style),
+                       Paragraph(format_value(fi_subtopic), field_value_style)])
+        if row:
+            standards_data.append(row)
+        
+        # Row 3: Product and Platform
+        row = []
+        if related_product:
+            row.append([Paragraph("Related Product", field_label_style),
+                       Paragraph(format_value(related_product), field_value_style)])
+        if related_platform:
+            row.append([Paragraph("Related Platform", field_label_style),
+                       Paragraph(format_value(related_platform), field_value_style)])
+        if row:
+            standards_data.append(row)
+        
+        # Create the standards table with proper columns
+        if standards_data:
+            # Flatten the nested structure for the table
+            table_data = []
+            for row in standards_data:
+                if len(row) == 1:
+                    # Single item in row - span both columns
+                    table_data.append([row[0][0], row[0][1], '', ''])
+                elif len(row) == 2:
+                    # Two items in row
+                    table_data.append([row[0][0], row[0][1], row[1][0], row[1][1]])
+            
+            standards_table = Table(table_data, colWidths=[1.2*inch, 2.3*inch, 1.2*inch, 2.3*inch])
+            standards_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 2),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ]))
+            
+            container = create_container(
+                "Standards & Products",
+                standards_table,
+                COLORS['container_1'],
+                COLORS['primary']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 2: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
+    if accounting_question or conclusion or key_facts:
+        issue_data = []
+        
+        if accounting_question:
+            issue_data.append([
+                Paragraph("Accounting Question", field_label_style),
+                Paragraph(format_value(accounting_question), field_value_style)
+            ])
+        
+        if key_facts:
+            issue_data.append([
+                Paragraph("Key Facts & Circumstances", field_label_style),
+                Paragraph(format_value(key_facts), field_value_style)
+            ])
+        
+        if conclusion:
+            issue_data.append([
+                Paragraph("Conclusion Reached", field_label_style),
+                Paragraph(format_value(conclusion), field_value_style)
+            ])
+        
+        if issue_data:
+            issue_table = Table(issue_data, colWidths=[1.5*inch, 5.5*inch])
+            issue_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            container = create_container(
+                "Core Issue Analysis",
+                issue_table,
+                COLORS['container_2'],
+                COLORS['secondary']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 3: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
+    if guidance_ref or differences or benchmarking:
+        technical_data = []
+        
         if guidance_ref:
-            technical_data.append([Paragraph("<b>Guidance References:</b>", field_label_style), 
-                                  Paragraph(format_value(guidance_ref), field_value_style)])
+            technical_data.append([
+                Paragraph("Guidance References", field_label_style),
+                Paragraph(format_value(guidance_ref), field_value_style)
+            ])
+        
         if differences:
-            technical_data.append([Paragraph("<b>IFRS/US GAAP Differences:</b>", field_label_style), 
-                                  Paragraph(format_value(differences), field_value_style)])
+            technical_data.append([
+                Paragraph("IFRS/US GAAP Differences", field_label_style),
+                Paragraph(format_value(differences), field_value_style)
+            ])
+        
         if benchmarking:
-            technical_data.append([Paragraph("<b>Benchmarking:</b>", field_label_style), 
-                                  Paragraph(format_value(benchmarking), field_value_style)])
+            technical_data.append([
+                Paragraph("Benchmarking", field_label_style),
+                Paragraph(format_value(benchmarking), field_value_style)
+            ])
         
         if technical_data:
-            technical_table = Table(technical_data, colWidths=[1.8*inch, 4.7*inch])
+            technical_table = Table(technical_data, colWidths=[1.5*inch, 5.5*inch])
             technical_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (0, -1), 0),
-                ('LEFTPADDING', (1, 0), (1, -1), 12),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
             ]))
-            story.append(technical_table)
-            story.append(Spacer(1, 0.2*inch))
-    
-    # REVIEW & APPROVALS SECTION
-    if preparer or stakeholder_concurrence or pwc_concurrence:
-        story.append(Paragraph("Review & Approvals", section_heading_style))
-        
-        approval_data = []
-        if preparer:
-            approval_data.append(["Preparer", format_value(preparer)])
-        if stakeholder_concurrence:
-            status = "✓ Obtained" if stakeholder_concurrence.lower() in ['yes', 'y', 'true'] else format_value(stakeholder_concurrence)
-            approval_data.append(["Stakeholder Concurrence", status])
-        if pwc_concurrence:
-            status = "✓ Obtained" if pwc_concurrence.lower() in ['yes', 'y', 'true'] else format_value(pwc_concurrence)
-            approval_data.append(["PwC Concurrence", status])
-        
-        if approval_data:
-            # Convert to Paragraph objects for the table
-            approval_table_data = []
-            for label, value in approval_data:
-                approval_table_data.append([
-                    Paragraph(f"<b>{label}:</b>", field_label_style),
-                    Paragraph(value, field_value_style)
-                ])
             
-            approval_table = Table(approval_table_data, colWidths=[2*inch, 4.5*inch])
+            container = create_container(
+                "Technical Details & References",
+                technical_table,
+                COLORS['container_3'],
+                COLORS['warning']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 4: REVIEW & APPROVALS (Container 4 - Green theme)
+    if preparer or stakeholder_concurrence or pwc_concurrence or apg_reviewer:
+        approval_data = []
+        
+        # Create two-column layout for approvals
+        row1 = []
+        row2 = []
+        
+        if preparer:
+            row1.append([Paragraph("Preparer", field_label_style),
+                        Paragraph(format_value(preparer), field_value_style)])
+        
+        if apg_reviewer:
+            row1.append([Paragraph("APG Senior Director", field_label_style),
+                        Paragraph(format_value(apg_reviewer), field_value_style)])
+        
+        if stakeholder_concurrence:
+            status = "✓ Yes" if stakeholder_concurrence.lower() in ['yes', 'y', 'true', '1'] else format_value(stakeholder_concurrence)
+            row2.append([Paragraph("Stakeholder Concurrence", field_label_style),
+                        Paragraph(status, field_value_style)])
+        
+        if pwc_concurrence:
+            status = "✓ Yes" if pwc_concurrence.lower() in ['yes', 'y', 'true', '1'] else format_value(pwc_concurrence)
+            row2.append([Paragraph("PwC Concurrence", field_label_style),
+                        Paragraph(status, field_value_style)])
+        
+        # Build the table data
+        table_data = []
+        if row1:
+            if len(row1) == 1:
+                table_data.append([row1[0][0], row1[0][1], '', ''])
+            elif len(row1) == 2:
+                table_data.append([row1[0][0], row1[0][1], row1[1][0], row1[1][1]])
+        if row2:
+            if len(row2) == 1:
+                table_data.append([row2[0][0], row2[0][1], '', ''])
+            elif len(row2) == 2:
+                table_data.append([row2[0][0], row2[0][1], row2[1][0], row2[1][1]])
+        
+        if table_data:
+            approval_table = Table(table_data, colWidths=[1.5*inch, 2*inch, 1.5*inch, 2*inch])
             approval_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E5E7EB')),
-                ('BACKGROUND', (0, 0), (0, -1), BG_COLOR),
-                ('LEFTPADDING', (0, 0), (-1, -1), 8),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ]))
-            story.append(approval_table)
-            story.append(Spacer(1, 0.2*inch))
+            
+            container = create_container(
+                "Review & Approvals",
+                approval_table,
+                COLORS['container_4'],
+                COLORS['success']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
     
-    # DOCUMENTATION & CAPM SECTION
+    # SECTION 5: DOCUMENTATION & CAPM (Container 5 - Purple theme)
     if server_link or key_files or capm_required or capm_date or related_capm:
-        story.append(Paragraph("Documentation & CAPM", section_heading_style))
+        doc_data = []
         
         if server_link:
-            story.append(Paragraph("<b>Server Link:</b>", field_label_style))
             if server_link.startswith(('http://', 'https://', '\\\\', '//')):
                 link_text = f'<link href="{format_value(server_link)}" color="blue">{format_value(server_link)}</link>'
-                story.append(Paragraph(link_text, link_style))
+                doc_data.append([
+                    Paragraph("Server Link", field_label_style),
+                    Paragraph(link_text, link_style)
+                ])
             else:
-                story.append(Paragraph(format_value(server_link), field_value_style))
-            story.append(Spacer(1, 0.05*inch))
+                doc_data.append([
+                    Paragraph("Server Link", field_label_style),
+                    Paragraph(format_value(server_link), field_value_style)
+                ])
         
         if key_files:
-            story.append(Paragraph("<b>Key Files:</b>", field_label_style))
-            story.append(Paragraph(format_value(key_files), field_value_style))
-            story.append(Spacer(1, 0.05*inch))
+            doc_data.append([
+                Paragraph("Key Files", field_label_style),
+                Paragraph(format_value(key_files), field_value_style)
+            ])
         
-        # CAPM Information
-        if capm_required or capm_date or related_capm:
-            capm_data = []
-            if capm_required:
-                capm_data.append([Paragraph("<b>CAPM Update:</b>", field_label_style), 
-                                Paragraph(format_value(capm_required), field_value_style)])
-            if capm_date:
-                capm_data.append([Paragraph("<b>Publication Date:</b>", field_label_style), 
-                                Paragraph(format_value(capm_date), field_value_style)])
-            if related_capm:
-                capm_data.append([Paragraph("<b>Related CAPM:</b>", field_label_style), 
-                                Paragraph(format_value(related_capm), field_value_style)])
+        if capm_required:
+            doc_data.append([
+                Paragraph("CAPM Update", field_label_style),
+                Paragraph(format_value(capm_required), field_value_style)
+            ])
+        
+        if capm_date:
+            doc_data.append([
+                Paragraph("CAPM Publication Date", field_label_style),
+                Paragraph(format_value(capm_date), field_value_style)
+            ])
+        
+        if related_capm:
+            doc_data.append([
+                Paragraph("Related CAPM", field_label_style),
+                Paragraph(format_value(related_capm), field_value_style)
+            ])
+        
+        if doc_data:
+            doc_table = Table(doc_data, colWidths=[1.5*inch, 5.5*inch])
+            doc_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
             
-            if capm_data:
-                capm_table = Table(capm_data, colWidths=[1.5*inch, 5*inch])
-                capm_table.setStyle(TableStyle([
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('LEFTPADDING', (0, 0), (0, -1), 0),
-                    ('LEFTPADDING', (1, 0), (1, -1), 8),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ]))
-                story.append(capm_table)
+            container = create_container(
+                "Documentation & CAPM",
+                doc_table,
+                COLORS['container_5'],
+                COLORS['primary']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
     
     # FOOTER
-    story.append(Spacer(1, 0.3*inch))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#E5E7EB')))
+    story.append(Spacer(1, 0.2*inch))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=COLORS['border']))
     story.append(Spacer(1, 0.05*inch))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", metadata_style))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", footer_style))
     
     # Build PDF
     doc.build(story)
