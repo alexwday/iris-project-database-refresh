@@ -407,7 +407,7 @@ def create_pdf_from_row(row_data, row_number):
     # Special styles
     link_style = ParagraphStyle(
         'LinkStyle',
-        parent=field_value_style,
+        parent=styles['Normal'],
         textColor=COLORS['secondary'],
         fontSize=8,
         fontName='Courier'
