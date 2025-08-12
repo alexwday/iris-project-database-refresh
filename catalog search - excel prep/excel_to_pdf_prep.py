@@ -159,9 +159,12 @@ def read_excel_from_nas(conn, share_name, file_path):
         file_obj.seek(0)
         
         # Read Excel file - specifically the configured sheet
+        # IMPORTANT: Use header=None to ensure columns are indexed by position (0, 1, 2...)
+        # This prevents issues with named columns when using iloc
         try:
-            df = pd.read_excel(file_obj, engine='openpyxl', sheet_name=EXCEL_SHEET_NAME)
+            df = pd.read_excel(file_obj, engine='openpyxl', sheet_name=EXCEL_SHEET_NAME, header=None)
             print(f"Successfully read sheet '{EXCEL_SHEET_NAME}' from Excel file: {file_path} ({len(df)} rows)")
+            # Columns are now positional (0, 1, 2, ...) since we used header=None
         except ValueError as ve:
             # Sheet doesn't exist - list available sheets for debugging
             file_obj.seek(0)  # Reset buffer position
@@ -180,22 +183,30 @@ def create_pdf_from_row(row_data, row_number):
     """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
     
+    # Ensure we can access row data by position
+    if not isinstance(row_data, pd.Series):
+        row_data = pd.Series(row_data)
+    
+    # CRITICAL FIX: Reset index to ensure we can access by position (0, 1, 2, etc.)
+    # When DataFrame has named columns from Excel, the Series index is column names, not integers
+    # This causes "list index out of range" when we try to use iloc with integer positions
+    row_data = row_data.reset_index(drop=True)
+    
     # Helper function to safely get value (simple version for header/footer)
     def get_value_simple(data, col_index):
         """Simple value getter for header/footer use"""
         try:
-            # Proper bounds checking for DataFrame columns
+            # Proper bounds checking for pandas Series
             if col_index < 0 or col_index >= len(data):
                 return None
-            value = data.iloc[col_index]
+            # Use bracket notation for Series access (more reliable than iloc)
+            value = data[col_index] if col_index in data.index else data.iloc[col_index]
             if pd.isna(value) or value is None:
                 return None
             return str(value).strip()
-        except (IndexError, KeyError) as e:
-            print(f"[DEBUG] Cannot access column {col_index} in header/footer: {e}")
+        except (IndexError, KeyError):
             return None
-        except Exception as e:
-            print(f"[DEBUG] Unexpected error in get_value_simple for column {col_index}: {e}")
+        except Exception:
             return None
     
     # Get field values for header/footer use
@@ -350,21 +361,24 @@ def create_pdf_from_row(row_data, row_number):
     # Helper function to safely get value
     def get_value(col_index):
         try:
-            # Proper bounds checking for DataFrame columns
+            # Proper bounds checking for pandas Series
             if col_index < 0 or col_index >= len(row_data):
                 return None
-            value = row_data.iloc[col_index]
+            # Use bracket notation for Series access (more reliable than iloc)
+            try:
+                value = row_data[col_index] if col_index in row_data.index else row_data.iloc[col_index]
+            except Exception as e:
+                print(f"[DEBUG] Error accessing column {col_index}: {e}")
+                return None
             if pd.isna(value) or value is None:
                 return None
             value_str = str(value).strip()
             if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
                 return None
             return value_str
-        except (IndexError, KeyError) as e:
-            print(f"[DEBUG] Cannot access column {col_index}: {e}")
+        except (IndexError, KeyError):
             return None
-        except Exception as e:
-            print(f"[DEBUG] Unexpected error accessing column {col_index}: {e}")
+        except Exception:
             return None
     
     # Helper function to format value for display
@@ -892,7 +906,7 @@ def main():
             # Example: If header at row 1, first data row (index 1) is Excel row 2
             excel_row_number = index + 2 if is_header_row else index + 1
             
-            print(f"\nProcessing row {excel_row_number} (index {index})... [Columns available: {len(row)}]")
+            print(f"\nProcessing row {excel_row_number}...")
             
             try:
                 # Check if row has any data (not all NaN)
@@ -914,7 +928,11 @@ def main():
                     
             except Exception as e:
                 print(f"[ERROR] Failed to process row {excel_row_number}: {e}")
-                print(f"[DEBUG] Error details: {type(e).__name__}: {str(e)}")
+                import traceback
+                print(f"[DEBUG] Error: {str(e)}")
+                if "index" in str(e).lower():
+                    print(f"[DEBUG] Row has {len(row)} columns, expected up to 23 (A-W)")
+                    traceback.print_exc()
                 error_count += 1
         
         # Summary
