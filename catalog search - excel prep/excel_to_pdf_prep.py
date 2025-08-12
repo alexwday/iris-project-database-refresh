@@ -24,8 +24,10 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak, 
                                 Table, TableStyle, KeepTogether, HRFlowable, 
-                                FrameBreak, KeepInFrame)
+                                FrameBreak, KeepInFrame, Flowable, PageTemplate,
+                                Frame, BaseDocTemplate, NextPageTemplate)
 from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER, TA_RIGHT
+from reportlab.pdfgen import canvas
 import openpyxl
 
 # ==============================================================================
@@ -174,23 +176,182 @@ def read_excel_from_nas(conn, share_name, file_path):
         print(f"[ERROR] Failed to read Excel file from NAS '{file_path}': {e}")
         return None
 
+# ==============================================================================
+# --- Custom Document Template with Headers and Footers ---
+# ==============================================================================
+
+class NumberedCanvas(canvas.Canvas):
+    """Custom canvas to add headers and footers to each page."""
+    def __init__(self, *args, **kwargs):
+        canvas.Canvas.__init__(self, *args, **kwargs)
+        self.pages = []
+        self.row_number = None
+        self.month = None
+        self.year = None
+        self.generation_time = datetime.now().strftime('%B %d, %Y at %I:%M %p')
+        
+    def showPage(self):
+        self.pages.append(dict(self.__dict__))
+        self._startPage()
+        
+    def save(self):
+        num_pages = len(self.pages)
+        for page in self.pages:
+            self.__dict__.update(page)
+            self.draw_header_footer(num_pages)
+            canvas.Canvas.showPage(self)
+        canvas.Canvas.save(self)
+        
+    def draw_header_footer(self, page_count):
+        """Draw header and footer on each page."""
+        # Save the state
+        self.saveState()
+        
+        # Define colors
+        primary_dark = colors.HexColor('#1e293b')
+        text_secondary = colors.HexColor('#6b7280')
+        border_color = colors.HexColor('#e5e7eb')
+        
+        # Header
+        self.setFont("Helvetica-Bold", 10)
+        self.setFillColor(primary_dark)
+        self.drawString(0.5*inch, letter[1] - 0.35*inch, "APG Wiki")
+        
+        self.setFont("Helvetica", 9)
+        self.setFillColor(text_secondary)
+        date_str = f"{self.month or ''} {self.year or ''}"
+        header_right = f"Row #{self.row_number} | {date_str}"
+        self.drawRightString(letter[0] - 0.5*inch, letter[1] - 0.35*inch, header_right)
+        
+        # Header line
+        self.setStrokeColor(border_color)
+        self.setLineWidth(0.5)
+        self.line(0.5*inch, letter[1] - 0.45*inch, letter[0] - 0.5*inch, letter[1] - 0.45*inch)
+        
+        # Footer
+        self.setFont("Helvetica", 7)
+        self.setFillColor(text_secondary)
+        footer_text = f"Generated: {self.generation_time} | Internal APG Wiki Database"
+        
+        # Footer line
+        self.line(0.5*inch, 0.45*inch, letter[0] - 0.5*inch, 0.45*inch)
+        
+        # Footer text - centered
+        text_width = self.stringWidth(footer_text, "Helvetica", 7)
+        x_centered = (letter[0] - text_width) / 2
+        self.drawString(x_centered, 0.3*inch, footer_text)
+        
+        # Page number (right aligned)
+        page_num = self.pages.index(self.__dict__) + 1
+        if page_count > 1:
+            self.drawRightString(letter[0] - 0.5*inch, 0.3*inch, f"Page {page_num} of {page_count}")
+        
+        # Restore the state
+        self.restoreState()
+
+class APGWikiDocTemplate(BaseDocTemplate):
+    """Custom document template with headers and footers."""
+    def __init__(self, filename, row_number, month, year, **kwargs):
+        self.row_number = row_number
+        self.month = month
+        self.year = year
+        BaseDocTemplate.__init__(self, filename, **kwargs)
+        
+        # Define the page template with proper margins for headers/footers
+        frame = Frame(
+            self.leftMargin, 
+            self.bottomMargin + 0.3*inch,  # Leave space for footer
+            self.width, 
+            self.height - 0.5*inch,  # Leave space for header and footer
+            id='normal'
+        )
+        
+        template = PageTemplate('normal', [frame])
+        self.addPageTemplates([template])
+    
+    def build(self, flowables):
+        """Build the document with custom canvas."""
+        self._calc()
+        BaseDocTemplate.build(self, flowables, canvasmaker=self._make_canvas)
+    
+    def _make_canvas(self, *args, **kwargs):
+        """Create custom canvas with row information."""
+        c = NumberedCanvas(*args, **kwargs)
+        c.row_number = self.row_number
+        c.month = self.month
+        c.year = self.year
+        return c
+
+# ==============================================================================
+# --- Container Continuation Flowable ---
+# ==============================================================================
+
+class ContinuationTitle(Flowable):
+    """A flowable that creates a continuation title for split containers."""
+    def __init__(self, title, section_header_style, header_color, COLORS):
+        Flowable.__init__(self)
+        self.title = title
+        self.section_header_style = section_header_style
+        self.header_color = header_color
+        self.COLORS = COLORS
+        self.height = 0.4*inch
+        
+    def draw(self):
+        # Draw the continuation header
+        header_text = f"{self.title} - Continued..."
+        p = Paragraph(header_text, self.section_header_style)
+        
+        # Create a table for the header
+        header_table = Table([[p]], colWidths=[6.5*inch])
+        header_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), self.header_color),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('BOX', (0, 0), (-1, -1), 1, self.COLORS['border']),
+        ]))
+        
+        # Draw the table
+        header_table.wrapOn(self.canv, 6.5*inch, self.height)
+        header_table.drawOn(self.canv, 0, 0)
+
 def create_pdf_from_row(row_data, row_number):
     """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
+    
+    # Get date values for header
+    year = None
+    month = None
+    try:
+        if len(row_data) > 0:
+            year_val = row_data.iloc[0]
+            if not pd.isna(year_val):
+                year = str(year_val).strip()
+        if len(row_data) > 1:
+            month_val = row_data.iloc[1]
+            if not pd.isna(month_val):
+                month = str(month_val).strip()
+    except:
+        pass
+    
+    # Use custom document template
+    doc = APGWikiDocTemplate(
         buffer,
+        row_number=row_number,
+        month=month,
+        year=year,
         pagesize=letter,
         rightMargin=0.5*inch,
         leftMargin=0.5*inch,
-        topMargin=0.5*inch,
-        bottomMargin=0.5*inch,
+        topMargin=0.75*inch,  # Increased for header
+        bottomMargin=0.75*inch,  # Increased for footer
     )
     
     # Container for the 'Flowable' objects
     story = []
     
     # Define sophisticated color palette
-    # Using a professional color scheme with good contrast
     COLORS = {
         'primary_dark': colors.HexColor('#1e293b'),     # Slate 800 - Main headers
         'primary': colors.HexColor('#334155'),          # Slate 700 - Section headers
@@ -212,25 +373,6 @@ def create_pdf_from_row(row_data, row_number):
     
     # Define comprehensive styles
     styles = getSampleStyleSheet()
-    
-    # Title styles
-    title_left_style = ParagraphStyle(
-        'TitleLeft',
-        parent=styles['Heading1'],
-        fontSize=14,
-        textColor=COLORS['primary_dark'],
-        alignment=TA_LEFT,
-        fontName='Helvetica-Bold'
-    )
-    
-    title_right_style = ParagraphStyle(
-        'TitleRight',
-        parent=styles['Normal'],
-        fontSize=12,
-        textColor=COLORS['text_secondary'],
-        alignment=TA_RIGHT,
-        fontName='Helvetica'
-    )
     
     # Section header style for container titles - reduced size
     section_header_style = ParagraphStyle(
@@ -271,14 +413,6 @@ def create_pdf_from_row(row_data, row_number):
         fontName='Courier'
     )
     
-    footer_style = ParagraphStyle(
-        'Footer',
-        parent=styles['Normal'],
-        fontSize=7,
-        textColor=COLORS['text_secondary'],
-        alignment=TA_CENTER
-    )
-    
     # Helper function to safely get value
     def get_value(col_index):
         try:
@@ -308,7 +442,39 @@ def create_pdf_from_row(row_data, row_number):
         value = value.replace('\n', '<br/>')
         return value
     
-    # Helper function to create a containerized section
+    # Helper function to create a containerized section with split handling
+    def create_container_with_split(title, content_table, bg_color, header_color):
+        """Creates a containerized section that can split across pages."""
+        # Create header row
+        header = Table(
+            [[Paragraph(title, section_header_style)]],
+            colWidths=[6.5*inch]
+        )
+        header.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), header_color),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        
+        # Apply styling to content table with background
+        content_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
+            ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ]))
+        
+        # Return list of flowables with continuation support
+        return [
+            KeepTogether([header, content_table]),
+            ContinuationTitle(title, section_header_style, header_color, COLORS)
+        ]
+    
+    # Helper function to create a simple container (original style)
     def create_container(title, content_table, bg_color, header_color):
         """Creates a containerized section with header and content."""
         # Create header row
@@ -331,7 +497,7 @@ def create_pdf_from_row(row_data, row_number):
             ('BACKGROUND', (0, 1), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
             ('LEFTPADDING', (0, 1), (-1, -1), 10),
-            ('RIGHTPADDING', (0, 1), (-1, -1), 12),  # Increased right padding
+            ('RIGHTPADDING', (0, 1), (-1, -1), 12),
             ('TOPPADDING', (0, 1), (-1, -1), 8),
             ('BOTTOMPADDING', (0, 1), (-1, -1), 8),
             ('LEFTPADDING', (0, 0), (-1, 0), 0),
@@ -365,25 +531,6 @@ def create_pdf_from_row(row_data, row_number):
     capm_date = get_value(20)
     related_capm = get_value(21)
     apg_reviewer = get_value(22)
-    
-    # TITLE SECTION - Single line with APG Wiki on left, Row # and date on right
-    date_str = f"{month or ''} {year or ''}"
-    title_table = Table([
-        [
-            Paragraph("APG Wiki", title_left_style),
-            Paragraph(f"Row #{row_number} | {date_str}", title_right_style)
-        ]
-    ], colWidths=[3.5*inch, 3.5*inch])
-    
-    title_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(title_table)
-    story.append(Spacer(1, 0.05*inch))
     
     # PAGE 1: Four containers with smaller spacing
     
@@ -451,7 +598,7 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['container_1'],
                 COLORS['primary']
             )
-            story.append(KeepTogether(container))
+            story.append(container)
             story.append(Spacer(1, 0.08*inch))
     
     # SECTION 2: TECHNICAL DETAILS & REFERENCES (Container 2 - Amber theme)
@@ -493,7 +640,7 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['container_3'],
                 COLORS['warning']
             )
-            story.append(KeepTogether(container))
+            story.append(container)
             story.append(Spacer(1, 0.08*inch))
     
     # SECTION 3: REVIEW & APPROVALS (Container 3 - Green theme)
@@ -551,10 +698,10 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['container_4'],
                 COLORS['success']
             )
-            story.append(KeepTogether(container))
+            story.append(container)
             story.append(Spacer(1, 0.08*inch))
     
-    # SECTION 4: DOCUMENTATION (Container 4 - Purple theme) - renamed from "Documentation & CAPM"
+    # SECTION 4: DOCUMENTATION (Container 4 - Purple theme)
     if server_link or key_files or capm_required or capm_date or related_capm:
         doc_data = []
         
@@ -607,12 +754,12 @@ def create_pdf_from_row(row_data, row_number):
             ]))
             
             container = create_container(
-                "Documentation",  # Changed from "Documentation & CAPM"
+                "Documentation",
                 doc_table,
                 COLORS['container_5'],
                 COLORS['primary']
             )
-            story.append(KeepTogether(container))
+            story.append(container)
     
     # PAGE BREAK - Move to page 2 for Core Issue Analysis
     story.append(PageBreak())
@@ -640,6 +787,7 @@ def create_pdf_from_row(row_data, row_number):
             ])
         
         if issue_data:
+            # For large content that might split, use the split-aware version
             issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
             issue_table.setStyle(TableStyle([
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -650,6 +798,8 @@ def create_pdf_from_row(row_data, row_number):
                 ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
             ]))
             
+            # Use the regular container for Core Issue Analysis
+            # since it's on its own page and less likely to split
             container = create_container(
                 "Core Issue Analysis",
                 issue_table,
@@ -657,12 +807,6 @@ def create_pdf_from_row(row_data, row_number):
                 COLORS['secondary']
             )
             story.append(container)
-    
-    # FOOTER
-    story.append(Spacer(1, 0.2*inch))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=COLORS['border']))
-    story.append(Spacer(1, 0.05*inch))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", footer_style))
     
     # Build PDF
     doc.build(story)
