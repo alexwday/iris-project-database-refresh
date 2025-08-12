@@ -24,10 +24,8 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak, 
                                 Table, TableStyle, KeepTogether, HRFlowable, 
-                                FrameBreak, KeepInFrame, Flowable, NextPageTemplate,
-                                PageTemplate, Frame, BaseDocTemplate)
+                                FrameBreak, KeepInFrame)
 from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER, TA_RIGHT
-from reportlab.pdfgen import canvas
 import openpyxl
 
 # ==============================================================================
@@ -159,12 +157,9 @@ def read_excel_from_nas(conn, share_name, file_path):
         file_obj.seek(0)
         
         # Read Excel file - specifically the configured sheet
-        # IMPORTANT: Use header=None to ensure columns are indexed by position (0, 1, 2...)
-        # This prevents issues with named columns when using iloc
         try:
-            df = pd.read_excel(file_obj, engine='openpyxl', sheet_name=EXCEL_SHEET_NAME, header=None)
+            df = pd.read_excel(file_obj, engine='openpyxl', sheet_name=EXCEL_SHEET_NAME)
             print(f"Successfully read sheet '{EXCEL_SHEET_NAME}' from Excel file: {file_path} ({len(df)} rows)")
-            # Columns are now positional (0, 1, 2, ...) since we used header=None
         except ValueError as ve:
             # Sheet doesn't exist - list available sheets for debugging
             file_obj.seek(0)  # Reset buffer position
@@ -182,87 +177,13 @@ def read_excel_from_nas(conn, share_name, file_path):
 def create_pdf_from_row(row_data, row_number):
     """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
-    
-    # Ensure we can access row data by position
-    if not isinstance(row_data, pd.Series):
-        row_data = pd.Series(row_data)
-    
-    # CRITICAL FIX: Reset index to ensure we can access by position (0, 1, 2, etc.)
-    # When DataFrame has named columns from Excel, the Series index is column names, not integers
-    # This causes "list index out of range" when we try to use iloc with integer positions
-    row_data = row_data.reset_index(drop=True)
-    
-    # Helper function to safely get value (simple version for header/footer)
-    def get_value_simple(data, col_index):
-        """Simple value getter for header/footer use"""
-        try:
-            # Proper bounds checking for pandas Series
-            if col_index < 0 or col_index >= len(data):
-                return None
-            # Use bracket notation for Series access (more reliable than iloc)
-            value = data[col_index] if col_index in data.index else data.iloc[col_index]
-            if pd.isna(value) or value is None:
-                return None
-            return str(value).strip()
-        except (IndexError, KeyError):
-            return None
-        except Exception:
-            return None
-    
-    # Get field values for header/footer use
-    year = get_value_simple(row_data, 0)
-    month = get_value_simple(row_data, 1)
-    date_str = f"{month or ''} {year or ''}".strip()
-    
-    # Custom Document Template class for headers and footers
-    class APGWikiDocTemplate(BaseDocTemplate):
-        def __init__(self, filename, **kwargs):
-            self.row_number = row_number
-            self.date_str = date_str
-            BaseDocTemplate.__init__(self, filename, **kwargs)
-            
-        def afterPage(self):
-            """Add header and footer to each page"""
-            # Save the state of our canvas so we can draw on it
-            self.canv.saveState()
-            
-            # Header
-            self.canv.setFont('Helvetica-Bold', 12)
-            self.canv.setFillColor(colors.HexColor('#1e293b'))
-            self.canv.drawString(0.5*inch, letter[1] - 0.4*inch, "APG Wiki")
-            
-            self.canv.setFont('Helvetica', 10)
-            self.canv.setFillColor(colors.HexColor('#6b7280'))
-            header_right = f"Row #{self.row_number}"
-            if self.date_str:
-                header_right += f" | {self.date_str}"
-            self.canv.drawRightString(letter[0] - 0.5*inch, letter[1] - 0.4*inch, header_right)
-            
-            # Header line
-            self.canv.setStrokeColor(colors.HexColor('#e5e7eb'))
-            self.canv.setLineWidth(0.5)
-            self.canv.line(0.5*inch, letter[1] - 0.5*inch, letter[0] - 0.5*inch, letter[1] - 0.5*inch)
-            
-            # Footer
-            self.canv.setFont('Helvetica', 7)
-            self.canv.setFillColor(colors.HexColor('#9ca3af'))
-            footer_text = f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database"
-            self.canv.drawCentredString(letter[0]/2, 0.3*inch, footer_text)
-            
-            # Footer line
-            self.canv.line(0.5*inch, 0.45*inch, letter[0] - 0.5*inch, 0.45*inch)
-            
-            # Restore the state
-            self.canv.restoreState()
-    
-    # Create document with custom template
-    doc = APGWikiDocTemplate(
+    doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
         rightMargin=0.5*inch,
         leftMargin=0.5*inch,
-        topMargin=0.7*inch,  # Space for header
-        bottomMargin=0.6*inch,  # Space for footer
+        topMargin=0.5*inch,
+        bottomMargin=0.5*inch,
     )
     
     # Container for the 'Flowable' objects
@@ -361,24 +282,16 @@ def create_pdf_from_row(row_data, row_number):
     # Helper function to safely get value
     def get_value(col_index):
         try:
-            # Proper bounds checking for pandas Series
-            if col_index < 0 or col_index >= len(row_data):
-                return None
-            # Use bracket notation for Series access (more reliable than iloc)
-            try:
-                value = row_data[col_index] if col_index in row_data.index else row_data.iloc[col_index]
-            except Exception as e:
-                print(f"[DEBUG] Error accessing column {col_index}: {e}")
-                return None
-            if pd.isna(value) or value is None:
-                return None
-            value_str = str(value).strip()
-            if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
-                return None
-            return value_str
-        except (IndexError, KeyError):
+            if col_index < len(row_data):
+                value = row_data.iloc[col_index]
+                if pd.isna(value) or value is None:
+                    return None
+                value_str = str(value).strip()
+                if not value_str or value_str.lower() in ['nan', 'none', 'null', 'n/a']:
+                    return None
+                return value_str
             return None
-        except Exception:
+        except:
             return None
     
     # Helper function to format value for display
@@ -396,7 +309,7 @@ def create_pdf_from_row(row_data, row_number):
         return value
     
     # Helper function to create a containerized section
-    def create_container(title, content_table, bg_color, header_color, allow_splitting=False):
+    def create_container(title, content_table, bg_color, header_color):
         """Creates a containerized section with header and content."""
         # Create header row
         header = Table(
@@ -413,9 +326,7 @@ def create_pdf_from_row(row_data, row_number):
         
         # Combine header and content
         container_data = [[header], [content_table]]
-        container = Table(container_data, colWidths=[6.5*inch], 
-                        splitByRow=1 if allow_splitting else 0,
-                        repeatRows=1 if allow_splitting else 0)
+        container = Table(container_data, colWidths=[6.5*inch])
         container.setStyle(TableStyle([
             ('BACKGROUND', (0, 1), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
@@ -428,23 +339,6 @@ def create_pdf_from_row(row_data, row_number):
             ('TOPPADDING', (0, 0), (-1, 0), 0),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 0),
         ]))
-        
-        # If splitting is allowed, we'll handle continuation separately
-        if allow_splitting:
-            # Create a continuation header for page breaks
-            cont_header = Table(
-                [[Paragraph(f"{title} - Continued", section_header_style)]],
-                colWidths=[6.5*inch]
-            )
-            cont_header.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, -1), header_color),
-                ('LEFTPADDING', (0, 0), (-1, -1), 8),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ]))
-            return [container]
-        
         return container
     
     # Get all field values
@@ -472,11 +366,24 @@ def create_pdf_from_row(row_data, row_number):
     related_capm = get_value(21)
     apg_reviewer = get_value(22)
     
-    # PAGE 1: FIXED SMALLER SECTIONS
-    # These sections should all fit on the first page:
-    # 1. Standards & Products
-    # 2. Review & Approvals  
-    # 3. Documentation
+    # TITLE SECTION - Single line with APG Wiki on left, Row # and date on right
+    date_str = f"{month or ''} {year or ''}"
+    title_table = Table([
+        [
+            Paragraph("APG Wiki", title_left_style),
+            Paragraph(f"Row #{row_number} | {date_str}", title_right_style)
+        ]
+    ], colWidths=[3.5*inch, 3.5*inch])
+    
+    title_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    story.append(title_table)
+    story.append(Spacer(1, 0.1*inch))
     
     # SECTION 1: STANDARDS & PRODUCTS (Container 1 - Blue theme)
     if ifrs_standard or us_gaap or other_standards or related_product or related_platform:
@@ -545,7 +452,91 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # SECTION 2: REVIEW & APPROVALS (Container 4 - Green theme) - Moved to page 1
+    # SECTION 2: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
+    if accounting_question or conclusion or key_facts:
+        issue_data = []
+        
+        if accounting_question:
+            issue_data.append([
+                Paragraph("Accounting Question", field_label_style),
+                Paragraph(format_value(accounting_question), field_value_style)
+            ])
+        
+        if key_facts:
+            issue_data.append([
+                Paragraph("Key Facts & Circumstances", field_label_style),
+                Paragraph(format_value(key_facts), field_value_style)
+            ])
+        
+        if conclusion:
+            issue_data.append([
+                Paragraph("Conclusion Reached", field_label_style),
+                Paragraph(format_value(conclusion), field_value_style)
+            ])
+        
+        if issue_data:
+            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
+            issue_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            container = create_container(
+                "Core Issue Analysis",
+                issue_table,
+                COLORS['container_2'],
+                COLORS['secondary']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 3: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
+    if guidance_ref or differences or benchmarking:
+        technical_data = []
+        
+        if guidance_ref:
+            technical_data.append([
+                Paragraph("Guidance References", field_label_style),
+                Paragraph(format_value(guidance_ref), field_value_style)
+            ])
+        
+        if differences:
+            technical_data.append([
+                Paragraph("IFRS/US GAAP Differences", field_label_style),
+                Paragraph(format_value(differences), field_value_style)
+            ])
+        
+        if benchmarking:
+            technical_data.append([
+                Paragraph("Benchmarking", field_label_style),
+                Paragraph(format_value(benchmarking), field_value_style)
+            ])
+        
+        if technical_data:
+            technical_table = Table(technical_data, colWidths=[1.5*inch, 4.8*inch])
+            technical_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            container = create_container(
+                "Technical Details & References",
+                technical_table,
+                COLORS['container_3'],
+                COLORS['warning']
+            )
+            story.append(KeepTogether(container))
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 4: REVIEW & APPROVALS (Container 4 - Green theme)
     if preparer or stakeholder_concurrence or pwc_concurrence or apg_reviewer:
         approval_data = []
         
@@ -603,7 +594,7 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # SECTION 3: DOCUMENTATION (Container 5 - Purple theme) - Moved to page 1
+    # SECTION 5: DOCUMENTATION & CAPM (Container 5 - Purple theme)
     if server_link or key_files or capm_required or capm_date or related_capm:
         doc_data = []
         
@@ -656,7 +647,7 @@ def create_pdf_from_row(row_data, row_number):
             ]))
             
             container = create_container(
-                "Documentation",  # Removed "& CAPM" as requested
+                "Documentation & CAPM",
                 doc_table,
                 COLORS['container_5'],
                 COLORS['primary']
@@ -664,98 +655,11 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # PAGE BREAK - Move to page 2 for larger sections
-    story.append(PageBreak())
-    
-    # PAGE 2: LARGER SECTIONS WITH VARIABLE CONTENT
-    
-    # SECTION 4: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
-    if accounting_question or conclusion or key_facts:
-        issue_data = []
-        
-        if accounting_question:
-            issue_data.append([
-                Paragraph("Accounting Question", field_label_style),
-                Paragraph(format_value(accounting_question), field_value_style)
-            ])
-        
-        if key_facts:
-            issue_data.append([
-                Paragraph("Key Facts & Circumstances", field_label_style),
-                Paragraph(format_value(key_facts), field_value_style)
-            ])
-        
-        if conclusion:
-            issue_data.append([
-                Paragraph("Conclusion Reached", field_label_style),
-                Paragraph(format_value(conclusion), field_value_style)
-            ])
-        
-        if issue_data:
-            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
-            issue_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
-            ]))
-            
-            # Allow splitting for large content sections
-            container = create_container(
-                "Core Issue Analysis",
-                issue_table,
-                COLORS['container_2'],
-                COLORS['secondary'],
-                allow_splitting=True
-            )
-            story.extend(container if isinstance(container, list) else [container])
-            story.append(Spacer(1, 0.15*inch))
-    
-    # SECTION 5: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
-    if guidance_ref or differences or benchmarking:
-        technical_data = []
-        
-        if guidance_ref:
-            technical_data.append([
-                Paragraph("Guidance References", field_label_style),
-                Paragraph(format_value(guidance_ref), field_value_style)
-            ])
-        
-        if differences:
-            technical_data.append([
-                Paragraph("IFRS/US GAAP Differences", field_label_style),
-                Paragraph(format_value(differences), field_value_style)
-            ])
-        
-        if benchmarking:
-            technical_data.append([
-                Paragraph("Benchmarking", field_label_style),
-                Paragraph(format_value(benchmarking), field_value_style)
-            ])
-        
-        if technical_data:
-            technical_table = Table(technical_data, colWidths=[1.5*inch, 4.8*inch])
-            technical_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
-            ]))
-            
-            # Allow splitting for large content sections
-            container = create_container(
-                "Technical Details & References",
-                technical_table,
-                COLORS['container_3'],
-                COLORS['warning'],
-                allow_splitting=True
-            )
-            story.extend(container if isinstance(container, list) else [container])
-            story.append(Spacer(1, 0.15*inch))
+    # FOOTER
+    story.append(Spacer(1, 0.2*inch))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=COLORS['border']))
+    story.append(Spacer(1, 0.05*inch))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", footer_style))
     
     # Build PDF
     doc.build(story)
@@ -778,54 +682,6 @@ def save_pdf_to_nas(conn, share_name, file_path, pdf_content):
         return True
     except Exception as e:
         print(f"[ERROR] Failed to write PDF to NAS '{file_path}': {e}")
-        return False
-
-def validate_dataframe_structure(df):
-    """Validate DataFrame has minimum required structure."""
-    if df is None:
-        return False, "DataFrame is None"
-    
-    if df.empty:
-        return False, "DataFrame is empty"
-    
-    if len(df.columns) < 1:
-        return False, "DataFrame has no columns"
-    
-    # Warn about missing columns but don't fail
-    expected_columns = 23  # A-W (0-22)
-    if len(df.columns) < expected_columns:
-        print(f"[WARNING] Expected {expected_columns} columns (A-W), found {len(df.columns)} columns")
-        print("Some fields may be missing in generated PDFs")
-        print("Missing columns will be treated as empty values")
-    
-    return True, "Valid"
-
-def detect_header_row(df):
-    """Safely detect if first row is a header."""
-    if df is None or df.empty or len(df) == 0:
-        return False
-    
-    try:
-        # Get first row values safely
-        first_row = df.iloc[0]
-        header_indicators = ['year', 'month', 'ifrs', 'gaap', 'standard', 'product', 
-                            'platform', 'accounting', 'conclusion', 'preparer']
-        
-        # Check if any of the first few cells contain header-like text
-        found_indicators = 0
-        cols_to_check = min(5, len(first_row))  # Check first 5 columns max
-        
-        for i in range(cols_to_check):
-            if pd.notna(first_row.iloc[i]):
-                cell_value = str(first_row.iloc[i]).lower().strip()
-                if any(indicator in cell_value for indicator in header_indicators):
-                    found_indicators += 1
-        
-        # If we find 2 or more header indicators, it's likely a header row
-        return found_indicators >= 2
-        
-    except Exception as e:
-        print(f"[DEBUG] Error in header detection: {e}")
         return False
 
 # ==============================================================================
@@ -873,21 +729,22 @@ def main():
         
         print(f"Excel file loaded successfully: {len(df)} rows, {len(df.columns)} columns")
         
-        # Validate DataFrame structure
-        is_valid, validation_message = validate_dataframe_structure(df)
-        if not is_valid:
-            print(f"[CRITICAL ERROR] {validation_message}")
-            sys.exit(1)
+        # We use positional indices (0-22 for columns A-W), so we need at least 23 columns
+        # Extra columns at the end don't matter since we won't access them
+        MIN_REQUIRED_COLUMNS = 23
+        if len(df.columns) < MIN_REQUIRED_COLUMNS:
+            print(f"[WARNING] Excel has {len(df.columns)} columns, expected at least {MIN_REQUIRED_COLUMNS}")
+            print("Some fields may be missing in the generated PDFs")
         
-        print(f"DataFrame structure validation: {validation_message}")
-        print(f"DataFrame shape: {len(df)} rows × {len(df.columns)} columns")
-        
-        # Check if first row is header using improved detection
-        is_header_row = detect_header_row(df)
-        if is_header_row:
-            print("First row detected as header row - will skip it")
-        else:
-            print("First row appears to be data - will process all rows")
+        # Check if first row is header
+        is_header_row = False
+        if len(df) > 0:
+            first_cell = str(df.iloc[0, 0]).lower()
+            # Also check other expected header values to be more certain
+            second_cell = str(df.iloc[0, 1]).lower() if len(df.columns) > 1 else ""
+            if first_cell == 'year' or (first_cell == 'year' and second_cell == 'month'):
+                is_header_row = True
+                print("First row appears to be a header row - will skip it")
         
         # Process each row
         print(f"\n[4] Converting rows to PDF documents...")
@@ -909,11 +766,6 @@ def main():
             print(f"\nProcessing row {excel_row_number}...")
             
             try:
-                # Check if row has any data (not all NaN)
-                if row.notna().sum() == 0:
-                    print(f"Row {excel_row_number} is empty - skipping")
-                    continue
-                
                 # Create PDF from row
                 pdf_content = create_pdf_from_row(row, excel_row_number)
                 
@@ -928,11 +780,6 @@ def main():
                     
             except Exception as e:
                 print(f"[ERROR] Failed to process row {excel_row_number}: {e}")
-                import traceback
-                print(f"[DEBUG] Error: {str(e)}")
-                if "index" in str(e).lower():
-                    print(f"[DEBUG] Row has {len(row)} columns, expected up to 23 (A-W)")
-                    traceback.print_exc()
                 error_count += 1
         
         # Summary
