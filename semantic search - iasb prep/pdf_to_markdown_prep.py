@@ -3,13 +3,13 @@
 IASB Prep: PDF to Markdown Conversion for IASB Documents
 
 Purpose:
-Processes a single IASB PDF file from a NAS directory and converts each page to markdown
+Processes a single EY PDF file from a NAS directory and converts each page to markdown
 using Azure Document Intelligence. Outputs a flat JSON array with document metadata
 and page content, removing only PageNumber tags while preserving other Azure tags.
 
 Input: Single PDF file in NAS_INPUT_PATH on the NAS drive (errors if multiple PDFs)
 Output: Flat JSON array on the NAS containing page-by-page records
-        (e.g., 'semantic_search/prep_output/iasb/iasb_prep_output.json')
+        (e.g., 'semantic_search/prep_output/ey/ey_prep_output.json')
 """
 
 import os
@@ -22,7 +22,7 @@ import tempfile
 import socket
 import io
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -397,16 +397,27 @@ def process_single_page(di_client: DocumentIntelligenceClient,
             'error': str(e)
         }
 
-def process_pages_batch(di_client: DocumentIntelligenceClient,
-                       page_files: List[Dict],
-                       max_workers: int = 5) -> List[Dict]:
-    """Processes multiple PDF pages concurrently."""
+def process_pages_batch_incremental(di_client: DocumentIntelligenceClient,
+                                   page_files: List[Dict],
+                                   output_file_path: str,
+                                   document_id: str,
+                                   filename: str,
+                                   filepath: str,
+                                   max_workers: int = 5) -> Tuple[int, List[int]]:
+    """Processes multiple PDF pages concurrently and writes to JSON incrementally."""
     total_pages = len(page_files)
     logging.info(f"Starting Azure DI processing for {total_pages} pages (max {max_workers} concurrent)")
+    logging.info(f"Writing results incrementally to: {output_file_path}")
     
-    results = []
+    # Dictionary to store results by page number for ordering
+    results_dict = {}
     pages_processed = 0
+    pages_written = 0
     failed_pages = []
+    
+    # Start the JSON array
+    with open(output_file_path, 'w', encoding='utf-8') as f:
+        f.write('[\n')
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all page processing tasks
@@ -415,6 +426,10 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
             for page_info in page_files
         }
         
+        # Track the next page number to write (ensures sequential order)
+        next_page_to_write = 1
+        first_record = True
+        
         # Collect results as they complete
         for future in tqdm(as_completed(future_to_page), total=len(page_files), desc="Processing pages"):
             page_info = future_to_page[future]
@@ -422,45 +437,68 @@ def process_pages_batch(di_client: DocumentIntelligenceClient,
             
             try:
                 result = future.result()
-                results.append(result)
+                page_num = result['page_number']
                 
                 if not result['success']:
-                    failed_pages.append(result['page_number'])
-                    logging.warning(f"Page {result['page_number']} failed: {result.get('error', 'Unknown error')}")
+                    failed_pages.append(page_num)
+                    logging.warning(f"Page {page_num} failed: {result.get('error', 'Unknown error')}")
+                    # Store None for failed pages to maintain sequence
+                    results_dict[page_num] = None
+                else:
+                    # Store the successful result
+                    results_dict[page_num] = {
+                        'document_id': document_id,
+                        'filename': filename,
+                        'filepath': filepath,
+                        'page_number': page_num,
+                        'content': result['content']
+                    }
                 
-                # Progress update every 100 pages
-                if pages_processed % 100 == 0:
-                    logging.info(f"Progress: {pages_processed}/{total_pages} pages processed")
-                    
             except Exception as e:
                 page_num = page_info['page_number']
                 failed_pages.append(page_num)
                 logging.error(f"Exception for page {page_num}: {e}")
-                results.append({
-                    'success': False,
-                    'page_number': page_num,
-                    'content': None,
-                    'original_file': os.path.basename(page_info['original_pdf']),
-                    'error': str(e)
-                })
+                results_dict[page_num] = None
+            
+            # Write any sequential pages that are ready
+            with open(output_file_path, 'a', encoding='utf-8') as f:
+                while next_page_to_write in results_dict:
+                    page_data = results_dict[next_page_to_write]
+                    if page_data is not None:  # Only write successful pages
+                        if not first_record:
+                            f.write(',\n')
+                        json.dump(page_data, f, indent=2, ensure_ascii=False)
+                        first_record = False
+                        pages_written += 1
+                    # Remove from dict to free memory
+                    del results_dict[next_page_to_write]
+                    next_page_to_write += 1
+            
+            # Progress update every 100 pages
+            if pages_processed % 100 == 0:
+                logging.info(f"Progress: {pages_processed}/{total_pages} processed, {pages_written} written")
     
-    # Sort results by page number
-    results.sort(key=lambda x: x['page_number'])
+    # Close the JSON array
+    with open(output_file_path, 'a', encoding='utf-8') as f:
+        f.write('\n]')
     
-    successful = sum(1 for r in results if r['success'])
+    successful = pages_written
     logging.info(f"Azure DI processing completed: {successful}/{total_pages} pages successful")
+    logging.info(f"Results written to: {output_file_path}")
     
     if failed_pages:
         logging.warning(f"Failed pages: {failed_pages}")
     
-    return results
+    return successful, failed_pages
 
-def process_pdf_file(local_pdf_path: str,
-                    original_nas_path: str,
-                    filename: str,
-                    di_client: DocumentIntelligenceClient,
-                    temp_dir: str) -> Dict:
-    """Processes a single PDF file and returns all page data."""
+def process_pdf_file_incremental(local_pdf_path: str,
+                                original_nas_path: str,
+                                filename: str,
+                                di_client: DocumentIntelligenceClient,
+                                temp_dir: str,
+                                output_file_path: str,
+                                document_id: str) -> Dict:
+    """Processes a single PDF file and writes pages incrementally to JSON."""
     logging.info(f"Processing PDF: {filename}")
     
     try:
@@ -473,11 +511,16 @@ def process_pdf_file(local_pdf_path: str,
                 'filepath': original_nas_path,
                 'success': False,
                 'error': 'Failed to extract pages',
-                'pages': []
+                'total_pages': 0,
+                'successful_pages': 0
             }
         
-        # Process all pages
-        page_results = process_pages_batch(di_client, page_files, MAX_CONCURRENT_PAGES)
+        # Process all pages and write incrementally
+        successful_pages, failed_pages = process_pages_batch_incremental(
+            di_client, page_files, output_file_path, 
+            document_id, filename, original_nas_path,
+            MAX_CONCURRENT_PAGES
+        )
         
         # Clean up temp page files
         for page_info in page_files:
@@ -487,22 +530,13 @@ def process_pdf_file(local_pdf_path: str,
             except OSError:
                 pass
         
-        # Prepare final document data
-        pages_data = []
-        for result in page_results:
-            if result['success']:
-                pages_data.append({
-                    'page_number': result['page_number'],
-                    'content': result['content']
-                })
-        
         return {
             'filename': filename,
             'filepath': original_nas_path,
             'success': True,
             'total_pages': len(page_files),
-            'successful_pages': len(pages_data),
-            'pages': pages_data
+            'successful_pages': successful_pages,
+            'failed_pages': failed_pages
         }
         
     except Exception as e:
@@ -512,7 +546,8 @@ def process_pdf_file(local_pdf_path: str,
             'filepath': original_nas_path,
             'success': False,
             'error': str(e),
-            'pages': []
+            'total_pages': 0,
+            'successful_pages': 0
         }
 
 # ==============================================================================
@@ -559,12 +594,12 @@ def run_iasb_prep():
         logging.error(f"Failed to initialize Azure DI client: {e}")
         return
     
-    # Process the single PDF file
-    all_pages_data = []
-    
     # Create temporary directory for downloads and processing
     with tempfile.TemporaryDirectory() as temp_dir:
         logging.info(f"Using temporary directory: {temp_dir}")
+        
+        # Create temp output file
+        temp_output_path = os.path.join(temp_dir, OUTPUT_FILENAME)
         
         # Process the single PDF
         pdf_file_info = pdf_files[0]
@@ -580,22 +615,28 @@ def run_iasb_prep():
             logging.error(f"Failed to download {filename} from NAS. Exiting.")
             return
         
-        # Process this PDF
-        pdf_result = process_pdf_file(local_pdf_path, nas_file_path, filename, di_client, temp_dir)
-        
-        # Create flat JSON array with all fields per record
-        for page in pdf_result['pages']:
-            all_pages_data.append({
-                'document_id': DOCUMENT_ID,
-                'filename': pdf_result['filename'],
-                'filepath': nas_file_path,  # Store NAS path
-                'page_number': page['page_number'],
-                'content': page['content']
-            })
+        # Process this PDF with incremental writing
+        pdf_result = process_pdf_file_incremental(
+            local_pdf_path, nas_file_path, filename, 
+            di_client, temp_dir, temp_output_path, DOCUMENT_ID
+        )
         
         if pdf_result['success']:
             logging.info(f"Successfully processed {pdf_result['filename']}: "
                        f"{pdf_result['successful_pages']}/{pdf_result['total_pages']} pages")
+            
+            # Upload the completed JSON file to NAS
+            logging.info(f"Uploading results to NAS: {share_name}/{output_path_relative}")
+            try:
+                with open(temp_output_path, 'rb') as f:
+                    json_bytes = f.read()
+                
+                if write_to_nas(share_name, output_path_relative, json_bytes):
+                    logging.info(f"Successfully saved output to NAS")
+                else:
+                    logging.error(f"Failed to save output to NAS")
+            except Exception as e:
+                logging.error(f"Failed to upload output JSON to NAS: {e}")
         else:
             logging.error(f"Failed to process {pdf_result['filename']}: {pdf_result.get('error', 'Unknown error')}")
         
@@ -605,18 +646,6 @@ def run_iasb_prep():
                 os.remove(local_pdf_path)
         except OSError:
             pass
-    
-    # Save all pages data to NAS
-    logging.info(f"Saving {len(all_pages_data)} pages to NAS: {share_name}/{output_path_relative}")
-    
-    try:
-        json_bytes = json.dumps(all_pages_data, indent=2, ensure_ascii=False).encode('utf-8')
-        if write_to_nas(share_name, output_path_relative, json_bytes):
-            logging.info(f"Successfully saved output to NAS")
-        else:
-            logging.error(f"Failed to save output to NAS")
-    except Exception as e:
-        logging.error(f"Failed to create output JSON: {e}")
     
     # Upload log file to NAS
     try:
@@ -645,8 +674,12 @@ def run_iasb_prep():
     # Final summary
     print("--- IASB Prep Summary ---")
     print(f"Document ID: {DOCUMENT_ID}")
-    print(f"PDF file processed: {filename}")
-    print(f"Total pages extracted: {len(all_pages_data)}")
+    if 'pdf_result' in locals() and pdf_result:
+        print(f"PDF file processed: {filename}")
+        print(f"Total pages: {pdf_result.get('total_pages', 0)}")
+        print(f"Successfully processed: {pdf_result.get('successful_pages', 0)}")
+        if pdf_result.get('failed_pages'):
+            print(f"Failed pages: {len(pdf_result.get('failed_pages', []))}")
     print(f"Output file: {share_name}/{output_path_relative}")
     print("--- IASB Prep Completed ---")
 
