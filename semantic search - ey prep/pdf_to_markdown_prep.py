@@ -250,6 +250,21 @@ def setup_logging():
         ]
     )
     
+    # Suppress Azure SDK verbose logging
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.core").setLevel(logging.WARNING)
+    logging.getLogger("azure.ai.documentintelligence").setLevel(logging.WARNING)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+    
+    # Also suppress urllib3 and requests logging from Azure SDK
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("requests.packages.urllib3").setLevel(logging.WARNING)
+    
+    # Suppress SMB connection details
+    logging.getLogger("SMB").setLevel(logging.WARNING)
+    logging.getLogger("SMB.SMBConnection").setLevel(logging.WARNING)
+    
     # Log the temp path for later upload
     logging.info(f"Temporary log file: {temp_log_path}")
     return temp_log_path
