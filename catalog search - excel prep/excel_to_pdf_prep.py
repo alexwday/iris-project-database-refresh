@@ -50,6 +50,10 @@ NAS_INPUT_FOLDER_PATH = "path/to/excel/input/folder"  # e.g., "iris/internal_wik
 # PDFs will be named "APG Wiki - Row X.pdf" where X is the Excel row number
 NAS_OUTPUT_FOLDER_PATH = "path/to/pdf/output/folder"  # e.g., "iris/internal_wiki/output"
 
+# --- Excel Configuration ---
+# Name of the specific sheet to read from the Excel file
+EXCEL_SHEET_NAME = "APG WIKI"
+
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
@@ -165,9 +169,19 @@ def read_excel_from_nas(conn, share_name, file_path):
         file_attributes, filesize = conn.retrieveFile(share_name, file_path, file_obj)
         file_obj.seek(0)
         
-        # Read Excel file
-        df = pd.read_excel(file_obj, engine='openpyxl')
-        print(f"Successfully read Excel file from NAS: {file_path} ({len(df)} rows)")
+        # Read Excel file - specifically the configured sheet
+        try:
+            df = pd.read_excel(file_obj, engine='openpyxl', sheet_name=EXCEL_SHEET_NAME)
+            print(f"Successfully read sheet '{EXCEL_SHEET_NAME}' from Excel file: {file_path} ({len(df)} rows)")
+        except ValueError as ve:
+            # Sheet doesn't exist - list available sheets for debugging
+            file_obj.seek(0)  # Reset buffer position
+            excel_file = pd.ExcelFile(file_obj, engine='openpyxl')
+            available_sheets = excel_file.sheet_names
+            print(f"[ERROR] Sheet '{EXCEL_SHEET_NAME}' not found in Excel file.")
+            print(f"Available sheets: {', '.join(available_sheets)}")
+            return None
+        
         return df
     except Exception as e:
         print(f"[ERROR] Failed to read Excel file from NAS '{file_path}': {e}")
