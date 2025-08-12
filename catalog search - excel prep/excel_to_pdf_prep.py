@@ -23,8 +23,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, PageBreak, 
                                 Table, TableStyle, KeepTogether, HRFlowable, 
-                                FrameBreak, KeepInFrame)
+                                FrameBreak, KeepInFrame, Flowable, NextPageTemplate,
+                                PageTemplate, Frame, BaseDocTemplate)
 from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER, TA_RIGHT
+from reportlab.pdfgen import canvas
 import openpyxl
 
 # ==============================================================================
@@ -176,13 +178,73 @@ def read_excel_from_nas(conn, share_name, file_path):
 def create_pdf_from_row(row_data, row_number):
     """Create a professionally formatted PDF document with containerized sections."""
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
+    
+    # Get field values for header/footer use
+    year = get_value_simple(row_data, 0)
+    month = get_value_simple(row_data, 1)
+    date_str = f"{month or ''} {year or ''}".strip()
+    
+    # Custom Document Template class for headers and footers
+    class APGWikiDocTemplate(BaseDocTemplate):
+        def __init__(self, filename, **kwargs):
+            self.row_number = row_number
+            self.date_str = date_str
+            BaseDocTemplate.__init__(self, filename, **kwargs)
+            
+        def afterPage(self):
+            """Add header and footer to each page"""
+            # Save the state of our canvas so we can draw on it
+            self.canv.saveState()
+            
+            # Header
+            self.canv.setFont('Helvetica-Bold', 12)
+            self.canv.setFillColor(colors.HexColor('#1e293b'))
+            self.canv.drawString(0.5*inch, letter[1] - 0.4*inch, "APG Wiki")
+            
+            self.canv.setFont('Helvetica', 10)
+            self.canv.setFillColor(colors.HexColor('#6b7280'))
+            header_right = f"Row #{self.row_number}"
+            if self.date_str:
+                header_right += f" | {self.date_str}"
+            self.canv.drawRightString(letter[0] - 0.5*inch, letter[1] - 0.4*inch, header_right)
+            
+            # Header line
+            self.canv.setStrokeColor(colors.HexColor('#e5e7eb'))
+            self.canv.setLineWidth(0.5)
+            self.canv.line(0.5*inch, letter[1] - 0.5*inch, letter[0] - 0.5*inch, letter[1] - 0.5*inch)
+            
+            # Footer
+            self.canv.setFont('Helvetica', 7)
+            self.canv.setFillColor(colors.HexColor('#9ca3af'))
+            footer_text = f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database"
+            self.canv.drawCentredString(letter[0]/2, 0.3*inch, footer_text)
+            
+            # Footer line
+            self.canv.line(0.5*inch, 0.45*inch, letter[0] - 0.5*inch, 0.45*inch)
+            
+            # Restore the state
+            self.canv.restoreState()
+    
+    def get_value_simple(data, col_index):
+        """Simple value getter for header/footer use"""
+        try:
+            if col_index < len(data):
+                value = data.iloc[col_index]
+                if pd.isna(value) or value is None:
+                    return None
+                return str(value).strip()
+        except:
+            pass
+        return None
+    
+    # Create document with custom template
+    doc = APGWikiDocTemplate(
         buffer,
         pagesize=letter,
         rightMargin=0.5*inch,
         leftMargin=0.5*inch,
-        topMargin=0.5*inch,
-        bottomMargin=0.5*inch,
+        topMargin=0.7*inch,  # Space for header
+        bottomMargin=0.6*inch,  # Space for footer
     )
     
     # Container for the 'Flowable' objects
@@ -308,7 +370,7 @@ def create_pdf_from_row(row_data, row_number):
         return value
     
     # Helper function to create a containerized section
-    def create_container(title, content_table, bg_color, header_color):
+    def create_container(title, content_table, bg_color, header_color, allow_splitting=False):
         """Creates a containerized section with header and content."""
         # Create header row
         header = Table(
@@ -325,7 +387,9 @@ def create_pdf_from_row(row_data, row_number):
         
         # Combine header and content
         container_data = [[header], [content_table]]
-        container = Table(container_data, colWidths=[6.5*inch])
+        container = Table(container_data, colWidths=[6.5*inch], 
+                        splitByRow=1 if allow_splitting else 0,
+                        repeatRows=1 if allow_splitting else 0)
         container.setStyle(TableStyle([
             ('BACKGROUND', (0, 1), (-1, -1), bg_color),
             ('BOX', (0, 0), (-1, -1), 1, COLORS['border']),
@@ -338,6 +402,23 @@ def create_pdf_from_row(row_data, row_number):
             ('TOPPADDING', (0, 0), (-1, 0), 0),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 0),
         ]))
+        
+        # If splitting is allowed, we'll handle continuation separately
+        if allow_splitting:
+            # Create a continuation header for page breaks
+            cont_header = Table(
+                [[Paragraph(f"{title} - Continued", section_header_style)]],
+                colWidths=[6.5*inch]
+            )
+            cont_header.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), header_color),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]))
+            return [container]
+        
         return container
     
     # Get all field values
@@ -365,24 +446,11 @@ def create_pdf_from_row(row_data, row_number):
     related_capm = get_value(21)
     apg_reviewer = get_value(22)
     
-    # TITLE SECTION - Single line with APG Wiki on left, Row # and date on right
-    date_str = f"{month or ''} {year or ''}"
-    title_table = Table([
-        [
-            Paragraph("APG Wiki", title_left_style),
-            Paragraph(f"Row #{row_number} | {date_str}", title_right_style)
-        ]
-    ], colWidths=[3.5*inch, 3.5*inch])
-    
-    title_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-        ('TOPPADDING', (0, 0), (-1, -1), 0),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    story.append(title_table)
-    story.append(Spacer(1, 0.1*inch))
+    # PAGE 1: FIXED SMALLER SECTIONS
+    # These sections should all fit on the first page:
+    # 1. Standards & Products
+    # 2. Review & Approvals  
+    # 3. Documentation
     
     # SECTION 1: STANDARDS & PRODUCTS (Container 1 - Blue theme)
     if ifrs_standard or us_gaap or other_standards or related_product or related_platform:
@@ -451,91 +519,7 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # SECTION 2: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
-    if accounting_question or conclusion or key_facts:
-        issue_data = []
-        
-        if accounting_question:
-            issue_data.append([
-                Paragraph("Accounting Question", field_label_style),
-                Paragraph(format_value(accounting_question), field_value_style)
-            ])
-        
-        if key_facts:
-            issue_data.append([
-                Paragraph("Key Facts & Circumstances", field_label_style),
-                Paragraph(format_value(key_facts), field_value_style)
-            ])
-        
-        if conclusion:
-            issue_data.append([
-                Paragraph("Conclusion Reached", field_label_style),
-                Paragraph(format_value(conclusion), field_value_style)
-            ])
-        
-        if issue_data:
-            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
-            issue_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
-            ]))
-            
-            container = create_container(
-                "Core Issue Analysis",
-                issue_table,
-                COLORS['container_2'],
-                COLORS['secondary']
-            )
-            story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
-    
-    # SECTION 3: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
-    if guidance_ref or differences or benchmarking:
-        technical_data = []
-        
-        if guidance_ref:
-            technical_data.append([
-                Paragraph("Guidance References", field_label_style),
-                Paragraph(format_value(guidance_ref), field_value_style)
-            ])
-        
-        if differences:
-            technical_data.append([
-                Paragraph("IFRS/US GAAP Differences", field_label_style),
-                Paragraph(format_value(differences), field_value_style)
-            ])
-        
-        if benchmarking:
-            technical_data.append([
-                Paragraph("Benchmarking", field_label_style),
-                Paragraph(format_value(benchmarking), field_value_style)
-            ])
-        
-        if technical_data:
-            technical_table = Table(technical_data, colWidths=[1.5*inch, 4.8*inch])
-            technical_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
-            ]))
-            
-            container = create_container(
-                "Technical Details & References",
-                technical_table,
-                COLORS['container_3'],
-                COLORS['warning']
-            )
-            story.append(KeepTogether(container))
-            story.append(Spacer(1, 0.15*inch))
-    
-    # SECTION 4: REVIEW & APPROVALS (Container 4 - Green theme)
+    # SECTION 2: REVIEW & APPROVALS (Container 4 - Green theme) - Moved to page 1
     if preparer or stakeholder_concurrence or pwc_concurrence or apg_reviewer:
         approval_data = []
         
@@ -593,7 +577,7 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # SECTION 5: DOCUMENTATION & CAPM (Container 5 - Purple theme)
+    # SECTION 3: DOCUMENTATION (Container 5 - Purple theme) - Moved to page 1
     if server_link or key_files or capm_required or capm_date or related_capm:
         doc_data = []
         
@@ -646,7 +630,7 @@ def create_pdf_from_row(row_data, row_number):
             ]))
             
             container = create_container(
-                "Documentation & CAPM",
+                "Documentation",  # Removed "& CAPM" as requested
                 doc_table,
                 COLORS['container_5'],
                 COLORS['primary']
@@ -654,11 +638,98 @@ def create_pdf_from_row(row_data, row_number):
             story.append(KeepTogether(container))
             story.append(Spacer(1, 0.15*inch))
     
-    # FOOTER
-    story.append(Spacer(1, 0.2*inch))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=COLORS['border']))
-    story.append(Spacer(1, 0.05*inch))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')} | Internal APG Wiki Database", footer_style))
+    # PAGE BREAK - Move to page 2 for larger sections
+    story.append(PageBreak())
+    
+    # PAGE 2: LARGER SECTIONS WITH VARIABLE CONTENT
+    
+    # SECTION 4: CORE ISSUE ANALYSIS (Container 2 - Cyan theme)
+    if accounting_question or conclusion or key_facts:
+        issue_data = []
+        
+        if accounting_question:
+            issue_data.append([
+                Paragraph("Accounting Question", field_label_style),
+                Paragraph(format_value(accounting_question), field_value_style)
+            ])
+        
+        if key_facts:
+            issue_data.append([
+                Paragraph("Key Facts & Circumstances", field_label_style),
+                Paragraph(format_value(key_facts), field_value_style)
+            ])
+        
+        if conclusion:
+            issue_data.append([
+                Paragraph("Conclusion Reached", field_label_style),
+                Paragraph(format_value(conclusion), field_value_style)
+            ])
+        
+        if issue_data:
+            issue_table = Table(issue_data, colWidths=[1.5*inch, 4.8*inch])
+            issue_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            # Allow splitting for large content sections
+            container = create_container(
+                "Core Issue Analysis",
+                issue_table,
+                COLORS['container_2'],
+                COLORS['secondary'],
+                allow_splitting=True
+            )
+            story.extend(container if isinstance(container, list) else [container])
+            story.append(Spacer(1, 0.15*inch))
+    
+    # SECTION 5: TECHNICAL DETAILS & REFERENCES (Container 3 - Amber theme)
+    if guidance_ref or differences or benchmarking:
+        technical_data = []
+        
+        if guidance_ref:
+            technical_data.append([
+                Paragraph("Guidance References", field_label_style),
+                Paragraph(format_value(guidance_ref), field_value_style)
+            ])
+        
+        if differences:
+            technical_data.append([
+                Paragraph("IFRS/US GAAP Differences", field_label_style),
+                Paragraph(format_value(differences), field_value_style)
+            ])
+        
+        if benchmarking:
+            technical_data.append([
+                Paragraph("Benchmarking", field_label_style),
+                Paragraph(format_value(benchmarking), field_value_style)
+            ])
+        
+        if technical_data:
+            technical_table = Table(technical_data, colWidths=[1.5*inch, 4.8*inch])
+            technical_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LINEBELOW', (0, 0), (-1, -2), 0.5, COLORS['border']),
+            ]))
+            
+            # Allow splitting for large content sections
+            container = create_container(
+                "Technical Details & References",
+                technical_table,
+                COLORS['container_3'],
+                COLORS['warning'],
+                allow_splitting=True
+            )
+            story.extend(container if isinstance(container, list) else [container])
+            story.append(Spacer(1, 0.15*inch))
     
     # Build PDF
     doc.build(story)
