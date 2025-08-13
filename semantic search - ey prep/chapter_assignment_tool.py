@@ -1241,31 +1241,51 @@ class ChapterAssignmentTool(QMainWindow):
             return []
     
     def update_json_with_chapter_files(self, created_files: List[Dict], output_dir: str):
-        """Update JSON records to reference the new chapter PDF files."""
-        # Create mapping of chapter_number to new filename
+        """Update JSON records to reference the new chapter PDF files and adjust page numbers."""
+        # Create mapping of chapter_number to file info and page offset
         chapter_to_file = {}
         for f in created_files:
             chapter_to_file[f['chapter_number']] = {
                 'filename': f['filename'],
-                'filepath': os.path.join(output_dir, f['filename']).replace('\\', '/')
+                'filepath': os.path.join(output_dir, f['filename']).replace('\\', '/'),
+                'start_page': f['start_page'],  # Original start page of this chapter
+                'end_page': f['end_page']
             }
         
-        # Store original filename if not already stored
-        if self.json_data and 'original_filename' not in self.json_data[0]:
-            original_filename = self.json_data[0].get('filename', 'unknown.pdf')
-            for record in self.json_data:
-                record['original_filename'] = original_filename
-        
-        # Update each record with new filename
+        # Store original values if not already stored
         updated_count = 0
         for record in self.json_data:
+            # Preserve original filename if not already stored
+            if 'original_filename' not in record:
+                record['original_filename'] = record.get('filename', 'unknown.pdf')
+            
+            # Preserve original page number if not already stored
+            if 'original_page_number' not in record:
+                record['original_page_number'] = record.get('page_number', 0)
+            
+            # Update with new chapter PDF info
             chapter_num = record.get('chapter_number')
             if chapter_num is not None and chapter_num in chapter_to_file:
-                record['filename'] = chapter_to_file[chapter_num]['filename']
-                record['filepath'] = chapter_to_file[chapter_num]['filepath']
+                chapter_info = chapter_to_file[chapter_num]
+                
+                # Update filename and path
+                record['filename'] = chapter_info['filename']
+                record['filepath'] = chapter_info['filepath']
+                
+                # Calculate new page number within the chapter PDF
+                # Original page 18 in chapter starting at page 18 becomes page 1
+                original_page = record.get('original_page_number', record.get('page_number', 0))
+                chapter_start = chapter_info['start_page']
+                new_page_number = original_page - chapter_start + 1
+                
+                # Update page number to reflect position in chapter PDF
+                record['page_number'] = max(1, new_page_number)  # Ensure at least page 1
+                
                 updated_count += 1
+                
+                logging.debug(f"Page {original_page} -> Page {new_page_number} in {chapter_info['filename']}")
         
-        logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames")
+        logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames and page numbers")
         return updated_count
     
     def save_to_json(self):
