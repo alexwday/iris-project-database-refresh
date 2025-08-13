@@ -67,9 +67,9 @@ class ChapterEditDialog(QDialog):
         
         layout = QFormLayout()
         
-        # Chapter number
+        # Chapter number (allow 0 for front matter)
         self.number_spin = QSpinBox()
-        self.number_spin.setMinimum(1)
+        self.number_spin.setMinimum(0)
         self.number_spin.setMaximum(999)
         if self.chapter:
             self.number_spin.setValue(self.chapter.chapter_number)
@@ -78,7 +78,7 @@ class ChapterEditDialog(QDialog):
                 max_num = max(ch.chapter_number for ch in self.existing_chapters)
                 self.number_spin.setValue(max_num + 1)
             else:
-                self.number_spin.setValue(1)
+                self.number_spin.setValue(0)  # Start with 0 for front matter
         layout.addRow("Chapter Number:", self.number_spin)
         
         # Chapter name
@@ -390,7 +390,7 @@ class ChapterAssignmentTool(QMainWindow):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Ch#:"))
         self.quick_chapter_num = QSpinBox()
-        self.quick_chapter_num.setMinimum(1)
+        self.quick_chapter_num.setMinimum(0)  # Allow chapter 0
         self.quick_chapter_num.setMaximum(999)
         self.quick_chapter_num.setMaximumWidth(60)
         row1.addWidget(self.quick_chapter_num)
@@ -731,7 +731,7 @@ class ChapterAssignmentTool(QMainWindow):
                 self.page_label.setText(f"/ {self.total_pages}")
                 self.quick_start.setMaximum(self.total_pages)
                 self.quick_end.setMaximum(self.total_pages)
-                self.quick_chapter_num.setValue(1)
+                self.quick_chapter_num.setValue(0)  # Start with 0 for front matter
                 
                 # Load existing chapters if any
                 self.load_existing_chapters()
@@ -901,7 +901,8 @@ class ChapterAssignmentTool(QMainWindow):
             max_num = max(ch.chapter_number for ch in self.chapters)
             self.quick_chapter_num.setValue(max_num + 1)
         else:
-            self.quick_chapter_num.setValue(1)
+            # Start with 0 if no chapters exist (for front matter)
+            self.quick_chapter_num.setValue(0)
             
     def edit_selected_chapter(self):
         """Edit the selected chapter"""
