@@ -527,13 +527,27 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
 
     if total_tokens <= processing_limit:
         logging.info("Processing chapter summary/tags in a single call.")
-        result = process_chapter_segment_for_details(
-            chapter_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE, is_final_segment=True
-        )
+        # Retry logic for single call processing
+        result = None
+        for retry in range(3):  # Try up to 3 times
+            try:
+                result = process_chapter_segment_for_details(
+                    chapter_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE, is_final_segment=True
+                )
+                if result:
+                    break  # Success
+                elif retry < 2:
+                    logging.warning(f"Single call processing failed, retrying ({retry + 2}/3)...")
+                    time.sleep(5 * (retry + 1))
+            except Exception as e:
+                logging.warning(f"Exception in single call processing, attempt {retry + 1}/3: {e}")
+                if retry < 2:
+                    time.sleep(5 * (retry + 1))
+        
         if result:
             final_chapter_details = {'summary': result.get('summary'), 'tags': result.get('tags')}
         else:
-            logging.error("Failed to process chapter in single call.")
+            logging.error("Failed to process chapter in single call after 3 attempts.")
     else:
         logging.info(f"Chapter exceeds token limit ({total_tokens} > {processing_limit}). Processing in segments.")
         num_segments = (total_tokens // processing_limit) + 1
@@ -548,10 +562,24 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
         for i, segment_text in enumerate(tqdm(segments, desc="Processing Segments")):
             logging.debug(f"Processing segment {i + 1}/{len(segments)}...")
             is_final = (i == len(segments) - 1)
-            segment_result = process_chapter_segment_for_details(
-                segment_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE,
-                prev_summary=current_summary, prev_tags=current_tags, is_final_segment=is_final
-            )
+            
+            # Retry logic for segment processing
+            segment_result = None
+            for retry in range(3):  # Try up to 3 times
+                try:
+                    segment_result = process_chapter_segment_for_details(
+                        segment_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE,
+                        prev_summary=current_summary, prev_tags=current_tags, is_final_segment=is_final
+                    )
+                    if segment_result:
+                        break  # Success, exit retry loop
+                    elif retry < 2:
+                        logging.warning(f"Segment {i + 1} failed, retrying ({retry + 2}/3)...")
+                        time.sleep(5 * (retry + 1))  # Exponential backoff
+                except Exception as e:
+                    logging.warning(f"Exception processing segment {i + 1}, attempt {retry + 1}/3: {e}")
+                    if retry < 2:
+                        time.sleep(5 * (retry + 1))
 
             if segment_result:
                 current_summary = segment_result.get('summary')
@@ -560,8 +588,12 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
                     final_result = segment_result
                 logging.debug(f"Segment {i + 1} processed.")
             else:
-                logging.error(f"Error processing segment {i + 1}. Aborting chapter summary generation.")
-                return None, None
+                logging.error(f"Error processing segment {i + 1} after 3 attempts. Continuing with partial data.")
+                # Don't abort - try to continue with what we have
+                if i == len(segments) - 1 and current_summary:
+                    # If it's the final segment and we have previous summaries, use them
+                    final_result = {'summary': current_summary, 'tags': current_tags}
+                    logging.warning(f"Using summary from segment {i} as final result.")
 
         if final_result:
             logging.info("Successfully processed all segments for chapter summary/tags.")
@@ -631,11 +663,14 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     # Generate summary and tags via GPT
     chapter_summary, chapter_tags = None, None
     if client:
-        chapter_summary, chapter_tags = get_chapter_summary_and_tags(
-            concatenated_content, client, model_name=MODEL_NAME_CHAT
-        )
-        if chapter_summary is None or chapter_tags is None:
-            logging.warning(f"  Failed to generate summary/tags for chapter {chapter_num}")
+        try:
+            chapter_summary, chapter_tags = get_chapter_summary_and_tags(
+                concatenated_content, client, model_name=MODEL_NAME_CHAT
+            )
+            if chapter_summary is None or chapter_tags is None:
+                logging.warning(f"  Failed to generate summary/tags for chapter {chapter_num}. Chapter will still be included in output.")
+        except Exception as e:
+            logging.error(f"  Exception generating summary/tags for chapter {chapter_num}: {e}. Chapter will still be included in output.")
     else:
         logging.warning("  OpenAI client not available. Skipping summary/tag generation.")
     
