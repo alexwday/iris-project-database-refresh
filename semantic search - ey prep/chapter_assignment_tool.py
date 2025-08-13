@@ -1289,67 +1289,38 @@ class ChapterAssignmentTool(QMainWindow):
         return updated_count
     
     def save_to_json(self):
-        """Save chapter assignments to JSON and optionally split PDF"""
+        """Save chapter assignments and split PDF"""
         if not self.json_file_path:
             self.save_as_json()
             return
         
-        # Check if we should split PDF
-        if self.chapters and not self.pdf_file_path:
-            # Ask if user wants to load PDF for splitting
+        # Require both JSON and PDF to be loaded
+        if not self.pdf_file_path:
             reply = QMessageBox.question(
-                self, "No PDF Loaded",
-                "Would you like to load the source PDF to split it into chapter files?\n\n"
-                "Select 'Yes' to load PDF and split\n"
-                "Select 'No' to save JSON with chapter assignments only",
+                self, "Load PDF",
+                "Please load the PDF file to split it by chapters.\n\n"
+                "Would you like to load the PDF now?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             
             if reply == QMessageBox.StandardButton.Yes:
                 self.open_pdf_file()
                 if not self.pdf_file_path:
-                    # User cancelled PDF selection, save with chapters assigned
-                    self.save_json_with_chapters_only()
+                    # User cancelled
                     return
-        
-        # If PDF is loaded and chapters exist, ask about splitting
-        if self.pdf_file_path and self.chapters:
-            reply = QMessageBox.question(
-                self, "Split PDF by Chapters",
-                "Do you want to split the PDF into individual chapter files?\n\n"
-                "Select 'Yes' to split PDF and create new JSON\n"
-                "Select 'No' to save JSON with chapter assignments only",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                self.split_and_save()
+            else:
                 return
         
-        # Just save JSON with chapter assignments (no splitting)
-        self.save_json_with_chapters_only()
-    
-    def save_json_with_chapters_only(self):
-        """Save JSON with chapter assignments but without PDF splitting."""
-        # Generate new filename with timestamp
-        json_dir = os.path.dirname(self.json_file_path)
-        base_name = os.path.basename(self.json_file_path)
-        name_without_ext = os.path.splitext(base_name)[0]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        new_json_name = f"{name_without_ext}_with_chapters_{timestamp}.json"
-        new_json_path = os.path.join(json_dir, new_json_name)
+        # Require chapters to be defined
+        if not self.chapters:
+            QMessageBox.warning(
+                self, "No Chapters Defined", 
+                "Please define chapters before saving."
+            )
+            return
         
-        # Save to new file
-        self.save_json_to_file(new_json_path)
-        
-        # Update reference
-        self.json_file_path = new_json_path
-        
-        QMessageBox.information(
-            self, "Success",
-            f"Saved JSON with chapter assignments as:\n{new_json_name}\n\n"
-            f"Original JSON preserved unchanged."
-        )
+        # Split and save
+        self.split_and_save()
     
     def split_and_save(self):
         """Split PDF and save both PDFs and updated JSON."""
@@ -1391,27 +1362,23 @@ class ChapterAssignmentTool(QMainWindow):
             
             progress.setValue(len(created_files))
             
-            # Update JSON with new filenames (in memory, not saved yet)
+            # Update JSON with new filenames (in memory)
             updated_count = self.update_json_with_chapter_files(saved_files, output_dir)
             
-            # Generate new filename for the split version
-            base_name = os.path.basename(self.json_file_path)
-            name_without_ext = os.path.splitext(base_name)[0]
-            new_json_name = f"{name_without_ext}_chapters_split_{timestamp}.json"
-            new_json_path = os.path.join(json_dir, new_json_name)
+            # Save the updated JSON in the output directory with the PDFs
+            output_json_name = "stage1_input.json"  # Clear name for Stage 1
+            output_json_path = os.path.join(output_dir, output_json_name)
             
-            # Save updated JSON with new name
-            self.save_json_to_file(new_json_path)
-            
-            # Keep reference to new file
-            self.json_file_path = new_json_path
+            # Save updated JSON
+            self.save_json_to_file(output_json_path)
             
             QMessageBox.information(
                 self, "Success",
-                f"Created {len(saved_files)} chapter PDFs in:\n{output_dir}\n\n"
-                f"Saved updated JSON as:\n{new_json_name}\n\n"
-                f"Updated {updated_count} records with split PDF references.\n\n"
-                f"Original JSON preserved unchanged."
+                f"✅ Output saved to:\n{output_dir}\n\n"
+                f"📁 Created {len(saved_files)} chapter PDFs\n"
+                f"📄 Created {output_json_name} with {updated_count} updated records\n\n"
+                f"This JSON is ready for Stage 1 processing.\n"
+                f"Original files remain unchanged."
             )
             
         except Exception as e:
