@@ -1255,12 +1255,19 @@ class ChapterAssignmentTool(QMainWindow):
         # Group records by chapter for proper ordering
         chapters_records = {}
         for record in self.json_data:
-            # Preserve original values if not already stored
-            if 'original_filename' not in record:
-                record['original_filename'] = record.get('filename', 'unknown.pdf')
+            # Preserve TRULY original values (use source_ prefix for clarity)
+            # These should NEVER change after first set
+            if 'source_filename' not in record:
+                # If original_filename exists from previous run, use it, otherwise use filename
+                record['source_filename'] = record.get('original_filename', record.get('filename', 'unknown.pdf'))
             
-            if 'original_page_number' not in record:
-                record['original_page_number'] = record.get('page_number', 0)
+            if 'source_page_number' not in record:
+                # If original_page_number exists from previous run, use it, otherwise use page_number
+                record['source_page_number'] = record.get('original_page_number', record.get('page_number', 0))
+            
+            # Also keep the original_ fields for backwards compatibility
+            record['original_filename'] = record['source_filename']
+            record['original_page_number'] = record['source_page_number']
             
             # Group by chapter
             chapter_num = record.get('chapter_number')
@@ -1282,28 +1289,28 @@ class ChapterAssignmentTool(QMainWindow):
             # Validate data integrity - check for issues
             issues_found = []
             
-            # Check for mixed types in page numbers
+            # Check for mixed types in page numbers (use source as truth)
             page_types = set()
             for record in chapter_records:
-                orig_page = record.get('original_page_number', record.get('page_number'))
-                if orig_page is not None:
-                    page_types.add(type(orig_page).__name__)
+                source_page = record.get('source_page_number', record.get('original_page_number', record.get('page_number')))
+                if source_page is not None:
+                    page_types.add(type(source_page).__name__)
             
             if len(page_types) > 1:
                 issues_found.append(f"Mixed data types in page numbers: {page_types}")
                 logging.error(f"Chapter {chapter_num}: Mixed page number types detected: {page_types}")
             
-            # Check if records are in order
+            # Check if records are in order (based on source pages)
             prev_page = None
             out_of_order = False
             for record in chapter_records:
-                orig_page = record.get('original_page_number', record.get('page_number', 0))
+                source_page = record.get('source_page_number', record.get('original_page_number', record.get('page_number', 0)))
                 # Convert to int for comparison if needed
                 try:
-                    current_page = int(orig_page) if orig_page is not None else 0
+                    current_page = int(source_page) if source_page is not None else 0
                 except (ValueError, TypeError):
-                    logging.error(f"Chapter {chapter_num}: Invalid page number: {orig_page}")
-                    issues_found.append(f"Invalid page number: {orig_page}")
+                    logging.error(f"Chapter {chapter_num}: Invalid page number: {source_page}")
+                    issues_found.append(f"Invalid page number: {source_page}")
                     current_page = 0
                 
                 if prev_page is not None and current_page < prev_page:
@@ -1457,12 +1464,19 @@ class ChapterAssignmentTool(QMainWindow):
             # Apply chapter assignments
             chapter_counts = {}  # Track assignments for logging
             for record in self.json_data:
-                # Use original_page_number if it exists (after PDF split), otherwise use page_number
-                page_num = record.get('original_page_number', record['page_number'])
+                # ALWAYS use source_page_number for chapter assignment (the true original)
+                # Fall back through the chain: source -> original -> current page_number
+                page_num = record.get('source_page_number', 
+                          record.get('original_page_number', 
+                          record.get('page_number', 0)))
                 
-                # Diagnostic: warn if using chapter-relative page numbers
-                if 'original_page_number' in record and record['page_number'] != page_num:
-                    logging.debug(f"Using original_page_number {page_num} instead of page_number {record['page_number']}")
+                # Diagnostic: log which field we're using
+                if 'source_page_number' in record:
+                    logging.debug(f"Using source_page_number {page_num} for chapter assignment")
+                elif 'original_page_number' in record:
+                    logging.debug(f"Using original_page_number {page_num} for chapter assignment")
+                else:
+                    logging.debug(f"Using page_number {page_num} for chapter assignment (no source/original found)")
                 
                 chapter_assigned = False
                 for chapter in self.chapters:
