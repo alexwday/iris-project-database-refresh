@@ -11,19 +11,36 @@ import sys
 import json
 import os
 import re
+import tempfile
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QTextEdit, QSpinBox, QLineEdit, QGroupBox, 
     QSplitter, QFileDialog, QMessageBox, QDialog, QDialogButtonBox, 
     QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView, 
-    QMenuBar, QStatusBar, QToolBar, QFrame, QScrollArea
+    QMenuBar, QStatusBar, QToolBar, QFrame, QScrollArea, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCursor, QCursor
+
+# PDF handling
+try:
+    from pypdf import PdfReader, PdfWriter
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    print("WARNING: pypdf not installed. PDF splitting disabled. Install with: pip install pypdf")
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 
 @dataclass
@@ -160,6 +177,8 @@ class ChapterAssignmentTool(QMainWindow):
         super().__init__()
         self.json_data = []
         self.json_file_path = None
+        self.pdf_file_path = None
+        self.pdf_reader = None
         self.chapters = []
         self.current_page = 1
         self.total_pages = 0
@@ -233,9 +252,14 @@ class ChapterAssignmentTool(QMainWindow):
         info_layout = QHBoxLayout(info_frame)
         info_layout.setContentsMargins(10, 5, 10, 5)  # Reduce margins
         
-        self.info_label = QLabel("No file loaded")
+        self.info_label = QLabel("No JSON loaded")
         self.info_label.setStyleSheet("QLabel { border: none; font-size: 10pt; }")
         info_layout.addWidget(self.info_label)
+        
+        # PDF info in the middle
+        self.pdf_info_label = QLabel("No PDF loaded")
+        self.pdf_info_label.setStyleSheet("QLabel { border: none; font-size: 10pt; color: #2196F3; }")
+        info_layout.addWidget(self.pdf_info_label)
         
         # Page info on the right
         self.page_info_label = QLabel("")
@@ -298,6 +322,11 @@ class ChapterAssignmentTool(QMainWindow):
         open_action.triggered.connect(self.open_json_file)
         toolbar.addAction(open_action)
         
+        open_pdf_action = QAction("📄 Open PDF", self)
+        open_pdf_action.setShortcut("Ctrl+Shift+O")
+        open_pdf_action.triggered.connect(self.open_pdf_file)
+        toolbar.addAction(open_pdf_action)
+        
         save_action = QAction("💾 Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
         save_action.triggered.connect(self.save_to_json)
@@ -349,6 +378,13 @@ class ChapterAssignmentTool(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_json_file)
         file_menu.addAction(open_action)
+        
+        open_pdf_action = QAction("Open Source PDF...", self)
+        open_pdf_action.setShortcut("Ctrl+Shift+O")
+        open_pdf_action.triggered.connect(self.open_pdf_file)
+        file_menu.addAction(open_pdf_action)
+        
+        file_menu.addSeparator()
         
         save_action = QAction("Save", self)
         save_action.setShortcut(QKeySequence.StandardKey.Save)
@@ -705,6 +741,40 @@ class ChapterAssignmentTool(QMainWindow):
         if file_path:
             self.load_json_file(file_path)
             
+    def open_pdf_file(self):
+        """Open the source PDF file"""
+        if not PDF_SUPPORT:
+            QMessageBox.warning(self, "PDF Support Missing", 
+                              "pypdf library not installed. Please install with: pip install pypdf")
+            return
+            
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Source PDF", "", "PDF Files (*.pdf)"
+        )
+        if file_path:
+            self.load_pdf_file(file_path)
+            
+    def load_pdf_file(self, file_path: str):
+        """Load PDF file for splitting"""
+        try:
+            self.pdf_reader = PdfReader(file_path)
+            self.pdf_file_path = file_path
+            pdf_pages = len(self.pdf_reader.pages)
+            
+            self.pdf_info_label.setText(f"PDF: {os.path.basename(file_path)} ({pdf_pages} pages)")
+            self.status_bar.showMessage(f"Loaded PDF: {os.path.basename(file_path)}")
+            
+            # Verify page counts match if JSON is loaded
+            if self.json_data and pdf_pages != self.total_pages:
+                QMessageBox.warning(self, "Page Count Mismatch",
+                                  f"PDF has {pdf_pages} pages but JSON has {self.total_pages} pages.\n"
+                                  f"Please ensure you're using the correct PDF file.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load PDF:\n{str(e)}")
+            self.pdf_file_path = None
+            self.pdf_reader = None
+            
     def load_json_file(self, file_path: str):
         """Load JSON data from file"""
         try:
@@ -721,9 +791,7 @@ class ChapterAssignmentTool(QMainWindow):
                 
                 # Update UI
                 self.info_label.setText(
-                    f"File: {os.path.basename(file_path)} | "
-                    f"Document: {filename} | "
-                    f"ID: {doc_id}"
+                    f"JSON: {os.path.basename(file_path)} | Doc: {filename}"
                 )
                 
                 # Update page controls
@@ -1099,13 +1167,201 @@ class ChapterAssignmentTool(QMainWindow):
         else:
             QMessageBox.information(self, "Validation Results", "✅ All chapters valid!")
             
+    def cleanup_filename(self, name: str) -> str:
+        """Clean chapter name for use as filename."""
+        # Remove invalid characters
+        name = re.sub(r'[\\/:?*<>|"\']', '', name)
+        # Replace spaces with underscores
+        name = re.sub(r'\s+', '_', name)
+        # Remove multiple underscores
+        name = re.sub(r'_+', '_', name)
+        # Limit length and strip underscores
+        return name[:100].strip('_')
+    
+    def split_pdf_by_chapters(self) -> List[Dict]:
+        """Split PDF into individual chapter files based on chapter definitions."""
+        if not self.chapters:
+            logging.warning("No chapters defined for splitting")
+            return []
+        
+        if not self.pdf_reader or not self.pdf_file_path:
+            logging.error("No PDF loaded for splitting")
+            return []
+        
+        created_files = []
+        try:
+            total_pages = len(self.pdf_reader.pages)
+            
+            # Create progress dialog
+            progress = QProgressDialog(
+                "Splitting PDF by chapters...", "Cancel",
+                0, len(self.chapters), self
+            )
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            
+            for i, chapter in enumerate(self.chapters):
+                progress.setValue(i)
+                if progress.wasCanceled():
+                    break
+                
+                # Create writer for this chapter
+                writer = PdfWriter()
+                
+                # Add pages for this chapter (0-indexed in pypdf)
+                pages_added = 0
+                for page_num in range(chapter.start_page - 1, min(chapter.end_page, total_pages)):
+                    if page_num >= 0 and page_num < total_pages:
+                        writer.add_page(self.pdf_reader.pages[page_num])
+                        pages_added += 1
+                
+                if pages_added > 0:
+                    # Generate filename
+                    safe_name = self.cleanup_filename(chapter.chapter_name)
+                    filename = f"{chapter.chapter_number:02d}_{safe_name}.pdf"
+                    
+                    # Store file info (will write later)
+                    created_files.append({
+                        'chapter_number': chapter.chapter_number,
+                        'chapter_name': chapter.chapter_name,
+                        'filename': filename,
+                        'writer': writer,
+                        'pages': pages_added,
+                        'start_page': chapter.start_page,
+                        'end_page': chapter.end_page
+                    })
+                    
+                    logging.info(f"Prepared chapter {chapter.chapter_number}: {filename} ({pages_added} pages)")
+            
+            progress.setValue(len(self.chapters))
+            return created_files
+            
+        except Exception as e:
+            logging.error(f"Error splitting PDF: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to split PDF:\n{str(e)}")
+            return []
+    
+    def update_json_with_chapter_files(self, created_files: List[Dict], output_dir: str):
+        """Update JSON records to reference the new chapter PDF files."""
+        # Create mapping of chapter_number to new filename
+        chapter_to_file = {}
+        for f in created_files:
+            chapter_to_file[f['chapter_number']] = {
+                'filename': f['filename'],
+                'filepath': os.path.join(output_dir, f['filename']).replace('\\', '/')
+            }
+        
+        # Store original filename if not already stored
+        if self.json_data and 'original_filename' not in self.json_data[0]:
+            original_filename = self.json_data[0].get('filename', 'unknown.pdf')
+            for record in self.json_data:
+                record['original_filename'] = original_filename
+        
+        # Update each record with new filename
+        updated_count = 0
+        for record in self.json_data:
+            chapter_num = record.get('chapter_number')
+            if chapter_num is not None and chapter_num in chapter_to_file:
+                record['filename'] = chapter_to_file[chapter_num]['filename']
+                record['filepath'] = chapter_to_file[chapter_num]['filepath']
+                updated_count += 1
+        
+        logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames")
+        return updated_count
+    
     def save_to_json(self):
-        """Save chapter assignments to JSON"""
+        """Save chapter assignments to JSON and optionally split PDF"""
         if not self.json_file_path:
             self.save_as_json()
             return
+        
+        # Check if we should split PDF
+        if self.chapters and not self.pdf_file_path:
+            # Ask if user wants to load PDF for splitting
+            reply = QMessageBox.question(
+                self, "No PDF Loaded",
+                "Would you like to load the source PDF to split it into chapter files?\n\n"
+                "Select 'Yes' to load PDF and split\n"
+                "Select 'No' to save JSON only",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
             
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_pdf_file()
+                if not self.pdf_file_path:
+                    # User cancelled PDF selection, just save JSON
+                    self.save_json_to_file(self.json_file_path)
+                    return
+        
+        # If PDF is loaded and chapters exist, ask about splitting
+        if self.pdf_file_path and self.chapters:
+            reply = QMessageBox.question(
+                self, "Split PDF by Chapters",
+                "Do you want to split the PDF into individual chapter files?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.split_and_save()
+                return
+        
+        # Just save JSON without splitting
         self.save_json_to_file(self.json_file_path)
+    
+    def split_and_save(self):
+        """Split PDF and save both PDFs and updated JSON."""
+        # First split the PDF
+        created_files = self.split_pdf_by_chapters()
+        
+        if not created_files:
+            QMessageBox.warning(self, "Warning", "No chapter PDFs were created")
+            return
+        
+        # Create output directory
+        json_dir = os.path.dirname(self.json_file_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_folder = f"chapters_{timestamp}"
+        output_dir = os.path.join(json_dir, output_folder)
+        
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Save chapter PDFs
+            progress = QProgressDialog(
+                "Saving chapter PDFs...", "Cancel",
+                0, len(created_files), self
+            )
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            
+            saved_files = []
+            for i, file_info in enumerate(created_files):
+                progress.setValue(i)
+                if progress.wasCanceled():
+                    break
+                
+                output_path = os.path.join(output_dir, file_info['filename'])
+                with open(output_path, 'wb') as output_file:
+                    file_info['writer'].write(output_file)
+                
+                saved_files.append(file_info)
+                logging.info(f"Saved: {file_info['filename']}")
+            
+            progress.setValue(len(created_files))
+            
+            # Update JSON with new filenames
+            updated_count = self.update_json_with_chapter_files(saved_files, output_dir)
+            
+            # Save updated JSON
+            self.save_json_to_file(self.json_file_path)
+            
+            QMessageBox.information(
+                self, "Success",
+                f"Created {len(saved_files)} chapter PDFs in:\n{output_dir}\n\n"
+                f"Updated {updated_count} JSON records with new filenames."
+            )
+            
+        except Exception as e:
+            logging.error(f"Error saving chapter PDFs: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save chapter PDFs:\n{str(e)}")
         
     def save_as_json(self):
         """Save chapter assignments to a new JSON file"""
@@ -1113,8 +1369,8 @@ class ChapterAssignmentTool(QMainWindow):
             self, "Save JSON File", "", "JSON Files (*.json)"
         )
         if file_path:
-            self.save_json_to_file(file_path)
             self.json_file_path = file_path
+            self.save_to_json()  # This will handle PDF splitting if needed
             
     def save_json_to_file(self, file_path: str):
         """Save the updated JSON data to file"""
