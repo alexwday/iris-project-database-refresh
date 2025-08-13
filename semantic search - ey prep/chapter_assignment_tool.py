@@ -1301,22 +1301,24 @@ class ChapterAssignmentTool(QMainWindow):
                 self, "No PDF Loaded",
                 "Would you like to load the source PDF to split it into chapter files?\n\n"
                 "Select 'Yes' to load PDF and split\n"
-                "Select 'No' to save JSON only",
+                "Select 'No' to save JSON with chapter assignments only",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             
             if reply == QMessageBox.StandardButton.Yes:
                 self.open_pdf_file()
                 if not self.pdf_file_path:
-                    # User cancelled PDF selection, just save JSON
-                    self.save_json_to_file(self.json_file_path)
+                    # User cancelled PDF selection, save with chapters assigned
+                    self.save_json_with_chapters_only()
                     return
         
         # If PDF is loaded and chapters exist, ask about splitting
         if self.pdf_file_path and self.chapters:
             reply = QMessageBox.question(
                 self, "Split PDF by Chapters",
-                "Do you want to split the PDF into individual chapter files?",
+                "Do you want to split the PDF into individual chapter files?\n\n"
+                "Select 'Yes' to split PDF and create new JSON\n"
+                "Select 'No' to save JSON with chapter assignments only",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             
@@ -1324,8 +1326,30 @@ class ChapterAssignmentTool(QMainWindow):
                 self.split_and_save()
                 return
         
-        # Just save JSON without splitting
-        self.save_json_to_file(self.json_file_path)
+        # Just save JSON with chapter assignments (no splitting)
+        self.save_json_with_chapters_only()
+    
+    def save_json_with_chapters_only(self):
+        """Save JSON with chapter assignments but without PDF splitting."""
+        # Generate new filename with timestamp
+        json_dir = os.path.dirname(self.json_file_path)
+        base_name = os.path.basename(self.json_file_path)
+        name_without_ext = os.path.splitext(base_name)[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_json_name = f"{name_without_ext}_with_chapters_{timestamp}.json"
+        new_json_path = os.path.join(json_dir, new_json_name)
+        
+        # Save to new file
+        self.save_json_to_file(new_json_path)
+        
+        # Update reference
+        self.json_file_path = new_json_path
+        
+        QMessageBox.information(
+            self, "Success",
+            f"Saved JSON with chapter assignments as:\n{new_json_name}\n\n"
+            f"Original JSON preserved unchanged."
+        )
     
     def split_and_save(self):
         """Split PDF and save both PDFs and updated JSON."""
@@ -1367,16 +1391,27 @@ class ChapterAssignmentTool(QMainWindow):
             
             progress.setValue(len(created_files))
             
-            # Update JSON with new filenames
+            # Update JSON with new filenames (in memory, not saved yet)
             updated_count = self.update_json_with_chapter_files(saved_files, output_dir)
             
-            # Save updated JSON
-            self.save_json_to_file(self.json_file_path)
+            # Generate new filename for the split version
+            base_name = os.path.basename(self.json_file_path)
+            name_without_ext = os.path.splitext(base_name)[0]
+            new_json_name = f"{name_without_ext}_chapters_split_{timestamp}.json"
+            new_json_path = os.path.join(json_dir, new_json_name)
+            
+            # Save updated JSON with new name
+            self.save_json_to_file(new_json_path)
+            
+            # Keep reference to new file
+            self.json_file_path = new_json_path
             
             QMessageBox.information(
                 self, "Success",
                 f"Created {len(saved_files)} chapter PDFs in:\n{output_dir}\n\n"
-                f"Updated {updated_count} JSON records with new filenames."
+                f"Saved updated JSON as:\n{new_json_name}\n\n"
+                f"Updated {updated_count} records with split PDF references.\n\n"
+                f"Original JSON preserved unchanged."
             )
             
         except Exception as e:
