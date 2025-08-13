@@ -1279,10 +1279,46 @@ class ChapterAssignmentTool(QMainWindow):
             chapter_info = chapter_to_file[chapter_num]
             chapter_records = chapters_records[chapter_num]
             
-            # Sort records by original page number to ensure correct ordering
-            chapter_records.sort(key=lambda r: r.get('original_page_number', r.get('page_number', 0)))
+            # Validate data integrity - check for issues
+            issues_found = []
             
-            # Assign sequential page numbers within the chapter
+            # Check for mixed types in page numbers
+            page_types = set()
+            for record in chapter_records:
+                orig_page = record.get('original_page_number', record.get('page_number'))
+                if orig_page is not None:
+                    page_types.add(type(orig_page).__name__)
+            
+            if len(page_types) > 1:
+                issues_found.append(f"Mixed data types in page numbers: {page_types}")
+                logging.error(f"Chapter {chapter_num}: Mixed page number types detected: {page_types}")
+            
+            # Check if records are in order
+            prev_page = None
+            out_of_order = False
+            for record in chapter_records:
+                orig_page = record.get('original_page_number', record.get('page_number', 0))
+                # Convert to int for comparison if needed
+                try:
+                    current_page = int(orig_page) if orig_page is not None else 0
+                except (ValueError, TypeError):
+                    logging.error(f"Chapter {chapter_num}: Invalid page number: {orig_page}")
+                    issues_found.append(f"Invalid page number: {orig_page}")
+                    current_page = 0
+                
+                if prev_page is not None and current_page < prev_page:
+                    out_of_order = True
+                    logging.warning(f"Chapter {chapter_num}: Pages out of order - page {current_page} comes after {prev_page}")
+                prev_page = current_page
+            
+            if out_of_order:
+                issues_found.append("Pages are not in sequential order")
+            
+            # Report issues but continue processing
+            if issues_found:
+                logging.error(f"Chapter {chapter_num} has data integrity issues: {', '.join(issues_found)}")
+            
+            # Assign sequential page numbers based on record order (don't sort)
             for i, record in enumerate(chapter_records, start=1):
                 # Update filename and path
                 record['filename'] = chapter_info['filename']
@@ -1293,7 +1329,7 @@ class ChapterAssignmentTool(QMainWindow):
                 
                 updated_count += 1
                 
-                original_page = record.get('original_page_number', 'unknown')
+                original_page = record.get('original_page_number', record.get('page_number', 'unknown'))
                 logging.debug(f"Chapter {chapter_num}: Original page {original_page} -> Page {i} in {chapter_info['filename']}")
         
         # Log summary
