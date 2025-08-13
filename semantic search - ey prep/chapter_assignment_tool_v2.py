@@ -448,6 +448,11 @@ class ChapterAssignmentTool(QMainWindow):
             ["#", "Name", "Start", "End", "Pages"]
         )
         
+        # Set smaller font for table
+        table_font = QFont()
+        table_font.setPointSize(9)
+        self.chapter_table.setFont(table_font)
+        
         # Make columns interactive
         self.chapter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.chapter_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -455,10 +460,15 @@ class ChapterAssignmentTool(QMainWindow):
         self.chapter_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.chapter_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         
-        self.chapter_table.setColumnWidth(0, 40)
-        self.chapter_table.setColumnWidth(2, 60)
-        self.chapter_table.setColumnWidth(3, 60)
-        self.chapter_table.setColumnWidth(4, 60)
+        self.chapter_table.setColumnWidth(0, 30)
+        self.chapter_table.setColumnWidth(2, 50)
+        self.chapter_table.setColumnWidth(3, 50)
+        self.chapter_table.setColumnWidth(4, 50)
+        
+        # Enable word wrap and adjust row heights
+        self.chapter_table.setWordWrap(True)
+        self.chapter_table.verticalHeader().setDefaultSectionSize(40)
+        self.chapter_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         
         self.chapter_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.chapter_table.itemDoubleClicked.connect(self.on_chapter_item_clicked)
@@ -538,16 +548,50 @@ class ChapterAssignmentTool(QMainWindow):
         
         layout.addWidget(nav_frame)
         
-        # Full-height markdown content viewer
+        # Full-height markdown content viewer with fixed header/footer
         content_group = QGroupBox("Markdown Content")
         content_layout = QVBoxLayout()
+        content_layout.setSpacing(2)
         
+        # Fixed header row for PageHeader
+        self.page_header_label = QLabel("")
+        self.page_header_label.setStyleSheet("""
+            QLabel { 
+                background-color: #f0f0f0; 
+                border: 1px solid #ccc; 
+                padding: 5px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 10pt;
+                color: #333;
+            }
+        """)
+        self.page_header_label.setWordWrap(True)
+        self.page_header_label.setMaximumHeight(40)
+        content_layout.addWidget(self.page_header_label)
+        
+        # Main content display
         self.content_display = QTextEdit()
         self.content_display.setReadOnly(True)
         self.content_display.setFont(QFont("Consolas", 11))
         self.content_display.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        
         content_layout.addWidget(self.content_display)
+        
+        # Fixed footer row for PageFooter
+        self.page_footer_label = QLabel("")
+        self.page_footer_label.setStyleSheet("""
+            QLabel { 
+                background-color: #f0f0f0; 
+                border: 1px solid #ccc; 
+                padding: 5px;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 10pt;
+                color: #333;
+            }
+        """)
+        self.page_footer_label.setWordWrap(True)
+        self.page_footer_label.setMaximumHeight(40)
+        content_layout.addWidget(self.page_footer_label)
+        
         content_group.setLayout(content_layout)
         layout.addWidget(content_group)
         
@@ -571,17 +615,27 @@ class ChapterAssignmentTool(QMainWindow):
             self.quick_name.setFocus()
             
     def extract_chapter_name(self, content: str) -> str:
-        """Extract a chapter name from content"""
-        lines = content.split('\n')[:10]
+        """Extract a chapter name from content, skipping Azure tags"""
+        lines = content.split('\n')[:20]  # Check more lines to skip past tags
         for line in lines:
             line = line.strip()
-            # Remove markdown formatting
-            line = re.sub(r'^#+\s*', '', line)
-            line = re.sub(r'^\d+\.?\s*', '', line)
-            line = re.sub(r'^Chapter\s+\d+[:\s]*', '', line, flags=re.IGNORECASE)
-            # If we have something substantial, use it
-            if len(line) > 3 and len(line) < 100:
-                return line
+            
+            # Skip Azure comment tags
+            if line.startswith('<!--') and line.endswith('-->'):
+                continue
+            
+            # Look for markdown headers (# or ## or ###)
+            if line.startswith('#'):
+                # Remove the # symbols and clean up
+                line = re.sub(r'^#+\s*', '', line)
+                # Remove "Chapter X:" patterns but keep the rest
+                line = re.sub(r'^Chapter\s+\d+[:\s]*', '', line, flags=re.IGNORECASE)
+                # Remove just numbers at the start
+                line = re.sub(r'^\d+\.?\s*', '', line)
+                # If we have something substantial, use it
+                if len(line) > 3:
+                    return line[:100]  # Limit length to 100 chars
+                    
         return ""
         
     def on_chapter_item_clicked(self, item):
@@ -742,9 +796,36 @@ class ChapterAssignmentTool(QMainWindow):
         # Get page data
         page_data = self.json_data[page_num - 1]
         
-        # Update content display
+        # Get content and extract header/footer tags
         content = page_data.get('content', '')
-        self.content_display.setPlainText(content)
+        
+        # Extract PageHeader and PageFooter tags
+        header_text = ""
+        footer_text = ""
+        cleaned_content = content
+        
+        # Extract PageHeader
+        header_match = re.search(r'<!--\s*PageHeader\s*[=:]\s*["\']?([^"\'>\n]+)["\']?\s*-->', content, re.IGNORECASE)
+        if header_match:
+            header_text = f"Header: {header_match.group(1)}"
+            # Remove the header tag from content
+            cleaned_content = re.sub(r'<!--\s*PageHeader[^>]*-->\s*\n?', '', cleaned_content, flags=re.IGNORECASE)
+        
+        # Extract PageFooter
+        footer_match = re.search(r'<!--\s*PageFooter\s*[=:]\s*["\']?([^"\'>\n]+)["\']?\s*-->', content, re.IGNORECASE)
+        if footer_match:
+            footer_text = f"Footer: {footer_match.group(1)}"
+            # Remove the footer tag from content
+            cleaned_content = re.sub(r'<!--\s*PageFooter[^>]*-->\s*\n?', '', cleaned_content, flags=re.IGNORECASE)
+        
+        # Update displays
+        self.page_header_label.setText(header_text)
+        self.page_footer_label.setText(footer_text)
+        self.content_display.setPlainText(cleaned_content)
+        
+        # Hide header/footer labels if empty
+        self.page_header_label.setVisible(bool(header_text))
+        self.page_footer_label.setVisible(bool(footer_text))
         
         # Update page reference
         page_ref = page_data.get('page_reference', '-')
@@ -877,8 +958,10 @@ class ChapterAssignmentTool(QMainWindow):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.chapter_table.setItem(row, 0, item)
             
-            # Chapter name
-            self.chapter_table.setItem(row, 1, QTableWidgetItem(chapter.chapter_name))
+            # Chapter name (with text wrapping)
+            name_item = QTableWidgetItem(chapter.chapter_name)
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.chapter_table.setItem(row, 1, name_item)
             
             # Start page (clickable)
             item = QTableWidgetItem(str(chapter.start_page))
