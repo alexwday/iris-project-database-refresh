@@ -1242,7 +1242,7 @@ class ChapterAssignmentTool(QMainWindow):
     
     def update_json_with_chapter_files(self, created_files: List[Dict], output_dir: str):
         """Update JSON records to reference the new chapter PDF files and adjust page numbers."""
-        # Create mapping of chapter_number to file info and page offset
+        # Create mapping of chapter_number to file info
         chapter_to_file = {}
         for f in created_files:
             chapter_to_file[f['chapter_number']] = {
@@ -1252,40 +1252,57 @@ class ChapterAssignmentTool(QMainWindow):
                 'end_page': f['end_page']
             }
         
-        # Store original values if not already stored
-        updated_count = 0
+        # Group records by chapter for proper ordering
+        chapters_records = {}
         for record in self.json_data:
-            # Preserve original filename if not already stored
+            # Preserve original values if not already stored
             if 'original_filename' not in record:
                 record['original_filename'] = record.get('filename', 'unknown.pdf')
             
-            # Preserve original page number if not already stored
             if 'original_page_number' not in record:
                 record['original_page_number'] = record.get('page_number', 0)
             
-            # Update with new chapter PDF info
+            # Group by chapter
             chapter_num = record.get('chapter_number')
-            if chapter_num is not None and chapter_num in chapter_to_file:
-                chapter_info = chapter_to_file[chapter_num]
-                
+            if chapter_num is not None:
+                if chapter_num not in chapters_records:
+                    chapters_records[chapter_num] = []
+                chapters_records[chapter_num].append(record)
+        
+        # Process each chapter's records in order
+        updated_count = 0
+        for chapter_num in sorted(chapters_records.keys()):
+            if chapter_num not in chapter_to_file:
+                logging.warning(f"Chapter {chapter_num} not in created files, skipping")
+                continue
+            
+            chapter_info = chapter_to_file[chapter_num]
+            chapter_records = chapters_records[chapter_num]
+            
+            # Sort records by original page number to ensure correct ordering
+            chapter_records.sort(key=lambda r: r.get('original_page_number', r.get('page_number', 0)))
+            
+            # Assign sequential page numbers within the chapter
+            for i, record in enumerate(chapter_records, start=1):
                 # Update filename and path
                 record['filename'] = chapter_info['filename']
                 record['filepath'] = chapter_info['filepath']
                 
-                # Calculate new page number within the chapter PDF
-                # Original page 18 in chapter starting at page 18 becomes page 1
-                original_page = record.get('original_page_number', record.get('page_number', 0))
-                chapter_start = chapter_info['start_page']
-                new_page_number = original_page - chapter_start + 1
-                
-                # Update page number to reflect position in chapter PDF
-                record['page_number'] = max(1, new_page_number)  # Ensure at least page 1
+                # Set sequential page number within chapter PDF
+                record['page_number'] = i
                 
                 updated_count += 1
                 
-                logging.debug(f"Page {original_page} -> Page {new_page_number} in {chapter_info['filename']}")
+                original_page = record.get('original_page_number', 'unknown')
+                logging.debug(f"Chapter {chapter_num}: Original page {original_page} -> Page {i} in {chapter_info['filename']}")
         
-        logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames and page numbers")
+        # Log summary
+        logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames and sequential page numbers")
+        for chapter_num in sorted(chapters_records.keys()):
+            if chapter_num in chapter_to_file:
+                page_count = len(chapters_records[chapter_num])
+                logging.info(f"  Chapter {chapter_num}: {page_count} pages (numbered 1-{page_count})")
+        
         return updated_count
     
     def save_to_json(self):
