@@ -31,11 +31,7 @@ from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 
 # --- Dependencies Check ---
-try:
-    import tiktoken
-except ImportError:
-    tiktoken = None
-    print("WARNING: tiktoken not installed. Token counts will be estimated (chars/4). `pip install tiktoken`")
+# Note: tiktoken removed due to SSL/network issues. Using reliable local estimation instead.
 
 try:
     from openai import OpenAI, APIError
@@ -222,39 +218,49 @@ def setup_logging():
 # Utility Functions
 # ==============================================================================
 
-# --- Tokenizer ---
-_TOKENIZER = None
-
-def initialize_tokenizer():
-    """Initialize the tokenizer after SSL is configured."""
-    global _TOKENIZER
-    if tiktoken and not _TOKENIZER:
-        try:
-            # Ensure SSL is configured before initializing tiktoken
-            _setup_ssl_from_nas()
-            _TOKENIZER = tiktoken.get_encoding("cl100k_base")
-            logging.info("Using 'cl100k_base' tokenizer via tiktoken.")
-        except Exception as e:
-            logging.warning(f"Failed to initialize tiktoken tokenizer: {e}. Falling back to estimate.")
-            _TOKENIZER = None
-
+# --- Token Counting ---
 def count_tokens(text: str) -> int:
-    """Counts tokens using tiktoken if available, otherwise estimates (chars/4)."""
+    """
+    Estimates token count using a reliable formula based on GPT-4 patterns.
+    Includes sanity checks to prevent unreasonable values.
+    
+    Formula based on empirical analysis:
+    - Average English word: ~1.3 tokens
+    - Average character per word: ~5 characters (including spaces)
+    - Therefore: tokens ≈ chars / 3.8
+    - We use chars / 3.5 to be slightly conservative
+    """
     if not text:
         return 0
     
-    # Try to initialize tokenizer if not already done
-    if not _TOKENIZER and tiktoken:
-        initialize_tokenizer()
+    char_count = len(text)
     
-    if _TOKENIZER:
-        try:
-            return len(_TOKENIZER.encode(text))
-        except Exception as e:
-            logging.debug(f"Token encoding failed: {e}. Using estimate.")
-            return len(text) // 4
-    else:
-        return len(text) // 4
+    # Basic estimation: characters divided by 3.5
+    # This is more accurate than /4 for typical English text
+    estimated_tokens = int(char_count / 3.5)
+    
+    # Sanity checks
+    MIN_CHARS_PER_TOKEN = 2     # Absolute minimum (handles code/numbers)
+    MAX_CHARS_PER_TOKEN = 10    # Absolute maximum (handles sparse text)
+    
+    # Apply bounds
+    min_tokens = char_count // MAX_CHARS_PER_TOKEN
+    max_tokens = char_count // MIN_CHARS_PER_TOKEN
+    
+    # Ensure estimate is within reasonable bounds
+    estimated_tokens = max(min_tokens, min(estimated_tokens, max_tokens))
+    
+    # Warning for unusually high token counts
+    if estimated_tokens > 500000:
+        logging.warning(f"Unusually high token count detected: {estimated_tokens:,} tokens from {char_count:,} characters")
+        logging.warning("This might indicate concatenated content issues or data corruption")
+    
+    # Log token estimation details for debugging (only for large texts)
+    if char_count > 100000:
+        words_estimate = char_count // 5  # Rough word count
+        logging.debug(f"Token estimation: {char_count:,} chars → ~{words_estimate:,} words → {estimated_tokens:,} tokens")
+    
+    return estimated_tokens
 
 # --- API Client ---
 _SSL_CONFIGURED = False
@@ -539,7 +545,7 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
     # Log token analysis
     logging.info("-" * 60)
     logging.info("TOKEN ANALYSIS:")
-    logging.info(f"  Tokenizer: {'tiktoken (accurate)' if _TOKENIZER else 'estimate (chars/4)'}")
+    logging.info(f"  Estimation method: chars/3.5 ratio (empirically calibrated)")
     logging.info(f"  Total chapter tokens: {total_tokens:,}")
     logging.info(f"  Total chapter characters: {total_chars:,}")
     logging.info(f"  Avg chars per token: {total_chars/total_tokens:.2f}" if total_tokens > 0 else "N/A")
@@ -582,17 +588,31 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
         num_segments = (total_tokens // processing_limit) + 1
         segment_len_approx = len(chapter_text) // num_segments
         
+        logging.warning(f"⚠️ Large chapter requires segmentation:")
         logging.info(f"  Segments needed (by tokens): {num_segments}")
         logging.info(f"  Target chars per segment: {segment_len_approx:,}")
-        logging.info(f"  Estimated tokens per segment: {segment_len_approx // 4:,}")
+        # Calculate actual tokens for a sample segment
+        sample_segment_tokens = count_tokens(chapter_text[:min(segment_len_approx, len(chapter_text))])
+        logging.info(f"  Estimated tokens per segment: {sample_segment_tokens:,}")
         
         segments = [chapter_text[i:i + segment_len_approx] for i in range(0, len(chapter_text), segment_len_approx)]
         
         # Verify actual segment sizes
         logging.info(f"  Actual segments created: {len(segments)}")
+        
+        # Sanity check for excessive segmentation
+        if len(segments) > 10:
+            logging.error(f"❌ EXCESSIVE SEGMENTATION DETECTED: {len(segments)} segments!")
+            logging.error(f"   This usually indicates a data issue or incorrect token counting.")
+            logging.error(f"   Chapter has {len(chapter_text):,} chars, estimated at {total_tokens:,} tokens.")
+            logging.error(f"   Please verify the chapter content is not corrupted or duplicated.")
+        
         for i, seg in enumerate(segments[:3]):  # Show first 3 segments
             seg_tokens = count_tokens(seg)
             logging.info(f"    Segment {i+1}: {len(seg):,} chars, {seg_tokens:,} tokens")
+        if len(segments) > 3:
+            logging.info(f"    ... and {len(segments) - 3} more segments")
+        
         current_summary = None
         current_tags = None
         final_result = None
@@ -698,6 +718,8 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     
     concatenated_content = "\n\n".join(content_parts)
     chapter_token_count = count_tokens(concatenated_content)
+    char_count = len(concatenated_content)
+    logging.info(f"  Content size: {char_count:,} characters → {chapter_token_count:,} tokens")
     
     # Generate summary and tags via GPT (ONCE for the whole chapter)
     chapter_summary, chapter_tags = None, None
