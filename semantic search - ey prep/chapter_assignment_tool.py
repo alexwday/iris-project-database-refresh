@@ -819,7 +819,7 @@ class ChapterAssignmentTool(QMainWindow):
         if self.json_data and 'chapter_number' in self.json_data[0]:
             chapters_dict = {}
             for record in self.json_data:
-                if 'chapter_number' in record and record['chapter_number']:
+                if 'chapter_number' in record and record['chapter_number'] is not None:
                     ch_num = record['chapter_number']
                     page_num = record['page_number']
                     
