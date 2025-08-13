@@ -225,11 +225,13 @@ class ChapterAssignmentTool(QMainWindow):
         # Create toolbar
         self.create_toolbar()
         
-        # File info bar
+        # File info bar (compact)
         info_frame = QFrame()
         info_frame.setFrameStyle(QFrame.Shape.Box)
+        info_frame.setMaximumHeight(35)  # Fix the height issue
         info_frame.setStyleSheet("QFrame { background-color: #e8f4f8; border: 1px solid #b0d4e3; }")
         info_layout = QHBoxLayout(info_frame)
+        info_layout.setContentsMargins(10, 5, 10, 5)  # Reduce margins
         
         self.info_label = QLabel("No file loaded")
         self.info_label.setStyleSheet("QLabel { border: none; font-size: 10pt; }")
@@ -905,7 +907,7 @@ class ChapterAssignmentTool(QMainWindow):
                     self.chapter_table.item(row, col).setBackground(QColor(255, 200, 200))
                     
     def auto_detect_chapters(self):
-        """Enhanced auto-detect with better chapter name extraction"""
+        """Auto-detect chapters using original logic with enhanced name extraction"""
         if not self.json_data:
             QMessageBox.warning(self, "Warning", "Please load a JSON file first")
             return
@@ -919,52 +921,36 @@ class ChapterAssignmentTool(QMainWindow):
             
         self.chapters.clear()
         
-        # Look for chapter markers
-        chapter_starts = []
+        # Use original detection logic: look for pages with "Chapter" in the first 500 chars
+        chapter_pages = []
         for i, page_data in enumerate(self.json_data):
             content = page_data.get('content', '')
-            lines = content.split('\n')[:10]  # Check first 10 lines
-            
-            for line in lines:
-                line_stripped = line.strip()
-                # Look for various chapter patterns
-                if any(marker in line_stripped.upper() for marker in ['CHAPTER', 'PART', 'SECTION']):
-                    # Extract the chapter name
-                    name = self.extract_chapter_name(content)
-                    if not name:
-                        name = f"Chapter {len(chapter_starts) + 1}"
-                    
-                    chapter_starts.append({
-                        'page': i + 1,
-                        'name': name
-                    })
-                    break
-                # Also check for numbered headers
-                elif re.match(r'^#+?\s*\d+\.?\s+\w+', line_stripped):
-                    name = re.sub(r'^#+?\s*\d+\.?\s*', '', line_stripped)
-                    chapter_starts.append({
-                        'page': i + 1,
-                        'name': name
-                    })
-                    break
-                    
-        if not chapter_starts:
+            # Look for chapter markers in the beginning of content (original logic)
+            if any(marker in content[:500] for marker in ['# Chapter', '## Chapter', 'CHAPTER']):
+                chapter_pages.append(i + 1)
+                
+        if not chapter_pages:
             QMessageBox.information(self, "Auto-Detect", "No chapters detected")
             return
             
-        # Create chapters
-        for i, ch_info in enumerate(chapter_starts):
-            start_page = ch_info['page']
-            if i < len(chapter_starts) - 1:
-                end_page = chapter_starts[i + 1]['page'] - 1
+        # Create chapters from detected pages
+        for i, start_page in enumerate(chapter_pages):
+            if i < len(chapter_pages) - 1:
+                end_page = chapter_pages[i + 1] - 1
             else:
                 end_page = self.total_pages
+            
+            # Extract chapter name from the content of the start page
+            page_content = self.json_data[start_page - 1].get('content', '')
+            chapter_name = self.extract_chapter_name(page_content)
+            if not chapter_name:
+                chapter_name = f"Chapter {i + 1}"
                 
             chapter = ChapterDefinition(
                 chapter_number=i + 1,
                 start_page=start_page,
                 end_page=end_page,
-                chapter_name=ch_info['name']
+                chapter_name=chapter_name
             )
             self.chapters.append(chapter)
             
