@@ -520,9 +520,23 @@ def process_chapter_segment_for_details(segment_text, client, model_name, max_co
 def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: str = MODEL_NAME_CHAT) -> Tuple[Optional[str], Optional[List[str]]]:
     """Generates summary and tags for the chapter text, handling segmentation."""
     total_tokens = count_tokens(chapter_text)
-    logging.info(f"Total estimated tokens for chapter: {total_tokens}")
-
+    total_chars = len(chapter_text)
+    
     processing_limit = GPT_INPUT_TOKEN_LIMIT - MAX_COMPLETION_TOKENS_CHAPTER - TOKEN_BUFFER
+    
+    # Log token analysis
+    logging.info("-" * 60)
+    logging.info("TOKEN ANALYSIS:")
+    logging.info(f"  Total chapter tokens: {total_tokens:,}")
+    logging.info(f"  Total chapter characters: {total_chars:,}")
+    logging.info(f"  Avg chars per token: {total_chars/total_tokens:.2f}" if total_tokens > 0 else "N/A")
+    logging.info(f"  GPT input limit: {GPT_INPUT_TOKEN_LIMIT:,}")
+    logging.info(f"  Reserved for completion: {MAX_COMPLETION_TOKENS_CHAPTER:,}")
+    logging.info(f"  Buffer: {TOKEN_BUFFER:,}")
+    logging.info(f"  Available for input: {processing_limit:,}")
+    logging.info(f"  Fits in single call: {'YES' if total_tokens <= processing_limit else 'NO'}")
+    logging.info("-" * 60)
+    
     final_chapter_details = None
 
     if total_tokens <= processing_limit:
@@ -549,12 +563,23 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
         else:
             logging.error("Failed to process chapter in single call after 3 attempts.")
     else:
-        logging.info(f"Chapter exceeds token limit ({total_tokens} > {processing_limit}). Processing in segments.")
+        logging.info(f"Chapter exceeds token limit ({total_tokens:,} > {processing_limit:,})")
+        logging.info("SEGMENTATION REQUIRED:")
+        
         num_segments = (total_tokens // processing_limit) + 1
         segment_len_approx = len(chapter_text) // num_segments
+        
+        logging.info(f"  Segments needed (by tokens): {num_segments}")
+        logging.info(f"  Target chars per segment: {segment_len_approx:,}")
+        logging.info(f"  Estimated tokens per segment: {segment_len_approx // 4:,}")
+        
         segments = [chapter_text[i:i + segment_len_approx] for i in range(0, len(chapter_text), segment_len_approx)]
-
-        logging.info(f"Divided chapter into {len(segments)} segments.")
+        
+        # Verify actual segment sizes
+        logging.info(f"  Actual segments created: {len(segments)}")
+        for i, seg in enumerate(segments[:3]):  # Show first 3 segments
+            seg_tokens = count_tokens(seg)
+            logging.info(f"    Segment {i+1}: {len(seg):,} chars, {seg_tokens:,} tokens")
         current_summary = None
         current_tags = None
         final_result = None
@@ -633,11 +658,23 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     Processes pages in a chapter: generates ONE summary/tags for the chapter, 
     then applies to ALL pages. Returns enriched page-level records.
     """
-    logging.info(f"Processing Chapter {chapter_num} with {len(pages)} pages")
-    
     # Get chapter metadata from first page
     first_page = pages[0]
+    last_page = pages[-1]
     chapter_name = first_page.get('chapter_name', f'Chapter {chapter_num}')
+    chapter_filename = first_page.get('filename', 'unknown.pdf')
+    
+    # Get page ranges
+    pdf_page_numbers = [p.get('page_number', 0) for p in pages]
+    original_page_numbers = [p.get('original_page_number', p.get('page_number', 0)) for p in pages]
+    
+    # Log comprehensive chapter info
+    logging.info("=" * 80)
+    logging.info(f"CHAPTER {chapter_num}: {chapter_name}")
+    logging.info(f"  Filename: {chapter_filename}")
+    logging.info(f"  Pages in chapter PDF: {min(pdf_page_numbers)}-{max(pdf_page_numbers)} ({len(pages)} pages)")
+    logging.info(f"  Original PDF pages: {min(original_page_numbers)}-{max(original_page_numbers)}")
+    logging.info("=" * 80)
     
     # Concatenate all page content for GPT processing
     content_parts = []
@@ -648,7 +685,6 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     
     concatenated_content = "\n\n".join(content_parts)
     chapter_token_count = count_tokens(concatenated_content)
-    logging.debug(f"  Chapter {chapter_num}: {chapter_token_count} tokens")
     
     # Generate summary and tags via GPT (ONCE for the whole chapter)
     chapter_summary, chapter_tags = None, None
