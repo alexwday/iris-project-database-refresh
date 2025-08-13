@@ -270,27 +270,38 @@ def setup_logging():
     return temp_log_path
 
 # ==============================================================================
-# PageNumber Tag Removal (Preserving other Azure tags)
+# PageNumber Tag Extraction and Removal
 # ==============================================================================
 
-# Patterns for PageNumber tags only
-PAGE_NUMBER_PATTERNS = [
-    # Page number tags with various formats
-    re.compile(r'<!--\s*PageNumber[:\s]*["\']?\d+["\']?\s*-->', re.IGNORECASE),
-    re.compile(r'<!--\s*PageNumber[:\s]*Page\s*\d+\s*-->', re.IGNORECASE),
-    re.compile(r'<!--\s*PageNumber="?\d+"?\s*-->', re.IGNORECASE),
-]
+# Pattern to extract PageNumber value (captures any format including roman numerals, alphanumeric, etc.)
+PAGE_NUMBER_EXTRACT_PATTERN = re.compile(
+    r'<!--\s*PageNumber\s*[=:]\s*["\']?([^"\'>\s]+)["\']?\s*-->', 
+    re.IGNORECASE
+)
 
-def clean_page_number_tags(content: str) -> str:
-    """Removes only PageNumber tags from markdown content, preserving other Azure tags."""
+# Broader pattern to remove ALL PageNumber tags after extraction
+PAGE_NUMBER_REMOVE_PATTERN = re.compile(
+    r'<!--\s*PageNumber[^>]*-->', 
+    re.IGNORECASE
+)
+
+def extract_and_clean_page_number(content: str) -> tuple[str, str]:
+    """
+    Extracts page reference from PageNumber tags and removes them from content.
+    Returns: (cleaned_content, page_reference)
+    """
     if not content:
-        return content
+        return content, None
     
-    cleaned_content = content
+    # First, extract the page reference value
+    page_reference = None
+    match = PAGE_NUMBER_EXTRACT_PATTERN.search(content)
+    if match:
+        page_reference = match.group(1).strip()
+        logging.debug(f"Extracted page reference: {page_reference}")
     
-    # Only remove PageNumber patterns
-    for pattern in PAGE_NUMBER_PATTERNS:
-        cleaned_content = pattern.sub('', cleaned_content)
+    # Remove all PageNumber tags
+    cleaned_content = PAGE_NUMBER_REMOVE_PATTERN.sub('', content)
     
     # Clean up extra newlines created by tag removal
     cleaned_content = re.sub(r'\n{3,}', '\n\n', cleaned_content)
@@ -298,7 +309,7 @@ def clean_page_number_tags(content: str) -> str:
     # Remove trailing/leading whitespace
     cleaned_content = cleaned_content.strip()
     
-    return cleaned_content
+    return cleaned_content, page_reference
 
 # ==============================================================================
 # Utility Functions
@@ -374,7 +385,7 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
 
 def process_single_page(di_client: DocumentIntelligenceClient, 
                        page_info: Dict) -> Dict:
-    """Processes a single PDF page and returns markdown with only PageNumber tags removed."""
+    """Processes a single PDF page, extracts page reference, and removes PageNumber tags."""
     page_num = page_info['page_number']
     page_path = page_info['file_path']
     original_pdf = page_info['original_pdf']
@@ -384,12 +395,13 @@ def process_single_page(di_client: DocumentIntelligenceClient,
         result = analyze_document_with_di(di_client, page_path)
         
         if result and result.content:
-            # Clean only PageNumber tags, preserve other Azure tags
-            cleaned_content = clean_page_number_tags(result.content)
+            # Extract page reference and clean PageNumber tags
+            cleaned_content, page_reference = extract_and_clean_page_number(result.content)
             
             return {
                 'success': True,
                 'page_number': page_num,
+                'page_reference': page_reference,  # New field with extracted value
                 'content': cleaned_content,
                 'original_file': os.path.basename(original_pdf)
             }
@@ -397,6 +409,7 @@ def process_single_page(di_client: DocumentIntelligenceClient,
             return {
                 'success': False,
                 'page_number': page_num,
+                'page_reference': None,
                 'content': None,
                 'original_file': os.path.basename(original_pdf),
                 'error': 'No content returned from Azure DI'
@@ -407,6 +420,7 @@ def process_single_page(di_client: DocumentIntelligenceClient,
         return {
             'success': False,
             'page_number': page_num,
+            'page_reference': None,
             'content': None,
             'original_file': os.path.basename(original_pdf),
             'error': str(e)
@@ -466,6 +480,7 @@ def process_pages_batch_incremental(di_client: DocumentIntelligenceClient,
                         'filename': filename,
                         'filepath': filepath,
                         'page_number': page_num,
+                        'page_reference': result.get('page_reference'),  # Include extracted page reference
                         'content': result['content']
                     }
                 
@@ -491,7 +506,12 @@ def process_pages_batch_incremental(di_client: DocumentIntelligenceClient,
             
             # Progress update every 100 pages
             if pages_processed % 100 == 0:
-                logging.info(f"Progress: {pages_processed}/{total_pages} processed, {pages_written} written")
+                buffered_pages = len(results_dict)
+                logging.info(f"Progress: {pages_processed}/{total_pages} processed, {pages_written} written, {buffered_pages} buffered")
+                
+                # Warning if too many pages are buffered in memory
+                if buffered_pages > 500:
+                    logging.warning(f"High memory usage: {buffered_pages} pages buffered waiting for sequential write")
     
     # Close the JSON array
     with open(output_file_path, 'a', encoding='utf-8') as f:
