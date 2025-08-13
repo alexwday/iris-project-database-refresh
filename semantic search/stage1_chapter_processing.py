@@ -224,22 +224,34 @@ def setup_logging():
 
 # --- Tokenizer ---
 _TOKENIZER = None
-if tiktoken:
-    try:
-        _TOKENIZER = tiktoken.get_encoding("cl100k_base")
-        logging.info("Using 'cl100k_base' tokenizer via tiktoken.")
-    except Exception as e:
-        logging.warning(f"Failed to initialize tiktoken tokenizer: {e}. Falling back to estimate.")
-        _TOKENIZER = None
+
+def initialize_tokenizer():
+    """Initialize the tokenizer after SSL is configured."""
+    global _TOKENIZER
+    if tiktoken and not _TOKENIZER:
+        try:
+            # Ensure SSL is configured before initializing tiktoken
+            _setup_ssl_from_nas()
+            _TOKENIZER = tiktoken.get_encoding("cl100k_base")
+            logging.info("Using 'cl100k_base' tokenizer via tiktoken.")
+        except Exception as e:
+            logging.warning(f"Failed to initialize tiktoken tokenizer: {e}. Falling back to estimate.")
+            _TOKENIZER = None
 
 def count_tokens(text: str) -> int:
     """Counts tokens using tiktoken if available, otherwise estimates (chars/4)."""
     if not text:
         return 0
+    
+    # Try to initialize tokenizer if not already done
+    if not _TOKENIZER and tiktoken:
+        initialize_tokenizer()
+    
     if _TOKENIZER:
         try:
             return len(_TOKENIZER.encode(text))
         except Exception as e:
+            logging.debug(f"Token encoding failed: {e}. Using estimate.")
             return len(text) // 4
     else:
         return len(text) // 4
@@ -527,6 +539,7 @@ def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: 
     # Log token analysis
     logging.info("-" * 60)
     logging.info("TOKEN ANALYSIS:")
+    logging.info(f"  Tokenizer: {'tiktoken (accurate)' if _TOKENIZER else 'estimate (chars/4)'}")
     logging.info(f"  Total chapter tokens: {total_tokens:,}")
     logging.info(f"  Total chapter characters: {total_chars:,}")
     logging.info(f"  Avg chars per token: {total_chars/total_tokens:.2f}" if total_tokens > 0 else "N/A")
@@ -756,11 +769,15 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
     return enriched_pages
 
 def run_stage1():
-    """Main function to execute Stage 1 processing with JSON input/output."""
+    """Main function to execute Stage 1 processing with page-level records."""
     # Setup logging
     temp_log_path = setup_logging()
     
-    logging.info("--- Starting Stage 1 V2: Chapter Processing (JSON Input/Output) ---")
+    logging.info("--- Starting Stage 1: Chapter Processing (Page-Level Records) ---")
+    
+    # Setup SSL early for both tiktoken and OpenAI
+    logging.info("Setting up SSL certificate...")
+    _setup_ssl_from_nas()
     
     share_name = NAS_PARAMS["share"]
     output_path_relative = os.path.join(NAS_OUTPUT_PATH, OUTPUT_FILENAME).replace('\\', '/')
