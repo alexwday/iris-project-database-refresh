@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Stage 1: Chapter Processing V2 (JSON Input/Output Version)
+Stage 1: Chapter Processing (Page-Level Records Version)
 
 Purpose:
-Processes JSON output from EY prep containing page-level records with chapter assignments.
-Groups pages by chapter, concatenates content, generates summaries and tags using an LLM,
-and outputs a JSON array with one record per chapter.
+Processes JSON output from Chapter Assignment Tool containing page-level records.
+Generates chapter summaries and tags once per chapter using an LLM, then applies
+them to all pages in that chapter. Keeps page-level records for perfect citation tracking.
 
-Input: JSON file from EY prep with chapter assignments (page-level records)
-Output: JSON file with chapter-level records including summaries and tags
+Input: JSON file from Chapter Assignment Tool with split PDF references
+Output: JSON file with enriched page-level records (one record per page)
 """
 
 import os
@@ -70,7 +70,7 @@ NAS_INPUT_JSON_PATH = "semantic_search/prep_output/ey/ey_prep_output_with_chapte
 NAS_OUTPUT_PATH = "semantic_search/pipeline_output/stage1"
 # Path on NAS where logs will be saved
 NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
-OUTPUT_FILENAME = "stage1_chapter_data_v2.json"
+OUTPUT_FILENAME = "stage1_page_records.json"
 
 # --- CA Bundle Configuration ---
 # Path on NAS where the SSL certificate is stored (relative to share root)
@@ -628,26 +628,18 @@ def group_pages_by_chapter(json_data: List[Dict]) -> Dict[int, List[Dict]]:
     
     return dict(chapters)
 
-def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI]) -> Dict:
+def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[OpenAI]) -> List[Dict]:
     """
-    Processes a single chapter by concatenating its pages and generating summary/tags.
-    Returns a single chapter record with all fields.
+    Processes pages in a chapter: generates ONE summary/tags for the chapter, 
+    then applies to ALL pages. Returns enriched page-level records.
     """
     logging.info(f"Processing Chapter {chapter_num} with {len(pages)} pages")
     
-    # Get metadata from first page (all pages in chapter should have same metadata)
+    # Get chapter metadata from first page
     first_page = pages[0]
-    document_id = first_page.get('document_id')
-    filename = first_page.get('filename')
-    filepath = first_page.get('filepath')
     chapter_name = first_page.get('chapter_name', f'Chapter {chapter_num}')
     
-    # Calculate page range
-    page_numbers = [p.get('page_number', 0) for p in pages]
-    chapter_page_start = min(page_numbers)
-    chapter_page_end = max(page_numbers)
-    
-    # Concatenate content in order (pages already sorted)
+    # Concatenate all page content for GPT processing
     content_parts = []
     for page in pages:
         page_content = page.get('content', '')
@@ -655,12 +647,10 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
             content_parts.append(page_content)
     
     concatenated_content = "\n\n".join(content_parts)
-    
-    # Calculate token count
     chapter_token_count = count_tokens(concatenated_content)
     logging.debug(f"  Chapter {chapter_num}: {chapter_token_count} tokens")
     
-    # Generate summary and tags via GPT
+    # Generate summary and tags via GPT (ONCE for the whole chapter)
     chapter_summary, chapter_tags = None, None
     if client:
         try:
@@ -668,83 +658,66 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
                 concatenated_content, client, model_name=MODEL_NAME_CHAT
             )
             if chapter_summary is None or chapter_tags is None:
-                logging.warning(f"  Failed to generate summary/tags for chapter {chapter_num}. Chapter will still be included in output.")
+                logging.warning(f"  Failed to generate summary/tags for chapter {chapter_num}.")
         except Exception as e:
-            logging.error(f"  Exception generating summary/tags for chapter {chapter_num}: {e}. Chapter will still be included in output.")
+            logging.error(f"  Exception generating summary/tags for chapter {chapter_num}: {e}")
     else:
         logging.warning("  OpenAI client not available. Skipping summary/tag generation.")
     
-    # Create chapter record with all fields
-    chapter_record = {
-        # Original fields from input
-        'document_id': document_id,
-        'filename': filename,
-        'filepath': filepath,
-        'chapter_number': chapter_num,
-        'chapter_name': chapter_name,
-        # Generated fields
-        'chapter_page_start': chapter_page_start,
-        'chapter_page_end': chapter_page_end,
-        'chapter_token_count': chapter_token_count,
-        'chapter_summary': chapter_summary,
-        'chapter_tags': chapter_tags,
-        # Content
-        'content': concatenated_content,
-        # Preserve page_reference from all pages for reference
-        'page_references': [p.get('page_reference') for p in pages if p.get('page_reference')]
-    }
+    # Apply chapter summary/tags to each page record
+    enriched_pages = []
+    for page in pages:
+        enriched_page = page.copy()  # Keep all original fields
+        
+        # Add chapter-level enrichments
+        enriched_page['chapter_summary'] = chapter_summary
+        enriched_page['chapter_tags'] = chapter_tags
+        enriched_page['chapter_token_count'] = chapter_token_count
+        
+        # Calculate page-specific token count
+        page_content = page.get('content', '')
+        enriched_page['page_token_count'] = count_tokens(page_content)
+        
+        # Ensure citation fields are clear
+        enriched_page['pdf_filename'] = page.get('filename')  # Split PDF name
+        enriched_page['pdf_page_number'] = page.get('page_number')  # Page in split PDF
+        # original_page_number and page_reference should already be in the record
+        
+        enriched_pages.append(enriched_page)
     
-    return chapter_record
+    logging.info(f"  Enriched {len(enriched_pages)} pages for Chapter {chapter_num}")
+    return enriched_pages
 
-def process_unassigned_pages(pages: List[Dict]) -> Optional[Dict]:
+def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
     """
     Processes pages that don't have a chapter assignment.
-    Groups them into a single record with chapter_number = None.
+    Returns enriched page records without chapter summaries.
     """
     if not pages:
-        return None
+        return []
     
     logging.info(f"Processing {len(pages)} unassigned pages")
     
-    # Sort by page number
-    pages.sort(key=lambda x: x.get('page_number', 0))
-    
-    first_page = pages[0]
-    document_id = first_page.get('document_id')
-    filename = first_page.get('filename')
-    filepath = first_page.get('filepath')
-    
-    # Calculate page range
-    page_numbers = [p.get('page_number', 0) for p in pages]
-    page_start = min(page_numbers)
-    page_end = max(page_numbers)
-    
-    # Concatenate content
-    content_parts = []
+    enriched_pages = []
     for page in pages:
+        enriched_page = page.copy()  # Keep all original fields
+        
+        # No chapter summary/tags for unassigned pages
+        enriched_page['chapter_summary'] = None
+        enriched_page['chapter_tags'] = None
+        enriched_page['chapter_token_count'] = None
+        
+        # Calculate page-specific token count
         page_content = page.get('content', '')
-        if page_content:
-            content_parts.append(page_content)
+        enriched_page['page_token_count'] = count_tokens(page_content)
+        
+        # Ensure citation fields
+        enriched_page['pdf_filename'] = page.get('filename')
+        enriched_page['pdf_page_number'] = page.get('page_number')
+        
+        enriched_pages.append(enriched_page)
     
-    concatenated_content = "\n\n".join(content_parts)
-    
-    # Create record for unassigned pages
-    unassigned_record = {
-        'document_id': document_id,
-        'filename': filename,
-        'filepath': filepath,
-        'chapter_number': None,
-        'chapter_name': 'Unassigned Pages',
-        'chapter_page_start': page_start,
-        'chapter_page_end': page_end,
-        'chapter_token_count': count_tokens(concatenated_content),
-        'chapter_summary': None,
-        'chapter_tags': None,
-        'content': concatenated_content,
-        'page_references': [p.get('page_reference') for p in pages if p.get('page_reference')]
-    }
-    
-    return unassigned_record
+    return enriched_pages
 
 def run_stage1():
     """Main function to execute Stage 1 processing with JSON input/output."""
@@ -794,25 +767,27 @@ def run_stage1():
     logging.info(f"Found {len(chapters)} chapters and {len(unassigned_pages)} unassigned pages")
     
     # --- Process Each Chapter ---
-    output_records = []
+    all_enriched_pages = []
     
     # Process chapters in order
     for chapter_num in sorted(chapters.keys()):
         pages = chapters[chapter_num]
-        chapter_record = process_chapter(chapter_num, pages, client)
-        output_records.append(chapter_record)
+        enriched_pages = process_chapter_pages(chapter_num, pages, client)
+        all_enriched_pages.extend(enriched_pages)
     
     # Process unassigned pages if any
     if unassigned_pages:
-        unassigned_record = process_unassigned_pages(unassigned_pages)
-        if unassigned_record:
-            output_records.append(unassigned_record)
+        enriched_unassigned = process_unassigned_pages(unassigned_pages)
+        all_enriched_pages.extend(enriched_unassigned)
+    
+    # Sort final output by original page number to maintain document order
+    all_enriched_pages.sort(key=lambda x: x.get('original_page_number', x.get('page_number', 0)))
     
     # --- Save Output to NAS ---
-    logging.info(f"Saving {len(output_records)} chapter records to NAS")
+    logging.info(f"Saving {len(all_enriched_pages)} enriched page records to NAS")
     
     try:
-        output_json = json.dumps(output_records, indent=2, ensure_ascii=False)
+        output_json = json.dumps(all_enriched_pages, indent=2, ensure_ascii=False)
         output_bytes = output_json.encode('utf-8')
         
         if write_to_nas(share_name, output_path_relative, output_bytes):
@@ -847,14 +822,14 @@ def run_stage1():
         print(f"Error handling log file: {e}")
     
     # --- Final Summary ---
-    print("--- Stage 1 V2 Summary ---")
+    print("--- Stage 1 Summary ---")
     print(f"Input: {len(input_data)} page records")
-    print(f"Output: {len(output_records)} chapter records")
+    print(f"Output: {len(all_enriched_pages)} enriched page records")
     print(f"Chapters processed: {len(chapters)}")
     if unassigned_pages:
-        print(f"Unassigned pages grouped: {len(unassigned_pages)}")
+        print(f"Unassigned pages processed: {len(unassigned_pages)}")
     print(f"Output file: {share_name}/{output_path_relative}")
-    print("--- Stage 1 V2 Completed ---")
+    print("--- Stage 1 Completed ---")
 
 # ==============================================================================
 # Main Execution Block
