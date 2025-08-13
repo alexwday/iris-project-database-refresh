@@ -711,15 +711,54 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     
     # Concatenate all page content for GPT processing
     content_parts = []
-    for page in pages:
+    total_page_chars = 0
+    page_char_counts = []
+    
+    for i, page in enumerate(pages):
         page_content = page.get('content', '')
         if page_content:
+            page_chars = len(page_content)
+            total_page_chars += page_chars
+            page_char_counts.append(page_chars)
             content_parts.append(page_content)
+            
+            # Log details for first few pages and any unusually large pages
+            if i < 3 or page_chars > 50000:
+                page_num = page.get('page_number', 'unknown')
+                orig_page = page.get('original_page_number', page_num)
+                if page_chars > 50000:
+                    logging.warning(f"  ⚠️ Page {page_num} (orig: {orig_page}) has {page_chars:,} chars - unusually large!")
+                else:
+                    logging.debug(f"  Page {page_num} (orig: {orig_page}): {page_chars:,} chars")
+    
+    # Calculate statistics
+    if page_char_counts:
+        avg_chars_per_page = sum(page_char_counts) / len(page_char_counts)
+        max_page_chars = max(page_char_counts)
+        min_page_chars = min(page_char_counts)
+        
+        logging.info(f"  Page statistics:")
+        logging.info(f"    - Total pages: {len(pages)}")
+        logging.info(f"    - Avg chars/page: {avg_chars_per_page:,.0f}")
+        logging.info(f"    - Min chars/page: {min_page_chars:,}")
+        logging.info(f"    - Max chars/page: {max_page_chars:,}")
+        
+        # Sanity check
+        if avg_chars_per_page > 20000:
+            logging.error(f"  ❌ ABNORMAL PAGE SIZE: Average {avg_chars_per_page:,.0f} chars/page!")
+            logging.error(f"     Normal pages are typically 2,000-5,000 chars")
+            logging.error(f"     This suggests the input JSON may have concatenated content")
     
     concatenated_content = "\n\n".join(content_parts)
     chapter_token_count = count_tokens(concatenated_content)
     char_count = len(concatenated_content)
     logging.info(f"  Content size: {char_count:,} characters → {chapter_token_count:,} tokens")
+    
+    # Additional sanity check
+    if char_count > 500000:  # ~150 pages of normal text
+        logging.error(f"  ❌ CHAPTER TOO LARGE: {char_count:,} characters!")
+        logging.error(f"     This is equivalent to ~{char_count/3000:.0f} normal pages")
+        logging.error(f"     Likely cause: Input JSON has duplicate or concatenated content")
     
     # Generate summary and tags via GPT (ONCE for the whole chapter)
     chapter_summary, chapter_tags = None, None
@@ -818,6 +857,46 @@ def run_stage1():
             logging.error("Input JSON is not a list. Expected array of page records.")
             return
         logging.info(f"Loaded {len(input_data)} page records from input JSON")
+        
+        # Diagnostic: Check the structure of the input data
+        if input_data:
+            first_record = input_data[0]
+            logging.info("Sample record structure:")
+            logging.info(f"  Keys: {list(first_record.keys())}")
+            
+            # Check content size in first few records
+            logging.info("First 5 records content analysis:")
+            for i, record in enumerate(input_data[:5]):
+                content = record.get('content', '')
+                page_num = record.get('page_number', 'unknown')
+                orig_page = record.get('original_page_number', page_num)
+                chapter = record.get('chapter_number', 'unassigned')
+                filename = record.get('filename', 'unknown')
+                content_len = len(content)
+                
+                logging.info(f"  Record {i}: Chapter {chapter}, File: {filename}, Page {page_num} (orig: {orig_page})")
+                logging.info(f"    Content length: {content_len:,} chars")
+                if content_len > 50000:
+                    logging.warning(f"    ⚠️ UNUSUALLY LARGE: {content_len:,} chars!")
+                    # Show first 200 chars to check for duplication
+                    preview = content[:200].replace('\n', ' ')
+                    logging.info(f"    Preview: {preview}...")
+            
+            # Check overall statistics
+            all_content_lengths = [len(r.get('content', '')) for r in input_data]
+            avg_content = sum(all_content_lengths) / len(all_content_lengths) if all_content_lengths else 0
+            max_content = max(all_content_lengths) if all_content_lengths else 0
+            
+            logging.info(f"Overall input statistics:")
+            logging.info(f"  Total records: {len(input_data)}")
+            logging.info(f"  Avg content/record: {avg_content:,.0f} chars")
+            logging.info(f"  Max content/record: {max_content:,} chars")
+            
+            if avg_content > 20000:
+                logging.error("❌ INPUT DATA ISSUE: Average content per page is abnormally large!")
+                logging.error("   This suggests the EY prep or Chapter Assignment Tool may have concatenated content")
+                logging.error("   Normal pages should be 2,000-5,000 chars each")
+        
     except json.JSONDecodeError as e:
         logging.error(f"Error decoding input JSON: {e}")
         return
@@ -840,6 +919,19 @@ def run_stage1():
     unassigned_pages = [r for r in input_data if r.get('chapter_number') is None]
     
     logging.info(f"Found {len(chapters)} chapters and {len(unassigned_pages)} unassigned pages")
+    
+    # Diagnostic: Show chapter distribution
+    logging.info("Chapter distribution:")
+    for chapter_num in sorted(chapters.keys())[:10]:  # Show first 10 chapters
+        chapter_pages = chapters[chapter_num]
+        chapter_name = chapter_pages[0].get('chapter_name', f'Chapter {chapter_num}')
+        total_chars = sum(len(p.get('content', '')) for p in chapter_pages)
+        logging.info(f"  Chapter {chapter_num} ({chapter_name}): {len(chapter_pages)} pages, {total_chars:,} total chars")
+        if total_chars > 500000:
+            logging.warning(f"    ⚠️ Chapter {chapter_num} is abnormally large!")
+    
+    if len(chapters) > 10:
+        logging.info(f"  ... and {len(chapters) - 10} more chapters")
     
     # --- Process Each Chapter ---
     all_enriched_pages = []

@@ -1400,8 +1400,14 @@ class ChapterAssignmentTool(QMainWindow):
             
         try:
             # Apply chapter assignments
+            chapter_counts = {}  # Track assignments for logging
             for record in self.json_data:
-                page_num = record['page_number']
+                # Use original_page_number if it exists (after PDF split), otherwise use page_number
+                page_num = record.get('original_page_number', record['page_number'])
+                
+                # Diagnostic: warn if using chapter-relative page numbers
+                if 'original_page_number' in record and record['page_number'] != page_num:
+                    logging.debug(f"Using original_page_number {page_num} instead of page_number {record['page_number']}")
                 
                 chapter_assigned = False
                 for chapter in self.chapters:
@@ -1409,11 +1415,23 @@ class ChapterAssignmentTool(QMainWindow):
                         record['chapter_number'] = chapter.chapter_number
                         record['chapter_name'] = chapter.chapter_name
                         chapter_assigned = True
+                        
+                        # Track assignment
+                        chapter_counts[chapter.chapter_number] = chapter_counts.get(chapter.chapter_number, 0) + 1
                         break
                         
                 if not chapter_assigned:
                     record.pop('chapter_number', None)
                     record.pop('chapter_name', None)
+                    chapter_counts['unassigned'] = chapter_counts.get('unassigned', 0) + 1
+            
+            # Log chapter assignment summary
+            logging.info("Chapter assignment summary:")
+            for chapter_num in sorted(chapter_counts.keys()):
+                if chapter_num == 'unassigned':
+                    logging.info(f"  Unassigned pages: {chapter_counts[chapter_num]}")
+                else:
+                    logging.info(f"  Chapter {chapter_num}: {chapter_counts[chapter_num]} pages")
                     
             # Save to file
             with open(file_path, 'w', encoding='utf-8') as f:
