@@ -1054,7 +1054,8 @@ def run_stage1():
         enriched_unassigned = process_unassigned_pages(unassigned_pages)
         all_enriched_pages.extend(enriched_unassigned)
     
-    all_enriched_pages.sort(key=lambda x: x.get('original_page_number', x.get('page_number', 0)))
+    # Sort by source_page_number to maintain original document order
+    all_enriched_pages.sort(key=lambda x: x.get('source_page_number', x.get('page_number', 0)))
     
     # Save output
     log_progress("-" * 70)
