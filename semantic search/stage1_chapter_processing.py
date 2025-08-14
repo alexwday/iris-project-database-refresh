@@ -828,13 +828,12 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     chapter_filename = first_page.get('filename', 'unknown.pdf')
     
     pdf_page_numbers = [p.get('page_number', 0) for p in pages]
-    chapter_page_start = min(pdf_page_numbers)
-    chapter_page_end = max(pdf_page_numbers)
+    chapter_page_count = len(pages)
     
     log_progress("")
     log_progress(f"📚 Chapter {chapter_num}: {chapter_name}")
     log_progress(f"  📁 File: {chapter_filename}")
-    log_progress(f"  📄 Pages: {chapter_page_start}-{chapter_page_end} ({len(pages)} pages)")
+    log_progress(f"  📄 Pages: {min(pdf_page_numbers)}-{max(pdf_page_numbers)} ({chapter_page_count} pages)")
     
     # Concatenate all page content
     content_parts = []
@@ -877,8 +876,7 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
             'chapter_number': page.get('chapter_number'),
             'chapter_name': page.get('chapter_name'),
             'chapter_summary': chapter_summary,
-            'chapter_page_start': chapter_page_start,
-            'chapter_page_end': chapter_page_end,
+            'chapter_page_count': chapter_page_count,
             'chapter_token_count': chapter_token_count,
             'page_number': page.get('page_number'),
             'page_reference': page.get('page_reference'),
@@ -909,8 +907,7 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
             'chapter_number': page.get('chapter_number'),
             'chapter_name': page.get('chapter_name'),
             'chapter_summary': None,
-            'chapter_page_start': None,
-            'chapter_page_end': None,
+            'chapter_page_count': None,
             'chapter_token_count': None,
             'page_number': page.get('page_number'),
             'page_reference': page.get('page_reference'),
