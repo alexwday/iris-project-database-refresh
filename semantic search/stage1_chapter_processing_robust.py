@@ -226,33 +226,48 @@ def read_from_nas(share_name, nas_path_relative):
 # ==============================================================================
 
 def setup_logging():
-    """Setup logging with controlled verbosity."""
+    """Setup logging with controlled verbosity - fixed duplication."""
     temp_log = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.log')
     temp_log_path = temp_log.name
     temp_log.close()
     
+    # Clear any existing handlers to prevent duplication
+    logging.root.handlers = []
+    
     log_level = logging.DEBUG if VERBOSE_LOGGING else logging.WARNING
+    
+    # Only add file handler to root logger (no console handler)
+    # This prevents duplicate console output
+    root_file_handler = logging.FileHandler(temp_log_path)
+    root_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(temp_log_path),
-            logging.StreamHandler()
-        ]
+        handlers=[root_file_handler]  # Only file handler, no StreamHandler
     )
     
+    # Progress logger handles all console output
     progress_logger = logging.getLogger('progress')
     progress_logger.setLevel(logging.INFO)
-    progress_logger.propagate = False
+    progress_logger.propagate = False  # Don't propagate to root
     
-    progress_handler = logging.StreamHandler()
-    progress_handler.setFormatter(logging.Formatter('%(message)s'))
-    progress_logger.addHandler(progress_handler)
+    # Console handler for progress messages
+    progress_console_handler = logging.StreamHandler()
+    progress_console_handler.setFormatter(logging.Formatter('%(message)s'))
+    progress_logger.addHandler(progress_console_handler)
     
-    file_handler = logging.FileHandler(temp_log_path)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-    progress_logger.addHandler(file_handler)
+    # File handler for progress messages
+    progress_file_handler = logging.FileHandler(temp_log_path)
+    progress_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    progress_logger.addHandler(progress_file_handler)
+    
+    # If verbose logging is enabled, also show warnings/errors on console
+    if VERBOSE_LOGGING:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+        console_handler.setLevel(logging.WARNING)  # Only warnings and errors
+        logging.root.addHandler(console_handler)
     
     return temp_log_path
 
@@ -847,14 +862,28 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
 
 def cleanup_logging_handlers():
     """Safely cleanup logging handlers."""
+    # Clean up progress logger handlers
     progress_logger = logging.getLogger('progress')
     for handler in list(progress_logger.handlers):
-        handler.close()
+        try:
+            handler.flush()
+            handler.close()
+        except:
+            pass
         progress_logger.removeHandler(handler)
     
+    # Clean up root logger handlers
     for handler in list(logging.root.handlers):
-        handler.close()
+        try:
+            handler.flush()
+            handler.close()
+        except:
+            pass
         logging.root.removeHandler(handler)
+    
+    # Clear the handlers list to be sure
+    progress_logger.handlers = []
+    logging.root.handlers = []
 
 def run_stage1():
     """Main function to execute Stage 1 processing."""
