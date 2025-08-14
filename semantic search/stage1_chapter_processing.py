@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Stage 1: Chapter Processing (Page-Level Records Version)
+Stage 1: Chapter Processing - ROBUST VERSION with Improved Tool Calling
 
-Purpose:
-Processes JSON output from Chapter Assignment Tool containing page-level records.
-Generates chapter summaries and tags once per chapter using an LLM, then applies
-them to all pages in that chapter. Keeps page-level records for perfect citation tracking.
-
-Input: JSON file from Chapter Assignment Tool with split PDF references
-Output: JSON file with enriched page-level records (one record per page)
+Key improvements:
+- Enforces tool calling for consistent JSON responses
+- Robust retry mechanism specifically for missing tags
+- Better handling of segmented chapters
+- Validates tool responses before accepting them
 """
 
 import os
@@ -21,6 +19,7 @@ import requests
 import tempfile
 import socket
 import io
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple, Any, Optional, Union
 from datetime import datetime
@@ -31,8 +30,6 @@ from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 
 # --- Dependencies Check ---
-# Note: tiktoken removed due to SSL/network issues. Using reliable local estimation instead.
-
 try:
     from openai import OpenAI, APIError
 except ImportError:
@@ -60,20 +57,16 @@ NAS_PARAMS = {
 }
 
 # --- Directory Paths (Relative to NAS Share) ---
-# Path on NAS where input JSON is stored (output from EY prep with chapter assignments)
-NAS_INPUT_JSON_PATH = "semantic_search/prep_output/ey/ey_prep_output_with_chapters.json"  # TODO: Adjust path
-# Path on NAS where output will be saved (relative to share root)
+NAS_INPUT_JSON_PATH = "semantic_search/prep_output/ey/ey_prep_output_with_chapters.json"
 NAS_OUTPUT_PATH = "semantic_search/pipeline_output/stage1"
-# Path on NAS where logs will be saved
 NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
 OUTPUT_FILENAME = "stage1_page_records.json"
 
 # --- CA Bundle Configuration ---
-# Path on NAS where the SSL certificate is stored (relative to share root)
-NAS_SSL_CERT_PATH = "certificates/rbc-ca-bundle.cer"  # TODO: Adjust to match your NAS location
-SSL_LOCAL_PATH = "/tmp/rbc-ca-bundle.cer"  # Temp path for cert
+NAS_SSL_CERT_PATH = "certificates/rbc-ca-bundle.cer"
+SSL_LOCAL_PATH = "/tmp/rbc-ca-bundle.cer"
 
-# --- API Configuration (Hardcoded) ---
+# --- API Configuration ---
 BASE_URL = "https://api.example.com/v1"  # TODO: Replace with actual API base URL
 MODEL_NAME_CHAT = "gpt-4-turbo-nonp"  # TODO: Replace with actual model name
 OAUTH_URL = "https://api.example.com/oauth/token"  # TODO: Replace with actual OAuth URL
@@ -81,14 +74,18 @@ CLIENT_ID = "your_client_id"  # TODO: Replace with actual client ID
 CLIENT_SECRET = "your_client_secret"  # TODO: Replace with actual client secret
 
 # --- API Parameters ---
-MAX_COMPLETION_TOKENS_CHAPTER = 4000
+GPT_INPUT_TOKEN_LIMIT = 80000  # Maximum tokens for input/prompt
+MAX_COMPLETION_TOKENS = 4000   # Maximum tokens for output/completion
 TEMPERATURE = 0.3
 API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY = 5
-GPT_INPUT_TOKEN_LIMIT = 80000
-TOKEN_BUFFER = 2000
+TOKEN_BUFFER = 2000  # Safety buffer for prompt overhead
 
-# --- Token Cost (Optional) ---
+# Retry parameters specifically for tool response validation
+TOOL_RESPONSE_RETRIES = 5  # More retries for getting proper tool responses
+TOOL_RESPONSE_RETRY_DELAY = 3
+
+# --- Token Cost ---
 PROMPT_TOKEN_COST = 0.01
 COMPLETION_TOKEN_COST = 0.03
 
@@ -97,8 +94,44 @@ smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
+# --- Logging Level Control ---
+VERBOSE_LOGGING = False
+
 # ==============================================================================
-# NAS Helper Functions
+# Configuration Validation
+# ==============================================================================
+
+def validate_configuration():
+    """Validates that configuration values have been properly set."""
+    errors = []
+    
+    if "your_nas_ip" in NAS_PARAMS["ip"]:
+        errors.append("NAS IP address not configured")
+    if "your_share_name" in NAS_PARAMS["share"]:
+        errors.append("NAS share name not configured")
+    if "your_nas_user" in NAS_PARAMS["user"]:
+        errors.append("NAS username not configured")
+    if "your_nas_password" in NAS_PARAMS["password"]:
+        errors.append("NAS password not configured")
+    if "api.example.com" in BASE_URL:
+        errors.append("API base URL not configured")
+    if "api.example.com" in OAUTH_URL:
+        errors.append("OAuth URL not configured")
+    if "your_client_id" in CLIENT_ID:
+        errors.append("Client ID not configured")
+    if "your_client_secret" in CLIENT_SECRET:
+        errors.append("Client secret not configured")
+    
+    if errors:
+        print("❌ Configuration errors detected:")
+        for error in errors:
+            print(f"  - {error}")
+        print("\nPlease update the configuration values in the script before running.")
+        return False
+    return True
+
+# ==============================================================================
+# NAS Helper Functions (Simplified for brevity)
 # ==============================================================================
 
 def create_nas_connection():
@@ -114,9 +147,8 @@ def create_nas_connection():
         )
         connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60)
         if not connected:
-            logging.error("Failed to connect to NAS.")
+            logging.error("Failed to connect to NAS")
             return None
-        logging.debug(f"Successfully connected to NAS: {NAS_PARAMS['ip']}:{NAS_PARAMS['port']}")
         return conn
     except Exception as e:
         logging.error(f"Exception creating NAS connection: {e}")
@@ -125,7 +157,6 @@ def create_nas_connection():
 def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
     """Ensures a directory exists on the NAS, creating it if necessary."""
     if not conn:
-        logging.error("Cannot ensure NAS directory: No connection.")
         return False
     
     path_parts = dir_path_relative.strip('/').split('/')
@@ -136,19 +167,16 @@ def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
             current_path = os.path.join(current_path, part).replace('\\', '/')
             try:
                 conn.listPath(share_name, current_path)
-                logging.debug(f"Directory exists: {current_path}")
             except Exception:
-                logging.info(f"Creating directory on NAS: {share_name}/{current_path}")
                 conn.createDirectory(share_name, current_path)
         return True
     except Exception as e:
-        logging.error(f"Failed to ensure/create NAS directory '{share_name}/{dir_path_relative}': {e}")
+        logging.error(f"Failed to ensure NAS directory: {e}")
         return False
 
 def write_to_nas(share_name, nas_path_relative, content_bytes):
     """Writes bytes to a file path on the NAS using pysmb."""
     conn = None
-    logging.info(f"Attempting to write to NAS path: {share_name}/{nas_path_relative}")
     try:
         conn = create_nas_connection()
         if not conn:
@@ -156,15 +184,18 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
 
         dir_path = os.path.dirname(nas_path_relative).replace('\\', '/')
         if dir_path and not ensure_nas_dir_exists(conn, share_name, dir_path):
-            logging.error(f"Failed to ensure output directory exists: {dir_path}")
             return False
 
         file_obj = io.BytesIO(content_bytes)
         bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
-        logging.info(f"Successfully wrote {bytes_written} bytes to: {share_name}/{nas_path_relative}")
+        
+        if bytes_written == 0 and len(content_bytes) > 0:
+            logging.error(f"No bytes written to {nas_path_relative}")
+            return False
+            
         return True
     except Exception as e:
-        logging.error(f"Unexpected error writing to NAS '{share_name}/{nas_path_relative}': {e}")
+        logging.error(f"Error writing to NAS: {e}")
         return False
     finally:
         if conn:
@@ -173,7 +204,7 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
 def read_from_nas(share_name, nas_path_relative):
     """Reads content (as bytes) from a file path on the NAS using pysmb."""
     conn = None
-    logging.debug(f"Attempting to read from NAS path: {share_name}/{nas_path_relative}")
+    file_obj = None
     try:
         conn = create_nas_connection()
         if not conn:
@@ -183,12 +214,16 @@ def read_from_nas(share_name, nas_path_relative):
         file_attributes, filesize = conn.retrieveFile(share_name, nas_path_relative, file_obj)
         file_obj.seek(0)
         content_bytes = file_obj.read()
-        logging.debug(f"Successfully read {filesize} bytes from: {share_name}/{nas_path_relative}")
         return content_bytes
     except Exception as e:
-        logging.error(f"Unexpected error reading from NAS '{share_name}/{nas_path_relative}': {e}")
+        logging.error(f"Error reading from NAS: {e}")
         return None
     finally:
+        if file_obj:
+            try:
+                file_obj.close()
+            except:
+                pass
         if conn:
             conn.close()
 
@@ -197,72 +232,91 @@ def read_from_nas(share_name, nas_path_relative):
 # ==============================================================================
 
 def setup_logging():
-    """Setup logging to write to NAS."""
+    """Setup logging with controlled verbosity - fixed duplication."""
     temp_log = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.log')
     temp_log_path = temp_log.name
     temp_log.close()
     
+    # Clear any existing handlers to prevent duplication
+    logging.root.handlers = []
+    
+    log_level = logging.DEBUG if VERBOSE_LOGGING else logging.WARNING
+    
+    # Only add file handler to root logger (no console handler)
+    # This prevents duplicate console output
+    root_file_handler = logging.FileHandler(temp_log_path)
+    root_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
-        handlers=[
-            logging.FileHandler(temp_log_path),
-            logging.StreamHandler()
-        ]
+        level=log_level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[root_file_handler]  # Only file handler, no StreamHandler
     )
     
-    logging.info(f"Temporary log file: {temp_log_path}")
+    # Progress logger handles all console output
+    progress_logger = logging.getLogger('progress')
+    progress_logger.setLevel(logging.INFO)
+    progress_logger.propagate = False  # Don't propagate to root
+    
+    # Console handler for progress messages
+    progress_console_handler = logging.StreamHandler()
+    progress_console_handler.setFormatter(logging.Formatter('%(message)s'))
+    progress_logger.addHandler(progress_console_handler)
+    
+    # File handler for progress messages
+    progress_file_handler = logging.FileHandler(temp_log_path)
+    progress_file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    progress_logger.addHandler(progress_file_handler)
+    
+    # If verbose logging is enabled, also show warnings/errors on console
+    if VERBOSE_LOGGING:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+        console_handler.setLevel(logging.WARNING)  # Only warnings and errors
+        logging.root.addHandler(console_handler)
+    
     return temp_log_path
 
+def log_progress(message, end='\n'):
+    """Log a progress message that always shows."""
+    progress_logger = logging.getLogger('progress')
+    
+    if end == '':
+        sys.stdout.write(message)
+        sys.stdout.flush()
+        for handler in progress_logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                handler.stream.write(f"{datetime.now().isoformat()} - {message}\n")
+                handler.flush()
+    else:
+        progress_logger.info(message)
+
 # ==============================================================================
-# Utility Functions
+# Token Counting
 # ==============================================================================
 
-# --- Token Counting ---
 def count_tokens(text: str) -> int:
-    """
-    Estimates token count using a reliable formula based on GPT-4 patterns.
-    Includes sanity checks to prevent unreasonable values.
-    
-    Formula based on empirical analysis:
-    - Average English word: ~1.3 tokens
-    - Average character per word: ~5 characters (including spaces)
-    - Therefore: tokens ≈ chars / 3.8
-    - We use chars / 3.5 to be slightly conservative
-    """
+    """Estimates token count using empirically-calibrated formula."""
     if not text:
         return 0
     
     char_count = len(text)
-    
-    # Basic estimation: characters divided by 3.5
-    # This is more accurate than /4 for typical English text
     estimated_tokens = int(char_count / 3.5)
     
-    # Sanity checks
-    MIN_CHARS_PER_TOKEN = 2     # Absolute minimum (handles code/numbers)
-    MAX_CHARS_PER_TOKEN = 10    # Absolute maximum (handles sparse text)
+    MIN_CHARS_PER_TOKEN = 2
+    MAX_CHARS_PER_TOKEN = 10
     
-    # Apply bounds
-    min_tokens = char_count // MAX_CHARS_PER_TOKEN
-    max_tokens = char_count // MIN_CHARS_PER_TOKEN
+    max_possible_tokens = char_count // MIN_CHARS_PER_TOKEN
+    min_possible_tokens = char_count // MAX_CHARS_PER_TOKEN
     
-    # Ensure estimate is within reasonable bounds
-    estimated_tokens = max(min_tokens, min(estimated_tokens, max_tokens))
-    
-    # Warning for unusually high token counts
-    if estimated_tokens > 500000:
-        logging.warning(f"Unusually high token count detected: {estimated_tokens:,} tokens from {char_count:,} characters")
-        logging.warning("This might indicate concatenated content issues or data corruption")
-    
-    # Log token estimation details for debugging (only for large texts)
-    if char_count > 100000:
-        words_estimate = char_count // 5  # Rough word count
-        logging.debug(f"Token estimation: {char_count:,} chars → ~{words_estimate:,} words → {estimated_tokens:,} tokens")
+    estimated_tokens = max(min_possible_tokens, min(estimated_tokens, max_possible_tokens))
     
     return estimated_tokens
 
-# --- API Client ---
+# ==============================================================================
+# API Client Setup
+# ==============================================================================
+
 _SSL_CONFIGURED = False
 _OPENAI_CLIENT = None
 
@@ -272,11 +326,10 @@ def _setup_ssl_from_nas() -> bool:
     if _SSL_CONFIGURED:
         return True
     
-    logging.info("Setting up SSL certificate from NAS...")
     try:
         cert_bytes = read_from_nas(NAS_PARAMS["share"], NAS_SSL_CERT_PATH)
         if cert_bytes is None:
-            logging.warning(f"SSL certificate not found on NAS at {NAS_SSL_CERT_PATH}. API calls may fail.")
+            logging.warning("SSL certificate not found on NAS, continuing without it")
             _SSL_CONFIGURED = True
             return True
         
@@ -287,18 +340,20 @@ def _setup_ssl_from_nas() -> bool:
         
         os.environ["SSL_CERT_FILE"] = str(local_cert)
         os.environ["REQUESTS_CA_BUNDLE"] = str(local_cert)
-        logging.info(f"SSL certificate configured successfully at: {local_cert}")
         _SSL_CONFIGURED = True
         return True
     except Exception as e:
-        logging.error(f"Error setting up SSL certificate from NAS: {e}", exc_info=True)
+        logging.error(f"Error setting up SSL: {e}")
         return False
 
 def _get_oauth_token(oauth_url=OAUTH_URL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, ssl_verify_path=SSL_LOCAL_PATH) -> Optional[str]:
     """Retrieves OAuth token."""
-    verify_path = ssl_verify_path if Path(ssl_verify_path).exists() else True
+    # Handle None or empty ssl_verify_path safely
+    try:
+        verify_path = ssl_verify_path if ssl_verify_path and Path(ssl_verify_path).exists() else True
+    except (TypeError, OSError):
+        verify_path = True
 
-    logging.info("Attempting to get OAuth token...")
     payload = {'grant_type': 'client_credentials', 'client_id': client_id, 'client_secret': client_secret}
     try:
         response = requests.post(oauth_url, data=payload, timeout=30, verify=verify_path)
@@ -306,12 +361,11 @@ def _get_oauth_token(oauth_url=OAUTH_URL, client_id=CLIENT_ID, client_secret=CLI
         token_data = response.json()
         oauth_token = token_data.get('access_token')
         if not oauth_token:
-            logging.error("Error: 'access_token' not found in OAuth response.")
+            logging.error("No access token in OAuth response")
             return None
-        logging.info("OAuth token obtained successfully.")
         return oauth_token
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error getting OAuth token: {e}", exc_info=True)
+        logging.error(f"OAuth token request failed: {e}")
         return None
 
 def get_openai_client(base_url=BASE_URL) -> Optional[OpenAI]:
@@ -320,508 +374,560 @@ def get_openai_client(base_url=BASE_URL) -> Optional[OpenAI]:
     if _OPENAI_CLIENT:
         return _OPENAI_CLIENT
     if not OpenAI:
-        logging.error("OpenAI library not available.")
         return None
     if not _setup_ssl_from_nas():
-        logging.warning("Proceeding without explicit SSL setup. API calls might fail.")
+        pass
 
     api_key = _get_oauth_token()
     if not api_key:
-        logging.error("Aborting client creation due to OAuth token failure.")
         return None
     try:
         _OPENAI_CLIENT = OpenAI(api_key=api_key, base_url=base_url)
-        logging.info("OpenAI client created successfully.")
         return _OPENAI_CLIENT
     except Exception as e:
-        logging.error(f"Error creating OpenAI client: {e}", exc_info=True)
-        return None
-
-# --- API Call ---
-def call_gpt_chat_completion(client, model, messages, max_tokens, temperature, tools=None, tool_choice=None):
-    """Makes the API call with retry logic, supporting tool calls."""
-    last_exception = None
-    for attempt in range(API_RETRY_ATTEMPTS):
-        try:
-            logging.debug(f"Making API call (Attempt {attempt + 1}/{API_RETRY_ATTEMPTS})...")
-            completion_kwargs = {
-                "model": model, "messages": messages, "max_tokens": max_tokens,
-                "temperature": temperature, "stream": False,
-            }
-            if tools and tool_choice:
-                completion_kwargs["tools"] = tools
-                completion_kwargs["tool_choice"] = tool_choice
-                logging.debug("Making API call with tool choice...")
-            else:
-                completion_kwargs["response_format"] = {"type": "json_object"}
-                logging.debug("Making API call with JSON response format...")
-
-            response = client.chat.completions.create(**completion_kwargs)
-            logging.debug("API call successful.")
-            response_message = response.choices[0].message
-            usage_info = response.usage
-
-            if response_message.tool_calls:
-                tool_call = response_message.tool_calls[0]
-                if tool_choice and isinstance(tool_choice, dict):
-                    expected_tool_name = tool_choice.get("function", {}).get("name")
-                    if expected_tool_name and tool_call.function.name != expected_tool_name:
-                        raise ValueError(f"Expected tool '{expected_tool_name}' but received '{tool_call.function.name}'")
-                function_args_json = tool_call.function.arguments
-                return function_args_json, usage_info
-            elif response_message.content:
-                return response_message.content, usage_info
-            else:
-                raise ValueError("API response missing both tool calls and content.")
-
-        except APIError as e:
-            logging.warning(f"API Error on attempt {attempt + 1}: {e}")
-            last_exception = e
-            time.sleep(API_RETRY_DELAY * (attempt + 1))
-        except Exception as e:
-            logging.warning(f"Non-API Error on attempt {attempt + 1}: {e}", exc_info=True)
-            last_exception = e
-            time.sleep(API_RETRY_DELAY)
-
-    logging.error(f"API call failed after {API_RETRY_ATTEMPTS} attempts.")
-    if last_exception:
-        raise last_exception
-    else:
-        raise Exception("API call failed for unknown reasons.")
-
-def parse_gpt_json_response(response_content_str: str, expected_keys: List[str]) -> Optional[Dict]:
-    """Parses JSON response string from GPT and validates expected keys."""
-    try:
-        if response_content_str.strip().startswith("```json"):
-            response_content_str = response_content_str.strip()[7:-3].strip()
-        elif response_content_str.strip().startswith("```"):
-            response_content_str = response_content_str.strip()[3:-3].strip()
-
-        data = json.loads(response_content_str)
-        if not isinstance(data, dict):
-            raise ValueError("Response is not a JSON object.")
-
-        missing_keys = [key for key in expected_keys if key not in data]
-        if missing_keys:
-            raise ValueError(f"Missing expected keys in response: {', '.join(missing_keys)}")
-
-        logging.debug("GPT JSON response parsed successfully.")
-        return data
-    except json.JSONDecodeError as e:
-        logging.error(f"Error decoding GPT JSON response: {e}")
-        logging.error(f"Raw response string: {response_content_str[:500]}...")
-        return None
-    except ValueError as e:
-        logging.error(f"Error validating GPT JSON response: {e}")
-        logging.error(f"Raw response string: {response_content_str[:500]}...")
+        logging.error(f"Failed to create OpenAI client: {e}")
         return None
 
 # ==============================================================================
-# GPT Prompting for Chapter Details
+# IMPROVED API Call with Strict Tool Enforcement
+# ==============================================================================
+
+def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperature, tool_schema):
+    """
+    Makes API call with STRICT tool enforcement.
+    Will retry if response doesn't use the specified tool.
+    """
+    tool_name = tool_schema["function"]["name"]
+    
+    # Validate messages list is not empty
+    if not messages:
+        logging.error("Messages list is empty")
+        return None, None
+    
+    for attempt in range(TOOL_RESPONSE_RETRIES):
+        try:
+            if attempt > 0:
+                logging.info(f"Tool response retry {attempt + 1}/{TOOL_RESPONSE_RETRIES}")
+                # Add enforcement message to prompt
+                enforcement_msg = {
+                    "role": "system",
+                    "content": f"CRITICAL: You MUST use the '{tool_name}' tool to provide your response. Do not respond with plain text."
+                }
+                # Insert enforcement message before the last user message
+                # Safe because we checked messages is not empty above
+                # messages[-1:] returns a list, so this is correct
+                enhanced_messages = messages[:-1] + [enforcement_msg] + messages[-1:]
+            else:
+                enhanced_messages = messages
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=enhanced_messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tools=[tool_schema],
+                tool_choice={"type": "function", "function": {"name": tool_name}},
+                stream=False
+            )
+            
+            response_message = response.choices[0].message
+            usage_info = response.usage
+            
+            # Validate we got a tool call
+            if not response_message.tool_calls:
+                logging.warning(f"Attempt {attempt + 1}: No tool calls in response")
+                time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                continue
+            
+            tool_call = response_message.tool_calls[0]
+            
+            # Validate it's the correct tool
+            if tool_call.function.name != tool_name:
+                logging.warning(f"Attempt {attempt + 1}: Wrong tool used: {tool_call.function.name}")
+                time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                continue
+            
+            # Parse and validate the tool arguments
+            try:
+                function_args = json.loads(tool_call.function.arguments)
+                
+                # Validate required fields are present and non-empty
+                if 'summary' not in function_args or not function_args['summary']:
+                    logging.warning(f"Attempt {attempt + 1}: Missing or empty summary")
+                    time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                    continue
+                
+                if 'tags' not in function_args or not isinstance(function_args['tags'], list):
+                    logging.warning(f"Attempt {attempt + 1}: Missing or invalid tags")
+                    time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                    continue
+                
+                # Validate we have at least some tags
+                if len(function_args['tags']) < 3:
+                    logging.warning(f"Attempt {attempt + 1}: Too few tags ({len(function_args['tags'])})")
+                    time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                    continue
+                
+                # Success! Return the validated response
+                return function_args, usage_info
+                
+            except json.JSONDecodeError as e:
+                # Log the actual malformed JSON for debugging
+                logging.warning(f"Attempt {attempt + 1}: Invalid JSON in tool arguments: {e}")
+                logging.debug(f"Malformed JSON content: {tool_call.function.arguments[:500]}...")  # First 500 chars
+                time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+                continue
+                
+        except APIError as e:
+            logging.warning(f"API Error on attempt {attempt + 1}: {e}")
+            time.sleep(TOOL_RESPONSE_RETRY_DELAY * (2 ** min(attempt, 3)))
+        except Exception as e:
+            logging.warning(f"Unexpected error on attempt {attempt + 1}: {e}")
+            time.sleep(TOOL_RESPONSE_RETRY_DELAY)
+    
+    # All retries exhausted
+    logging.error(f"Failed to get valid tool response after {TOOL_RESPONSE_RETRIES} attempts")
+    return None, None
+
+# ==============================================================================
+# IMPROVED GPT Prompting with Better Structure
 # ==============================================================================
 
 CHAPTER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "extract_chapter_details",
-        "description": "Extracts the summary and topic tags from a chapter segment based on provided guidance.",
+        "name": "provide_chapter_analysis",
+        "description": "Provides structured analysis of chapter content including summary and tags",
         "parameters": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "A detailed summary of the chapter segment, following the structure outlined in the prompt."
+                    "description": "Comprehensive summary with sections: Purpose, Key Topics/Standards, Context/Applicability, Key Outcomes/Decisions"
                 },
                 "tags": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "A list of 5-15 specific, granular topic tags relevant for retrieval by accounting professionals."
+                    "minItems": 5,
+                    "maxItems": 15,
+                    "description": "Specific topic tags for retrieval (standards, concepts, procedures, terms)"
                 }
             },
-            "required": ["summary", "tags"]
+            "required": ["summary", "tags"],
+            "additionalProperties": False
         }
     }
 }
 
-def _build_chapter_prompt(segment_text, prev_summary=None, prev_tags=None, is_final_segment=False):
-    """Builds the messages list for the chapter/segment processing call using CO-STAR and XML."""
-    system_prompt = """<role>You are an expert financial reporting specialist with deep knowledge of IFRS and US GAAP.</role>
-<source_material>You are analyzing segments of a chapter from a comprehensive EY technical accounting guidance manual.</source_material>
-<task>Your primary task is to extract key information and generate a highly detailed, structured summary and a set of specific, granular topic tags for the provided text segment. This output will be used to build a knowledge base for accurate retrieval by accounting professionals. You will provide the output using the available 'extract_chapter_details' tool.</task>
-<guardrails>Base your analysis strictly on the provided text segment and any previous context given. Do not infer information not explicitly present or heavily implied. Focus on factual extraction and objective summarization. Ensure tags are precise and directly relevant to accounting standards, concepts, or procedures mentioned.</guardrails>"""
+def build_chapter_analysis_prompt(segment_text, prev_summary=None, prev_tags=None, is_final_segment=False):
+    """
+    Builds prompt using CO-STAR + XML format with explicit tool requirement.
+    """
+    system_prompt = """<role>
+You are an expert financial reporting specialist analyzing EY technical accounting guidance.
+</role>
 
-    user_prompt_elements = ["<prompt>"]
-    user_prompt_elements.append("<context>You are processing a text segment from a chapter within an EY technical accounting guidance manual (likely IFRS or US GAAP focused). The ultimate goal is to populate a knowledge base for efficient and accurate information retrieval by accounting professionals performing research.</context>")
-    if prev_summary: user_prompt_elements.append(f"<previous_summary>{prev_summary}</previous_summary>")
-    if prev_tags: user_prompt_elements.append(f"<previous_tags>{json.dumps(prev_tags)}</previous_tags>")
-    user_prompt_elements.append("<style>Highly detailed, structured, technical, analytical, precise, and informative. Use clear headings within the summary string as specified.</style>")
-    user_prompt_elements.append("<tone>Professional, objective, expert.</tone>")
-    user_prompt_elements.append("<audience>Accounting professionals needing specific guidance; requires accuracy, completeness (within the scope of the text), and easy identification of key concepts.</audience>")
-    user_prompt_elements.append('<response_format>Use the "extract_chapter_details" tool to provide the summary and tags.</response_format>')
-    user_prompt_elements.append(f"<current_segment>{segment_text}</current_segment>")
-    user_prompt_elements.append("<instructions>")
-    summary_structure_guidance = """
-    **Summary Structure Guidance:** Structure the 'summary' string using the following headings. Provide detailed information under each:
-    *   **Purpose:** Concisely state the primary objective of this chapter/segment.
-    *   **Key Topics/Standards:** List primary standards (e.g., IFRS 16, ASC 842) and detail significant topics, concepts, principles, or procedures discussed. Be specific.
-    *   **Context/Applicability:** Describe the scope precisely (entities, transactions, industries, exceptions).
-    *   **Key Outcomes/Decisions:** Identify main outcomes, critical judgments, or key decisions needed.
-    """
-    tag_guidance = """
-    **Tag Generation Guidance:** Generate specific, granular tags (5-15) for retrieval. Include:
-    *   Relevant standard names/paragraphs (e.g., 'IFRS 15', 'IAS 36.12').
-    *   Core accounting concepts (e.g., 'revenue recognition', 'lease modification').
-    *   Specific procedures/models (e.g., 'five-step revenue model', 'ECL model').
-    *   Key terms defined (e.g., 'performance obligation', 'lease term').
-    *   Applicability context (e.g., 'SME considerations', 'interim reporting').
-    """
+<context>
+You are processing content from comprehensive accounting guidance manuals covering IFRS and US GAAP.
+The content will be used to build a searchable knowledge base for accounting professionals.
+</context>
+
+<objective>
+Extract and structure key information from the provided text segment to create:
+1. A detailed, structured summary following specific guidelines
+2. Granular topic tags for efficient retrieval
+</objective>
+
+<style>
+- Technical and precise
+- Structured with clear sections
+- Comprehensive yet concise
+- Professional tone
+</style>
+
+<tone>
+Expert, analytical, objective
+</tone>
+
+<audience>
+Accounting professionals requiring specific technical guidance
+</audience>
+
+<response_format>
+YOU MUST use the 'provide_chapter_analysis' tool to structure your response.
+DO NOT provide a plain text response.
+</response_format>"""
+
+    # Build user prompt
+    user_prompt_parts = []
+    
+    # Add previous context if available
     if prev_summary or prev_tags:
-        user_prompt_elements.append(summary_structure_guidance)
-        user_prompt_elements.append(tag_guidance)
-        if is_final_segment:
-            user_prompt_elements.append("**Objective:** Consolidate all context with the <current_segment> for the FINAL chapter summary/tags.")
-            user_prompt_elements.append("**Action:** Synthesize all info, adhering to guidance. Ensure final output reflects the entire chapter processed.")
-        else:
-            user_prompt_elements.append("**Objective:** Refine cumulative understanding with <current_segment>.")
-            user_prompt_elements.append("**Action:** Integrate <current_segment> with previous context. Provide UPDATED summary/tags, adhering to guidance.")
-    else:
-        user_prompt_elements.append(summary_structure_guidance)
-        user_prompt_elements.append(tag_guidance)
-        user_prompt_elements.append("**Objective:** Analyze the initial segment.")
-        user_prompt_elements.append("**Action:** Generate summary/tags based ONLY on <current_segment>, adhering to guidance.")
-    user_prompt_elements.append("</instructions>")
-    user_prompt_elements.append("</prompt>")
-    user_prompt = "\n".join(user_prompt_elements)
+        user_prompt_parts.append("<previous_context>")
+        if prev_summary:
+            user_prompt_parts.append(f"<previous_summary>\n{prev_summary}\n</previous_summary>")
+        if prev_tags:
+            user_prompt_parts.append(f"<previous_tags>\n{json.dumps(prev_tags)}\n</previous_tags>")
+        user_prompt_parts.append("</previous_context>")
+    
+    # Add current segment
+    user_prompt_parts.append(f"<current_segment>\n{segment_text}\n</current_segment>")
+    
+    # Add specific instructions
+    user_prompt_parts.append("<instructions>")
+    user_prompt_parts.append("<summary_requirements>")
+    user_prompt_parts.append("""Create a comprehensive summary with these REQUIRED sections:
 
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+**Purpose:** State the primary objective of this content (1-2 sentences)
+
+**Key Topics/Standards:** List and explain:
+- Specific accounting standards referenced (e.g., IFRS 16, ASC 842)
+- Core concepts and principles discussed
+- Important procedures or methodologies
+
+**Context/Applicability:** Describe:
+- Which entities or transactions this applies to
+- Industry-specific considerations
+- Exceptions or special cases
+
+**Key Outcomes/Decisions:** Identify:
+- Critical judgments required
+- Decision points for practitioners
+- Important implications""")
+    user_prompt_parts.append("</summary_requirements>")
+    
+    user_prompt_parts.append("<tag_requirements>")
+    user_prompt_parts.append("""Generate 5-15 specific tags including:
+- Standard references (e.g., 'IFRS 15', 'ASC 606')
+- Technical concepts (e.g., 'revenue recognition', 'lease classification')
+- Procedures/methods (e.g., 'five-step model', 'expected credit loss')
+- Key defined terms (e.g., 'performance obligation', 'right-of-use asset')
+- Application contexts (e.g., 'software industry', 'transition provisions')
+
+Tags must be:
+- Specific and granular (not generic)
+- Directly mentioned or clearly implied in the text
+- Useful for search and retrieval""")
+    user_prompt_parts.append("</tag_requirements>")
+    
+    # Add segment-specific guidance
+    if is_final_segment and (prev_summary or prev_tags):
+        user_prompt_parts.append("""<task>
+This is the FINAL segment. Synthesize ALL information from previous and current segments.
+Ensure the summary and tags comprehensively cover the ENTIRE chapter content.
+</task>""")
+    elif prev_summary or prev_tags:
+        user_prompt_parts.append("""<task>
+Integrate this segment with previous context. 
+Update and expand the summary and tags to include new information.
+Maintain continuity with previous analysis.
+</task>""")
+    else:
+        user_prompt_parts.append("""<task>
+Analyze this initial segment and create the foundation summary and tags.
+Focus only on the content provided in the current segment.
+</task>""")
+    
+    user_prompt_parts.append("</instructions>")
+    
+    user_prompt_parts.append("""<critical_requirement>
+YOU MUST USE THE 'provide_chapter_analysis' TOOL TO PROVIDE YOUR RESPONSE.
+The tool must include both 'summary' and 'tags' fields with appropriate content.
+</critical_requirement>""")
+    
+    user_prompt = "\n".join(user_prompt_parts)
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
     return messages
 
-def process_chapter_segment_for_details(segment_text, client, model_name, max_completion_tokens, temperature, prev_summary=None, prev_tags=None, is_final_segment=False):
-    """Processes a single chapter segment using GPT to get summary and tags."""
-    messages = _build_chapter_prompt(segment_text, prev_summary, prev_tags, is_final_segment)
-    prompt_tokens_est = sum(count_tokens(msg["content"]) for msg in messages)
-    logging.debug(f"Estimated prompt tokens for segment: {prompt_tokens_est}")
-
-    try:
-        response_content_json_str, usage_info = call_gpt_chat_completion(
-            client=client,
-            messages=messages,
-            model=model_name,
-            max_tokens=max_completion_tokens,
-            temperature=temperature,
-            tools=[CHAPTER_TOOL_SCHEMA],
-            tool_choice={"type": "function", "function": {"name": "extract_chapter_details"}}
-        )
-
-        if not response_content_json_str:
-            raise ValueError("API call returned empty response.")
-
-        parsed_data = parse_gpt_json_response(response_content_json_str, expected_keys=["summary", "tags"])
-
-        if usage_info:
+def process_chapter_segment_robust(segment_text, client, model_name, prev_summary=None, prev_tags=None, is_final_segment=False):
+    """
+    Process a chapter segment with robust tool calling and validation.
+    """
+    messages = build_chapter_analysis_prompt(segment_text, prev_summary, prev_tags, is_final_segment)
+    
+    # Call API with strict tool enforcement
+    result, usage_info = call_gpt_with_tool_enforcement(
+        client=client,
+        model=model_name,
+        messages=messages,
+        max_tokens=MAX_COMPLETION_TOKENS,
+        temperature=TEMPERATURE,
+        tool_schema=CHAPTER_TOOL_SCHEMA
+    )
+    
+    if result:
+        # Log success
+        if usage_info and VERBOSE_LOGGING:
             prompt_tokens = usage_info.prompt_tokens
             completion_tokens = usage_info.completion_tokens
-            total_tokens = usage_info.total_tokens
-            prompt_cost = (prompt_tokens / 1000) * PROMPT_TOKEN_COST
-            completion_cost = (completion_tokens / 1000) * COMPLETION_TOKEN_COST
-            total_cost = prompt_cost + completion_cost
-            logging.info(f"API Usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}, Cost: ${total_cost:.4f}")
-        else:
-            logging.debug("Usage information not available.")
+            total_cost = (prompt_tokens / 1000) * PROMPT_TOKEN_COST + (completion_tokens / 1000) * COMPLETION_TOKEN_COST
+            logging.debug(f"API Usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Cost: ${total_cost:.4f}")
+        
+        # Validate and clean the result
+        summary = result.get('summary', '').strip()
+        tags = result.get('tags', [])
+        
+        # Filter out empty or duplicate tags
+        tags = list(set(tag.strip() for tag in tags if tag and tag.strip()))
+        
+        return {'summary': summary, 'tags': tags}
+    
+    return None
 
-        return parsed_data
-
-    except Exception as e:
-        logging.error(f"Error processing chapter segment: {e}", exc_info=True)
-        return None
-
-def get_chapter_summary_and_tags(chapter_text: str, client: OpenAI, model_name: str = MODEL_NAME_CHAT) -> Tuple[Optional[str], Optional[List[str]]]:
-    """Generates summary and tags for the chapter text, handling segmentation."""
+def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model_name: str = MODEL_NAME_CHAT) -> Tuple[Optional[str], Optional[List[str]]]:
+    """
+    Generate summary and tags with improved segmentation handling.
+    """
     total_tokens = count_tokens(chapter_text)
     total_chars = len(chapter_text)
     
-    processing_limit = GPT_INPUT_TOKEN_LIMIT - MAX_COMPLETION_TOKENS_CHAPTER - TOKEN_BUFFER
+    # Ensure we have positive available tokens
+    available_for_content = max(1000, GPT_INPUT_TOKEN_LIMIT - TOKEN_BUFFER)  # Minimum 1000 tokens
+    needs_segmentation = total_tokens > available_for_content
     
-    # Log token analysis
-    logging.info("-" * 60)
-    logging.info("TOKEN ANALYSIS:")
-    logging.info(f"  Estimation method: chars/3.5 ratio (empirically calibrated)")
-    logging.info(f"  Total chapter tokens: {total_tokens:,}")
-    logging.info(f"  Total chapter characters: {total_chars:,}")
-    logging.info(f"  Avg chars per token: {total_chars/total_tokens:.2f}" if total_tokens > 0 else "N/A")
-    logging.info(f"  GPT input limit: {GPT_INPUT_TOKEN_LIMIT:,}")
-    logging.info(f"  Reserved for completion: {MAX_COMPLETION_TOKENS_CHAPTER:,}")
-    logging.info(f"  Buffer: {TOKEN_BUFFER:,}")
-    logging.info(f"  Available for input: {processing_limit:,}")
-    logging.info(f"  Fits in single call: {'YES' if total_tokens <= processing_limit else 'NO'}")
-    logging.info("-" * 60)
-    
-    final_chapter_details = None
-
-    if total_tokens <= processing_limit:
-        logging.info("Processing chapter summary/tags in a single call.")
-        # Retry logic for single call processing
-        result = None
-        for retry in range(3):  # Try up to 3 times
-            try:
-                result = process_chapter_segment_for_details(
-                    chapter_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE, is_final_segment=True
-                )
-                if result:
-                    break  # Success
-                elif retry < 2:
-                    logging.warning(f"Single call processing failed, retrying ({retry + 2}/3)...")
-                    time.sleep(5 * (retry + 1))
-            except Exception as e:
-                logging.warning(f"Exception in single call processing, attempt {retry + 1}/3: {e}")
-                if retry < 2:
-                    time.sleep(5 * (retry + 1))
+    if needs_segmentation:
+        # Calculate number of segments needed using ceiling division
+        # Ensure available_for_content is positive to avoid division by zero
+        if available_for_content <= 0:
+            logging.error(f"Invalid available_for_content: {available_for_content}")
+            return None, None
         
-        if result:
-            final_chapter_details = {'summary': result.get('summary'), 'tags': result.get('tags')}
-        else:
-            logging.error("Failed to process chapter in single call after 3 attempts.")
-    else:
-        logging.info(f"Chapter exceeds token limit ({total_tokens:,} > {processing_limit:,})")
-        logging.info("SEGMENTATION REQUIRED:")
+        num_segments = max(1, (total_tokens + available_for_content - 1) // available_for_content)
         
-        num_segments = (total_tokens // processing_limit) + 1
-        segment_len_approx = len(chapter_text) // num_segments
+        # Calculate target tokens per segment for better distribution
+        # num_segments is guaranteed to be >= 1 from above
+        target_tokens_per_segment = max(1, total_tokens // num_segments)
         
-        logging.warning(f"⚠️ Large chapter requires segmentation:")
-        logging.info(f"  Segments needed (by tokens): {num_segments}")
-        logging.info(f"  Target chars per segment: {segment_len_approx:,}")
-        # Calculate actual tokens for a sample segment
-        sample_segment_tokens = count_tokens(chapter_text[:min(segment_len_approx, len(chapter_text))])
-        logging.info(f"  Estimated tokens per segment: {sample_segment_tokens:,}")
+        # Estimate characters per token for this specific text
+        chars_per_token = total_chars / total_tokens if total_tokens > 0 else 3.5
         
-        segments = [chapter_text[i:i + segment_len_approx] for i in range(0, len(chapter_text), segment_len_approx)]
+        # Calculate segment length in characters
+        segment_len_chars = int(target_tokens_per_segment * chars_per_token)
         
-        # Verify actual segment sizes
-        logging.info(f"  Actual segments created: {len(segments)}")
+        # Create segments with correct indexing
+        segments = []
+        start = 0
         
-        # Sanity check for excessive segmentation
-        if len(segments) > 10:
-            logging.error(f"❌ EXCESSIVE SEGMENTATION DETECTED: {len(segments)} segments!")
-            logging.error(f"   This usually indicates a data issue or incorrect token counting.")
-            logging.error(f"   Chapter has {len(chapter_text):,} chars, estimated at {total_tokens:,} tokens.")
-            logging.error(f"   Please verify the chapter content is not corrupted or duplicated.")
+        for i in range(num_segments):
+            # Check if we've already consumed all text
+            if start >= len(chapter_text):
+                break
+                
+            if i == num_segments - 1:
+                # Last segment gets all remaining text from start to end
+                segment = chapter_text[start:]
+            else:
+                # Calculate end position for this segment
+                end = min(start + segment_len_chars, len(chapter_text))
+                segment = chapter_text[start:end]
+                start = end  # Update start for next iteration
+            
+            # Only add non-empty segments
+            if segment and segment.strip():
+                segments.append(segment)
         
-        for i, seg in enumerate(segments[:3]):  # Show first 3 segments
+        # Log segment distribution for debugging
+        if VERBOSE_LOGGING:
+            logging.debug(f"Segmentation: {total_tokens:,} tokens into {num_segments} segments")
+            logging.debug(f"Target per segment: {target_tokens_per_segment:,} tokens")
+            for idx, seg in enumerate(segments):
+                seg_tokens = count_tokens(seg)
+                logging.debug(f"Segment {idx+1}: {len(seg):,} chars, {seg_tokens:,} tokens")
+        
+        log_progress(f"  📄 Chapter size: {total_chars:,} chars ({total_tokens:,} tokens)")
+        log_progress(f"  ✂️  Split into {len(segments)} segments for processing")
+        
+        # Show segment breakdown
+        total_segment_tokens = 0
+        for idx, seg in enumerate(segments):
             seg_tokens = count_tokens(seg)
-            logging.info(f"    Segment {i+1}: {len(seg):,} chars, {seg_tokens:,} tokens")
-        if len(segments) > 3:
-            logging.info(f"    ... and {len(segments) - 3} more segments")
+            total_segment_tokens += seg_tokens
+            if seg_tokens == 0:
+                log_progress(f"    ⚠️ Segment {idx+1}: EMPTY (0 tokens) - will be skipped")
+            else:
+                log_progress(f"    📑 Segment {idx+1}: {len(seg):,} chars (~{seg_tokens:,} tokens)")
+        
+        # Use proportional threshold for token count validation (1% tolerance)
+        token_difference = abs(total_segment_tokens - total_tokens)
+        token_tolerance = max(100, int(total_tokens * 0.01))  # 1% or minimum 100 tokens
+        if token_difference > token_tolerance:
+            log_progress(f"    ⚠️ Token count mismatch: original {total_tokens:,} vs sum {total_segment_tokens:,} (diff: {token_difference:,})")
         
         current_summary = None
-        current_tags = None
-        final_result = None
-
-        for i, segment_text in enumerate(tqdm(segments, desc="Processing Segments")):
-            logging.debug(f"Processing segment {i + 1}/{len(segments)}...")
-            is_final = (i == len(segments) - 1)
+        current_tags = []
+        all_tags_collected = set()  # Track all unique tags across segments
+        
+        # Filter out empty segments before processing
+        non_empty_segments = [(i, seg) for i, seg in enumerate(segments) if seg.strip()]
+        
+        if len(non_empty_segments) == 0:
+            log_progress("  ❌ All segments are empty after splitting!")
+            return None, None
+        
+        if len(non_empty_segments) < len(segments):
+            log_progress(f"  ⚠️ Filtered out {len(segments) - len(non_empty_segments)} empty segment(s)")
+        
+        for seg_idx, (original_idx, segment_text) in enumerate(non_empty_segments):
+            segment_tokens = count_tokens(segment_text)
             
-            # Retry logic for segment processing
+            # Determine if this is the final segment (clearer logic)
+            # seg_idx is the index in the non_empty_segments list
+            is_final = (seg_idx == len(non_empty_segments) - 1)
+            
+            log_progress(f"  🔄 Processing segment {seg_idx+1}/{len(non_empty_segments)} ({segment_tokens:,} tokens)...", end='')
+            
+            # Process segment with retries
             segment_result = None
-            for retry in range(3):  # Try up to 3 times
+            for retry in range(3):
                 try:
-                    segment_result = process_chapter_segment_for_details(
-                        segment_text, client, model_name, MAX_COMPLETION_TOKENS_CHAPTER, TEMPERATURE,
-                        prev_summary=current_summary, prev_tags=current_tags, is_final_segment=is_final
+                    segment_result = process_chapter_segment_robust(
+                        segment_text, client, model_name,
+                        prev_summary=current_summary, 
+                        prev_tags=list(all_tags_collected) if all_tags_collected else None,
+                        is_final_segment=is_final
                     )
                     if segment_result:
-                        break  # Success, exit retry loop
+                        break
                     elif retry < 2:
-                        logging.warning(f"Segment {i + 1} failed, retrying ({retry + 2}/3)...")
-                        time.sleep(5 * (retry + 1))  # Exponential backoff
+                        logging.info(f"Segment {seg_idx+1} processing failed, retrying...")
+                        time.sleep(5 * (2 ** retry))
                 except Exception as e:
-                    logging.warning(f"Exception processing segment {i + 1}, attempt {retry + 1}/3: {e}")
+                    logging.warning(f"Exception processing segment {seg_idx+1}: {e}")
                     if retry < 2:
-                        time.sleep(5 * (retry + 1))
-
+                        time.sleep(5 * (2 ** retry))
+            
             if segment_result:
                 current_summary = segment_result.get('summary')
-                current_tags = segment_result.get('tags')
-                if is_final:
-                    final_result = segment_result
-                logging.debug(f"Segment {i + 1} processed.")
+                segment_tags = segment_result.get('tags', [])
+                
+                # Collect all unique tags
+                all_tags_collected.update(segment_tags)
+                current_tags = list(all_tags_collected)
+                
+                log_progress(f" ✅ (added {len(segment_tags)} tags)")
             else:
-                logging.error(f"Error processing segment {i + 1} after 3 attempts. Continuing with partial data.")
-                # Don't abort - try to continue with what we have
-                if i == len(segments) - 1 and current_summary:
-                    # If it's the final segment and we have previous summaries, use them
-                    final_result = {'summary': current_summary, 'tags': current_tags}
-                    logging.warning(f"Using summary from segment {i} as final result.")
-
-        if final_result:
-            logging.info("Successfully processed all segments for chapter summary/tags.")
-            final_chapter_details = {'summary': final_result.get('summary'), 'tags': final_result.get('tags')}
-        else:
-            logging.error("Failed to get final result after processing segments.")
-
-    if final_chapter_details:
-        return final_chapter_details.get('summary'), final_chapter_details.get('tags')
+                log_progress(" ❌ Failed")
+                # Continue with what we have
+        
+        # Return the final accumulated results
+        if current_summary:
+            # Limit tags to 15 most relevant (if we have too many)
+            if len(current_tags) > 15:
+                # In production, you might want to use a more sophisticated selection
+                current_tags = current_tags[:15]
+            return current_summary, current_tags
+            
     else:
-        return None, None
+        # Single call processing
+        log_progress(f"  📄 Chapter size: {total_chars:,} chars ({total_tokens:,} tokens)")
+        log_progress(f"  🔄 Processing in single call...", end='')
+        
+        result = None
+        for retry in range(3):
+            try:
+                result = process_chapter_segment_robust(
+                    chapter_text, client, model_name, is_final_segment=True
+                )
+                if result:
+                    break
+                elif retry < 2:
+                    logging.info("Single call processing failed, retrying...")
+                    time.sleep(5 * (2 ** retry))
+            except Exception as e:
+                logging.warning(f"Exception in single call: {e}")
+                if retry < 2:
+                    time.sleep(5 * (2 ** retry))
+        
+        if result:
+            log_progress(" ✅")
+            return result.get('summary'), result.get('tags')
+        else:
+            log_progress(" ❌ Failed")
+    
+    return None, None
 
 # ==============================================================================
-# Main Processing Logic
+# Main Processing Functions
 # ==============================================================================
 
 def group_pages_by_chapter(json_data: List[Dict]) -> Dict[int, List[Dict]]:
-    """
-    Groups page records by chapter_number and sorts them by page_number.
-    Returns a dictionary mapping chapter_number to list of page records.
-    """
+    """Groups page records by chapter_number."""
     chapters = defaultdict(list)
     
     for record in json_data:
         chapter_num = record.get('chapter_number')
-        if chapter_num is not None:  # Include chapter 0
+        if chapter_num is not None:
             chapters[chapter_num].append(record)
     
-    # Sort pages within each chapter by page_number
     for chapter_num in chapters:
         chapters[chapter_num].sort(key=lambda x: x.get('page_number', 0))
     
     return dict(chapters)
 
 def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[OpenAI]) -> List[Dict]:
-    """
-    Processes pages in a chapter: generates ONE summary/tags for the chapter, 
-    then applies to ALL pages. Returns enriched page-level records.
-    """
-    # Get chapter metadata from first page
+    """Process pages in a chapter with robust tag generation."""
+    # Check if pages list is empty
+    if not pages:
+        log_progress(f"⚠️ Chapter {chapter_num} has no pages")
+        return []
+    
     first_page = pages[0]
-    last_page = pages[-1]
     chapter_name = first_page.get('chapter_name', f'Chapter {chapter_num}')
     chapter_filename = first_page.get('filename', 'unknown.pdf')
     
-    # Get page ranges
     pdf_page_numbers = [p.get('page_number', 0) for p in pages]
-    original_page_numbers = [p.get('original_page_number', p.get('page_number', 0)) for p in pages]
     
-    # Log comprehensive chapter info
-    logging.info("=" * 80)
-    logging.info(f"CHAPTER {chapter_num}: {chapter_name}")
-    logging.info(f"  Filename: {chapter_filename}")
-    logging.info(f"  Pages in chapter PDF: {min(pdf_page_numbers)}-{max(pdf_page_numbers)} ({len(pages)} pages)")
-    logging.info(f"  Original PDF pages: {min(original_page_numbers)}-{max(original_page_numbers)}")
-    logging.info("=" * 80)
+    log_progress("")
+    log_progress(f"📚 Chapter {chapter_num}: {chapter_name}")
+    log_progress(f"  📁 File: {chapter_filename}")
+    log_progress(f"  📄 Pages: {min(pdf_page_numbers)}-{max(pdf_page_numbers)} ({len(pages)} pages)")
     
-    # Concatenate all page content for GPT processing
+    # Concatenate all page content
     content_parts = []
-    total_page_chars = 0
-    page_char_counts = []
-    
-    for i, page in enumerate(pages):
+    for page in pages:
         page_content = page.get('content', '')
         if page_content:
-            page_chars = len(page_content)
-            total_page_chars += page_chars
-            page_char_counts.append(page_chars)
             content_parts.append(page_content)
-            
-            # Log details for first few pages and any unusually large pages
-            if i < 3 or page_chars > 50000:
-                page_num = page.get('page_number', 'unknown')
-                orig_page = page.get('original_page_number', page_num)
-                if page_chars > 50000:
-                    logging.warning(f"  ⚠️ Page {page_num} (orig: {orig_page}) has {page_chars:,} chars - unusually large!")
-                else:
-                    logging.debug(f"  Page {page_num} (orig: {orig_page}): {page_chars:,} chars")
-    
-    # Calculate statistics
-    if page_char_counts:
-        avg_chars_per_page = sum(page_char_counts) / len(page_char_counts)
-        max_page_chars = max(page_char_counts)
-        min_page_chars = min(page_char_counts)
-        
-        logging.info(f"  Page statistics:")
-        logging.info(f"    - Total pages: {len(pages)}")
-        logging.info(f"    - Avg chars/page: {avg_chars_per_page:,.0f}")
-        logging.info(f"    - Min chars/page: {min_page_chars:,}")
-        logging.info(f"    - Max chars/page: {max_page_chars:,}")
-        
-        # Sanity check
-        if avg_chars_per_page > 20000:
-            logging.error(f"  ❌ ABNORMAL PAGE SIZE: Average {avg_chars_per_page:,.0f} chars/page!")
-            logging.error(f"     Normal pages are typically 2,000-5,000 chars")
-            logging.error(f"     This suggests the input JSON may have concatenated content")
     
     concatenated_content = "\n\n".join(content_parts)
-    chapter_token_count = count_tokens(concatenated_content)
-    char_count = len(concatenated_content)
-    logging.info(f"  Content size: {char_count:,} characters → {chapter_token_count:,} tokens")
+    del content_parts  # Free memory
     
-    # Additional sanity check
-    if char_count > 500000:  # ~150 pages of normal text
-        logging.error(f"  ❌ CHAPTER TOO LARGE: {char_count:,} characters!")
-        logging.error(f"     This is equivalent to ~{char_count/3000:.0f} normal pages")
-        logging.error(f"     Likely cause: Input JSON has duplicate or concatenated content")
-    
-    # Generate summary and tags via GPT (ONCE for the whole chapter)
+    # Generate summary and tags with robust method
     chapter_summary, chapter_tags = None, None
     if client:
         try:
-            chapter_summary, chapter_tags = get_chapter_summary_and_tags(
+            chapter_summary, chapter_tags = get_chapter_summary_and_tags_robust(
                 concatenated_content, client, model_name=MODEL_NAME_CHAT
             )
-            if chapter_summary is None or chapter_tags is None:
-                logging.warning(f"  Failed to generate summary/tags for chapter {chapter_num}.")
+            if chapter_summary and chapter_tags:
+                log_progress(f"  ✅ Generated summary and {len(chapter_tags)} tags")
+                if VERBOSE_LOGGING:
+                    logging.debug(f"  Tags generated: {chapter_tags}")
+            else:
+                log_progress(f"  ⚠️ Failed to generate summary/tags")
         except Exception as e:
-            logging.error(f"  Exception generating summary/tags for chapter {chapter_num}: {e}")
+            log_progress(f"  ❌ Error: {str(e)[:100]}")
+            logging.error(f"Full error: {e}")
     else:
-        logging.warning("  OpenAI client not available. Skipping summary/tag generation.")
+        log_progress("  ⚠️ OpenAI client not available")
     
-    # Apply chapter summary/tags to each page record
+    # Apply to all pages
     enriched_pages = []
+    chapter_token_count = count_tokens(concatenated_content)
+    
     for page in pages:
-        enriched_page = page.copy()  # Keep all original fields
-        
-        # Add chapter-level enrichments
+        enriched_page = page.copy()
         enriched_page['chapter_summary'] = chapter_summary
         enriched_page['chapter_tags'] = chapter_tags
         enriched_page['chapter_token_count'] = chapter_token_count
         
-        # Calculate page-specific token count
         page_content = page.get('content', '')
         enriched_page['page_token_count'] = count_tokens(page_content)
-        
-        # Ensure citation fields are clear
-        enriched_page['pdf_filename'] = page.get('filename')  # Split PDF name
-        enriched_page['pdf_page_number'] = page.get('page_number')  # Page in split PDF
-        # original_page_number and page_reference should already be in the record
-        
-        enriched_pages.append(enriched_page)
-    
-    logging.info(f"  Enriched {len(enriched_pages)} pages for Chapter {chapter_num}")
-    return enriched_pages
-
-def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
-    """
-    Processes pages that don't have a chapter assignment.
-    Returns enriched page records without chapter summaries.
-    """
-    if not pages:
-        return []
-    
-    logging.info(f"Processing {len(pages)} unassigned pages")
-    
-    enriched_pages = []
-    for page in pages:
-        enriched_page = page.copy()  # Keep all original fields
-        
-        # No chapter summary/tags for unassigned pages
-        enriched_page['chapter_summary'] = None
-        enriched_page['chapter_tags'] = None
-        enriched_page['chapter_token_count'] = None
-        
-        # Calculate page-specific token count
-        page_content = page.get('content', '')
-        enriched_page['page_token_count'] = count_tokens(page_content)
-        
-        # Ensure citation fields
         enriched_page['pdf_filename'] = page.get('filename')
         enriched_page['pdf_page_number'] = page.get('page_number')
         
@@ -829,178 +935,173 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
     
     return enriched_pages
 
+def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
+    """Process pages without chapter assignment."""
+    if not pages:
+        return []
+    
+    log_progress(f"📄 Processing {len(pages)} unassigned pages")
+    
+    enriched_pages = []
+    for page in pages:
+        enriched_page = page.copy()
+        enriched_page['chapter_summary'] = None
+        enriched_page['chapter_tags'] = None
+        enriched_page['chapter_token_count'] = None
+        
+        page_content = page.get('content', '')
+        enriched_page['page_token_count'] = count_tokens(page_content)
+        enriched_page['pdf_filename'] = page.get('filename')
+        enriched_page['pdf_page_number'] = page.get('page_number')
+        
+        enriched_pages.append(enriched_page)
+    
+    return enriched_pages
+
+def cleanup_logging_handlers():
+    """Safely cleanup logging handlers."""
+    # Clean up progress logger handlers
+    progress_logger = logging.getLogger('progress')
+    handlers_to_remove = list(progress_logger.handlers)  # Create a snapshot
+    for handler in handlers_to_remove:
+        try:
+            handler.flush()
+            handler.close()
+        except:
+            pass
+        try:
+            progress_logger.removeHandler(handler)
+        except:
+            pass
+    
+    # Clean up root logger handlers
+    root_handlers_to_remove = list(logging.root.handlers)  # Create a snapshot
+    for handler in root_handlers_to_remove:
+        try:
+            handler.flush()
+            handler.close()
+        except:
+            pass
+        try:
+            logging.root.removeHandler(handler)
+        except:
+            pass
+    
+    # Clear the handlers list to be sure
+    progress_logger.handlers.clear()
+    logging.root.handlers.clear()
+
 def run_stage1():
-    """Main function to execute Stage 1 processing with page-level records."""
-    # Setup logging
+    """Main function to execute Stage 1 processing."""
+    if not validate_configuration():
+        return
+    
     temp_log_path = setup_logging()
     
-    logging.info("--- Starting Stage 1: Chapter Processing (Page-Level Records) ---")
+    log_progress("=" * 70)
+    log_progress("🚀 Starting Stage 1: Chapter Processing (Robust Version)")
+    log_progress("=" * 70)
     
-    # Setup SSL early for both tiktoken and OpenAI
-    logging.info("Setting up SSL certificate...")
     _setup_ssl_from_nas()
     
     share_name = NAS_PARAMS["share"]
     output_path_relative = os.path.join(NAS_OUTPUT_PATH, OUTPUT_FILENAME).replace('\\', '/')
     
-    # --- Load Input JSON from NAS ---
-    logging.info(f"Loading input JSON from NAS: {share_name}/{NAS_INPUT_JSON_PATH}")
+    # Load input JSON
+    log_progress("📥 Loading input JSON from NAS...")
     input_json_bytes = read_from_nas(share_name, NAS_INPUT_JSON_PATH)
     
     if not input_json_bytes:
-        logging.error(f"Failed to read input JSON from {share_name}/{NAS_INPUT_JSON_PATH}")
+        log_progress(f"❌ Failed to read input JSON")
         return
     
     try:
         input_data = json.loads(input_json_bytes.decode('utf-8'))
         if not isinstance(input_data, list):
-            logging.error("Input JSON is not a list. Expected array of page records.")
+            log_progress("❌ Input JSON is not a list")
             return
-        logging.info(f"Loaded {len(input_data)} page records from input JSON")
-        
-        # Diagnostic: Check the structure of the input data
-        if input_data:
-            first_record = input_data[0]
-            logging.info("Sample record structure:")
-            logging.info(f"  Keys: {list(first_record.keys())}")
-            
-            # Check content size in first few records
-            logging.info("First 5 records content analysis:")
-            for i, record in enumerate(input_data[:5]):
-                content = record.get('content', '')
-                page_num = record.get('page_number', 'unknown')
-                orig_page = record.get('original_page_number', page_num)
-                chapter = record.get('chapter_number', 'unassigned')
-                filename = record.get('filename', 'unknown')
-                content_len = len(content)
-                
-                logging.info(f"  Record {i}: Chapter {chapter}, File: {filename}, Page {page_num} (orig: {orig_page})")
-                logging.info(f"    Content length: {content_len:,} chars")
-                if content_len > 50000:
-                    logging.warning(f"    ⚠️ UNUSUALLY LARGE: {content_len:,} chars!")
-                    # Show first 200 chars to check for duplication
-                    preview = content[:200].replace('\n', ' ')
-                    logging.info(f"    Preview: {preview}...")
-            
-            # Check overall statistics
-            all_content_lengths = [len(r.get('content', '')) for r in input_data]
-            avg_content = sum(all_content_lengths) / len(all_content_lengths) if all_content_lengths else 0
-            max_content = max(all_content_lengths) if all_content_lengths else 0
-            
-            logging.info(f"Overall input statistics:")
-            logging.info(f"  Total records: {len(input_data)}")
-            logging.info(f"  Avg content/record: {avg_content:,.0f} chars")
-            logging.info(f"  Max content/record: {max_content:,} chars")
-            
-            if avg_content > 20000:
-                logging.error("❌ INPUT DATA ISSUE: Average content per page is abnormally large!")
-                logging.error("   This suggests the EY prep or Chapter Assignment Tool may have concatenated content")
-                logging.error("   Normal pages should be 2,000-5,000 chars each")
-        
+        log_progress(f"✅ Loaded {len(input_data)} page records")
     except json.JSONDecodeError as e:
-        logging.error(f"Error decoding input JSON: {e}")
+        log_progress(f"❌ Error decoding JSON: {e}")
         return
     
-    # --- Initialize OpenAI Client ---
+    # Initialize OpenAI client
     client = None
     if OpenAI:
         client = get_openai_client()
         if client:
-            logging.info("OpenAI client initialized successfully.")
+            log_progress("✅ OpenAI client initialized")
         else:
-            logging.warning("Failed to initialize OpenAI client. Will proceed without summaries/tags.")
+            log_progress("⚠️ Failed to initialize OpenAI client")
     else:
-        logging.warning("OpenAI library not installed. Summaries and tags will not be generated.")
+        log_progress("⚠️ OpenAI library not installed")
     
-    # --- Group Pages by Chapter ---
+    # Group and process pages
     chapters = group_pages_by_chapter(input_data)
-    
-    # Find unassigned pages (those without chapter_number)
     unassigned_pages = [r for r in input_data if r.get('chapter_number') is None]
     
-    logging.info(f"Found {len(chapters)} chapters and {len(unassigned_pages)} unassigned pages")
+    log_progress(f"📊 Found {len(chapters)} chapters and {len(unassigned_pages)} unassigned pages")
+    log_progress("-" * 70)
     
-    # Diagnostic: Show chapter distribution
-    logging.info("Chapter distribution:")
-    for chapter_num in sorted(chapters.keys())[:10]:  # Show first 10 chapters
-        chapter_pages = chapters[chapter_num]
-        chapter_name = chapter_pages[0].get('chapter_name', f'Chapter {chapter_num}')
-        total_chars = sum(len(p.get('content', '')) for p in chapter_pages)
-        logging.info(f"  Chapter {chapter_num} ({chapter_name}): {len(chapter_pages)} pages, {total_chars:,} total chars")
-        if total_chars > 500000:
-            logging.warning(f"    ⚠️ Chapter {chapter_num} is abnormally large!")
-    
-    if len(chapters) > 10:
-        logging.info(f"  ... and {len(chapters) - 10} more chapters")
-    
-    # --- Process Each Chapter ---
     all_enriched_pages = []
     
-    # Process chapters in order
     for chapter_num in sorted(chapters.keys()):
         pages = chapters[chapter_num]
         enriched_pages = process_chapter_pages(chapter_num, pages, client)
         all_enriched_pages.extend(enriched_pages)
     
-    # Process unassigned pages if any
     if unassigned_pages:
         enriched_unassigned = process_unassigned_pages(unassigned_pages)
         all_enriched_pages.extend(enriched_unassigned)
     
-    # Sort final output by original page number to maintain document order
     all_enriched_pages.sort(key=lambda x: x.get('original_page_number', x.get('page_number', 0)))
     
-    # --- Save Output to NAS ---
-    logging.info(f"Saving {len(all_enriched_pages)} enriched page records to NAS")
+    # Save output
+    log_progress("-" * 70)
+    log_progress(f"💾 Saving {len(all_enriched_pages)} enriched page records...")
     
     try:
         output_json = json.dumps(all_enriched_pages, indent=2, ensure_ascii=False)
         output_bytes = output_json.encode('utf-8')
         
         if write_to_nas(share_name, output_path_relative, output_bytes):
-            logging.info(f"Successfully saved output to: {share_name}/{output_path_relative}")
+            log_progress(f"✅ Successfully saved output")
         else:
-            logging.error("Failed to write output to NAS")
+            log_progress("❌ Failed to write output")
     except Exception as e:
-        logging.error(f"Error saving output: {e}")
+        log_progress(f"❌ Error saving output: {e}")
     
-    # --- Upload Log File to NAS ---
+    # Upload log file
     try:
-        log_file_name = f"stage1_v2_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file_name = f"stage1_robust_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_path_relative = os.path.join(NAS_LOG_PATH, log_file_name).replace('\\', '/')
         
-        # Close logging handlers to flush content
-        for handler in logging.root.handlers[:]:
-            handler.close()
-            logging.root.removeHandler(handler)
+        cleanup_logging_handlers()
         
-        # Read log content and upload to NAS
         with open(temp_log_path, 'rb') as f:
             log_content = f.read()
         
         if write_to_nas(share_name, log_path_relative, log_content):
-            print(f"Log file uploaded to NAS: {share_name}/{log_path_relative}")
+            print(f"📝 Log file uploaded: {share_name}/{log_path_relative}")
         else:
-            print(f"Failed to upload log file to NAS")
+            print(f"⚠️ Failed to upload log file")
         
-        # Clean up temp log file
         os.remove(temp_log_path)
     except Exception as e:
-        print(f"Error handling log file: {e}")
+        print(f"⚠️ Error handling log file: {e}")
     
-    # --- Final Summary ---
-    print("--- Stage 1 Summary ---")
-    print(f"Input: {len(input_data)} page records")
-    print(f"Output: {len(all_enriched_pages)} enriched page records")
-    print(f"Chapters processed: {len(chapters)}")
+    # Final summary
+    print("=" * 70)
+    print("📊 Stage 1 Summary")
+    print("-" * 70)
+    print(f"  Input: {len(input_data)} page records")
+    print(f"  Output: {len(all_enriched_pages)} enriched page records")
+    print(f"  Chapters processed: {len(chapters)}")
     if unassigned_pages:
-        print(f"Unassigned pages processed: {len(unassigned_pages)}")
-    print(f"Output file: {share_name}/{output_path_relative}")
-    print("--- Stage 1 Completed ---")
-
-# ==============================================================================
-# Main Execution Block
-# ==============================================================================
+        print(f"  Unassigned pages: {len(unassigned_pages)}")
+    print(f"  Output file: {share_name}/{output_path_relative}")
+    print("=" * 70)
+    print("✅ Stage 1 Completed")
 
 if __name__ == "__main__":
     run_stage1()
