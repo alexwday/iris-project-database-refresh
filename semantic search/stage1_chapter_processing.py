@@ -457,17 +457,6 @@ def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperat
                     time.sleep(TOOL_RESPONSE_RETRY_DELAY)
                     continue
                 
-                if 'tags' not in function_args or not isinstance(function_args['tags'], list):
-                    logging.warning(f"Attempt {attempt + 1}: Missing or invalid tags")
-                    time.sleep(TOOL_RESPONSE_RETRY_DELAY)
-                    continue
-                
-                # Validate we have at least some tags
-                if len(function_args['tags']) < 3:
-                    logging.warning(f"Attempt {attempt + 1}: Too few tags ({len(function_args['tags'])})")
-                    time.sleep(TOOL_RESPONSE_RETRY_DELAY)
-                    continue
-                
                 # Success! Return the validated response
                 return function_args, usage_info
                 
@@ -497,29 +486,22 @@ CHAPTER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "provide_chapter_analysis",
-        "description": "Provides structured analysis of chapter content including summary and tags",
+        "description": "Provides structured analysis of chapter content with comprehensive summary",
         "parameters": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
                     "description": "Comprehensive summary with sections: Purpose, Key Topics/Standards, Context/Applicability, Key Outcomes/Decisions"
-                },
-                "tags": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 5,
-                    "maxItems": 15,
-                    "description": "Specific topic tags for retrieval (standards, concepts, procedures, terms)"
                 }
             },
-            "required": ["summary", "tags"],
+            "required": ["summary"],
             "additionalProperties": False
         }
     }
 }
 
-def build_chapter_analysis_prompt(segment_text, prev_summary=None, prev_tags=None, is_final_segment=False):
+def build_chapter_analysis_prompt(segment_text, prev_summary=None, is_final_segment=False):
     """
     Builds prompt using CO-STAR + XML format with explicit tool requirement.
     """
@@ -533,9 +515,8 @@ The content will be used to build a searchable knowledge base for accounting pro
 </context>
 
 <objective>
-Extract and structure key information from the provided text segment to create:
-1. A detailed, structured summary following specific guidelines
-2. Granular topic tags for efficient retrieval
+Extract and structure key information from the provided text segment to create
+a detailed, structured summary following specific guidelines.
 </objective>
 
 <style>
@@ -562,12 +543,9 @@ DO NOT provide a plain text response.
     user_prompt_parts = []
     
     # Add previous context if available
-    if prev_summary or prev_tags:
+    if prev_summary:
         user_prompt_parts.append("<previous_context>")
-        if prev_summary:
-            user_prompt_parts.append(f"<previous_summary>\n{prev_summary}\n</previous_summary>")
-        if prev_tags:
-            user_prompt_parts.append(f"<previous_tags>\n{json.dumps(prev_tags)}\n</previous_tags>")
+        user_prompt_parts.append(f"<previous_summary>\n{prev_summary}\n</previous_summary>")
         user_prompt_parts.append("</previous_context>")
     
     # Add current segment
@@ -596,35 +574,21 @@ DO NOT provide a plain text response.
 - Important implications""")
     user_prompt_parts.append("</summary_requirements>")
     
-    user_prompt_parts.append("<tag_requirements>")
-    user_prompt_parts.append("""Generate 5-15 specific tags including:
-- Standard references (e.g., 'IFRS 15', 'ASC 606')
-- Technical concepts (e.g., 'revenue recognition', 'lease classification')
-- Procedures/methods (e.g., 'five-step model', 'expected credit loss')
-- Key defined terms (e.g., 'performance obligation', 'right-of-use asset')
-- Application contexts (e.g., 'software industry', 'transition provisions')
-
-Tags must be:
-- Specific and granular (not generic)
-- Directly mentioned or clearly implied in the text
-- Useful for search and retrieval""")
-    user_prompt_parts.append("</tag_requirements>")
-    
     # Add segment-specific guidance
-    if is_final_segment and (prev_summary or prev_tags):
+    if is_final_segment and prev_summary:
         user_prompt_parts.append("""<task>
 This is the FINAL segment. Synthesize ALL information from previous and current segments.
-Ensure the summary and tags comprehensively cover the ENTIRE chapter content.
+Ensure the summary comprehensively covers the ENTIRE chapter content.
 </task>""")
-    elif prev_summary or prev_tags:
+    elif prev_summary:
         user_prompt_parts.append("""<task>
 Integrate this segment with previous context. 
-Update and expand the summary and tags to include new information.
+Update and expand the summary to include new information.
 Maintain continuity with previous analysis.
 </task>""")
     else:
         user_prompt_parts.append("""<task>
-Analyze this initial segment and create the foundation summary and tags.
+Analyze this initial segment and create the foundation summary.
 Focus only on the content provided in the current segment.
 </task>""")
     
@@ -632,7 +596,7 @@ Focus only on the content provided in the current segment.
     
     user_prompt_parts.append("""<critical_requirement>
 YOU MUST USE THE 'provide_chapter_analysis' TOOL TO PROVIDE YOUR RESPONSE.
-The tool must include both 'summary' and 'tags' fields with appropriate content.
+The tool must include the 'summary' field with comprehensive content.
 </critical_requirement>""")
     
     user_prompt = "\n".join(user_prompt_parts)
@@ -644,11 +608,11 @@ The tool must include both 'summary' and 'tags' fields with appropriate content.
     
     return messages
 
-def process_chapter_segment_robust(segment_text, client, model_name, prev_summary=None, prev_tags=None, is_final_segment=False):
+def process_chapter_segment_robust(segment_text, client, model_name, prev_summary=None, is_final_segment=False):
     """
     Process a chapter segment with robust tool calling and validation.
     """
-    messages = build_chapter_analysis_prompt(segment_text, prev_summary, prev_tags, is_final_segment)
+    messages = build_chapter_analysis_prompt(segment_text, prev_summary, is_final_segment)
     
     # Call API with strict tool enforcement
     result, usage_info = call_gpt_with_tool_enforcement(
@@ -670,16 +634,12 @@ def process_chapter_segment_robust(segment_text, client, model_name, prev_summar
         
         # Validate and clean the result
         summary = result.get('summary', '').strip()
-        tags = result.get('tags', [])
         
-        # Filter out empty or duplicate tags
-        tags = list(set(tag.strip() for tag in tags if tag and tag.strip()))
-        
-        return {'summary': summary, 'tags': tags}
+        return {'summary': summary}
     
     return None
 
-def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model_name: str = MODEL_NAME_CHAT) -> Tuple[Optional[str], Optional[List[str]]]:
+def get_chapter_summary_robust(chapter_text: str, client: OpenAI, model_name: str = MODEL_NAME_CHAT) -> Optional[str]:
     """
     Generate summary and tags with improved segmentation handling.
     """
@@ -759,8 +719,6 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
             log_progress(f"    ⚠️ Token count mismatch: original {total_tokens:,} vs sum {total_segment_tokens:,} (diff: {token_difference:,})")
         
         current_summary = None
-        current_tags = []
-        all_tags_collected = set()  # Track all unique tags across segments
         
         # Filter out empty segments before processing
         non_empty_segments = [(i, seg) for i, seg in enumerate(segments) if seg.strip()]
@@ -787,8 +745,7 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
                 try:
                     segment_result = process_chapter_segment_robust(
                         segment_text, client, model_name,
-                        prev_summary=current_summary, 
-                        prev_tags=list(all_tags_collected) if all_tags_collected else None,
+                        prev_summary=current_summary,
                         is_final_segment=is_final
                     )
                     if segment_result:
@@ -803,24 +760,14 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
             
             if segment_result:
                 current_summary = segment_result.get('summary')
-                segment_tags = segment_result.get('tags', [])
-                
-                # Collect all unique tags
-                all_tags_collected.update(segment_tags)
-                current_tags = list(all_tags_collected)
-                
-                log_progress(f" ✅ (added {len(segment_tags)} tags)")
+                log_progress(" ✅")
             else:
                 log_progress(" ❌ Failed")
                 # Continue with what we have
         
-        # Return the final accumulated results
+        # Return the final accumulated result
         if current_summary:
-            # Limit tags to 15 most relevant (if we have too many)
-            if len(current_tags) > 15:
-                # In production, you might want to use a more sophisticated selection
-                current_tags = current_tags[:15]
-            return current_summary, current_tags
+            return current_summary
             
     else:
         # Single call processing
@@ -845,11 +792,11 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
         
         if result:
             log_progress(" ✅")
-            return result.get('summary'), result.get('tags')
+            return result.get('summary')
         else:
             log_progress(" ❌ Failed")
     
-    return None, None
+    return None
 
 # ==============================================================================
 # Main Processing Functions
@@ -870,7 +817,7 @@ def group_pages_by_chapter(json_data: List[Dict]) -> Dict[int, List[Dict]]:
     return dict(chapters)
 
 def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[OpenAI]) -> List[Dict]:
-    """Process pages in a chapter with robust tag generation."""
+    """Process pages in a chapter and generate summary."""
     # Check if pages list is empty
     if not pages:
         log_progress(f"⚠️ Chapter {chapter_num} has no pages")
@@ -881,11 +828,13 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     chapter_filename = first_page.get('filename', 'unknown.pdf')
     
     pdf_page_numbers = [p.get('page_number', 0) for p in pages]
+    chapter_page_start = min(pdf_page_numbers)
+    chapter_page_end = max(pdf_page_numbers)
     
     log_progress("")
     log_progress(f"📚 Chapter {chapter_num}: {chapter_name}")
     log_progress(f"  📁 File: {chapter_filename}")
-    log_progress(f"  📄 Pages: {min(pdf_page_numbers)}-{max(pdf_page_numbers)} ({len(pages)} pages)")
+    log_progress(f"  📄 Pages: {chapter_page_start}-{chapter_page_end} ({len(pages)} pages)")
     
     # Concatenate all page content
     content_parts = []
@@ -897,39 +846,46 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     concatenated_content = "\n\n".join(content_parts)
     del content_parts  # Free memory
     
-    # Generate summary and tags with robust method
-    chapter_summary, chapter_tags = None, None
+    # Generate summary with robust method
+    chapter_summary = None
     if client:
         try:
-            chapter_summary, chapter_tags = get_chapter_summary_and_tags_robust(
+            chapter_summary = get_chapter_summary_robust(
                 concatenated_content, client, model_name=MODEL_NAME_CHAT
             )
-            if chapter_summary and chapter_tags:
-                log_progress(f"  ✅ Generated summary and {len(chapter_tags)} tags")
-                if VERBOSE_LOGGING:
-                    logging.debug(f"  Tags generated: {chapter_tags}")
+            if chapter_summary:
+                log_progress(f"  ✅ Generated summary")
             else:
-                log_progress(f"  ⚠️ Failed to generate summary/tags")
+                log_progress(f"  ⚠️ Failed to generate summary")
         except Exception as e:
             log_progress(f"  ❌ Error: {str(e)[:100]}")
             logging.error(f"Full error: {e}")
     else:
         log_progress("  ⚠️ OpenAI client not available")
     
-    # Apply to all pages
+    # Apply to all pages with reordered fields
     enriched_pages = []
     chapter_token_count = count_tokens(concatenated_content)
     
     for page in pages:
-        enriched_page = page.copy()
-        enriched_page['chapter_summary'] = chapter_summary
-        enriched_page['chapter_tags'] = chapter_tags
-        enriched_page['chapter_token_count'] = chapter_token_count
-        
-        page_content = page.get('content', '')
-        enriched_page['page_token_count'] = count_tokens(page_content)
-        enriched_page['pdf_filename'] = page.get('filename')
-        enriched_page['pdf_page_number'] = page.get('page_number')
+        # Build enriched page with specified field order
+        enriched_page = {
+            'document_id': page.get('document_id'),
+            'filename': page.get('filename'),
+            'filepath': page.get('filepath'),
+            'source_filename': page.get('source_filename'),
+            'chapter_number': page.get('chapter_number'),
+            'chapter_name': page.get('chapter_name'),
+            'chapter_summary': chapter_summary,
+            'chapter_page_start': chapter_page_start,
+            'chapter_page_end': chapter_page_end,
+            'chapter_token_count': chapter_token_count,
+            'page_number': page.get('page_number'),
+            'page_reference': page.get('page_reference'),
+            'source_page_number': page.get('source_page_number'),
+            'page_token_count': count_tokens(page.get('content', '')),
+            'content': page.get('content')
+        }
         
         enriched_pages.append(enriched_page)
     
@@ -944,15 +900,24 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
     
     enriched_pages = []
     for page in pages:
-        enriched_page = page.copy()
-        enriched_page['chapter_summary'] = None
-        enriched_page['chapter_tags'] = None
-        enriched_page['chapter_token_count'] = None
-        
-        page_content = page.get('content', '')
-        enriched_page['page_token_count'] = count_tokens(page_content)
-        enriched_page['pdf_filename'] = page.get('filename')
-        enriched_page['pdf_page_number'] = page.get('page_number')
+        # Build enriched page with specified field order
+        enriched_page = {
+            'document_id': page.get('document_id'),
+            'filename': page.get('filename'),
+            'filepath': page.get('filepath'),
+            'source_filename': page.get('source_filename'),
+            'chapter_number': page.get('chapter_number'),
+            'chapter_name': page.get('chapter_name'),
+            'chapter_summary': None,
+            'chapter_page_start': None,
+            'chapter_page_end': None,
+            'chapter_token_count': None,
+            'page_number': page.get('page_number'),
+            'page_reference': page.get('page_reference'),
+            'source_page_number': page.get('source_page_number'),
+            'page_token_count': count_tokens(page.get('content', '')),
+            'content': page.get('content')
+        }
         
         enriched_pages.append(enriched_page)
     
