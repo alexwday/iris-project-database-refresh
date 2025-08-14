@@ -671,22 +671,82 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
     needs_segmentation = total_tokens > available_for_content
     
     if needs_segmentation:
-        num_segments = (total_tokens // available_for_content) + 1
-        segment_len_approx = len(chapter_text) // num_segments
-        segments = [chapter_text[i:i + segment_len_approx] for i in range(0, len(chapter_text), segment_len_approx)]
+        # Calculate number of segments needed using ceiling division
+        num_segments = (total_tokens + available_for_content - 1) // available_for_content
+        
+        # Calculate target tokens per segment for better distribution
+        target_tokens_per_segment = total_tokens // num_segments
+        
+        # Estimate characters per token for this specific text
+        chars_per_token = total_chars / total_tokens if total_tokens > 0 else 3.5
+        
+        # Calculate segment length in characters
+        segment_len_chars = int(target_tokens_per_segment * chars_per_token)
+        
+        # Create segments with better distribution
+        segments = []
+        start = 0
+        remaining_text = chapter_text
+        
+        for i in range(num_segments):
+            if i == num_segments - 1:
+                # Last segment gets all remaining text
+                segment = remaining_text[start:]
+            else:
+                # Calculate end position for this segment
+                end = min(start + segment_len_chars, len(remaining_text))
+                segment = remaining_text[start:end]
+                start = end
+            
+            # Only add non-empty segments
+            if segment.strip():
+                segments.append(segment)
+        
+        # Log segment distribution for debugging
+        if VERBOSE_LOGGING:
+            logging.debug(f"Segmentation: {total_tokens:,} tokens into {num_segments} segments")
+            logging.debug(f"Target per segment: {target_tokens_per_segment:,} tokens")
+            for idx, seg in enumerate(segments):
+                seg_tokens = count_tokens(seg)
+                logging.debug(f"Segment {idx+1}: {len(seg):,} chars, {seg_tokens:,} tokens")
         
         log_progress(f"  📄 Chapter size: {total_chars:,} chars ({total_tokens:,} tokens)")
         log_progress(f"  ✂️  Split into {len(segments)} segments for processing")
+        
+        # Show segment breakdown
+        total_segment_tokens = 0
+        for idx, seg in enumerate(segments):
+            seg_tokens = count_tokens(seg)
+            total_segment_tokens += seg_tokens
+            if seg_tokens == 0:
+                log_progress(f"    ⚠️ Segment {idx+1}: EMPTY (0 tokens) - will be skipped")
+            else:
+                log_progress(f"    📑 Segment {idx+1}: {len(seg):,} chars (~{seg_tokens:,} tokens)")
+        
+        if abs(total_segment_tokens - total_tokens) > 100:
+            log_progress(f"    ⚠️ Token count mismatch: original {total_tokens:,} vs sum {total_segment_tokens:,}")
         
         current_summary = None
         current_tags = []
         all_tags_collected = set()  # Track all unique tags across segments
         
-        for i, segment_text in enumerate(segments):
+        # Filter out empty segments before processing
+        non_empty_segments = [(i, seg) for i, seg in enumerate(segments) if seg.strip()]
+        
+        if len(non_empty_segments) == 0:
+            log_progress("  ❌ All segments are empty after splitting!")
+            return None, None
+        
+        if len(non_empty_segments) < len(segments):
+            log_progress(f"  ⚠️ Filtered out {len(segments) - len(non_empty_segments)} empty segment(s)")
+        
+        for seg_idx, (original_idx, segment_text) in enumerate(non_empty_segments):
             segment_tokens = count_tokens(segment_text)
-            log_progress(f"  🔄 Processing segment {i+1}/{len(segments)} ({segment_tokens:,} tokens)...", end='')
             
-            is_final = (i == len(segments) - 1)
+            # Determine if this is the final segment based on non-empty segments
+            is_final = (seg_idx == len(non_empty_segments) - 1)
+            
+            log_progress(f"  🔄 Processing segment {seg_idx+1}/{len(non_empty_segments)} ({segment_tokens:,} tokens)...", end='')
             
             # Process segment with retries
             segment_result = None
@@ -701,10 +761,10 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
                     if segment_result:
                         break
                     elif retry < 2:
-                        logging.info(f"Segment {i+1} processing failed, retrying...")
+                        logging.info(f"Segment {seg_idx+1} processing failed, retrying...")
                         time.sleep(5 * (2 ** retry))
                 except Exception as e:
-                    logging.warning(f"Exception processing segment {i+1}: {e}")
+                    logging.warning(f"Exception processing segment {seg_idx+1}: {e}")
                     if retry < 2:
                         time.sleep(5 * (2 ** retry))
             
