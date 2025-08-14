@@ -1241,35 +1241,38 @@ class ChapterAssignmentTool(QMainWindow):
             return []
     
     def update_json_with_chapter_files(self, created_files: List[Dict], output_dir: str):
-        """Update JSON records to reference the new chapter PDF files and adjust page numbers."""
+        """Update JSON records to reference the new chapter PDF files and adjust page numbers.
+        
+        This method only updates filename, filepath, and page_number fields.
+        It assumes chapter assignments have already been applied.
+        Preserves source_ fields as the authoritative original reference.
+        """
         # Create mapping of chapter_number to file info
         chapter_to_file = {}
         for f in created_files:
             chapter_to_file[f['chapter_number']] = {
                 'filename': f['filename'],
                 'filepath': os.path.join(output_dir, f['filename']).replace('\\', '/'),
-                'start_page': f['start_page'],  # Original start page of this chapter
+                'start_page': f['start_page'],
                 'end_page': f['end_page']
             }
+        
+        # Initialize source fields if they don't exist (one-time initialization)
+        for record in self.json_data:
+            # Only initialize source_ fields if they don't already exist
+            if 'source_filename' not in record:
+                record['source_filename'] = record.get('filename', 'unknown.pdf')
+            
+            if 'source_page_number' not in record:
+                record['source_page_number'] = record.get('page_number', 0)
+            
+            # Remove any duplicate original_ fields to avoid confusion
+            record.pop('original_filename', None)
+            record.pop('original_page_number', None)
         
         # Group records by chapter for proper ordering
         chapters_records = {}
         for record in self.json_data:
-            # Preserve TRULY original values (use source_ prefix for clarity)
-            # These should NEVER change after first set
-            if 'source_filename' not in record:
-                # If original_filename exists from previous run, use it, otherwise use filename
-                record['source_filename'] = record.get('original_filename', record.get('filename', 'unknown.pdf'))
-            
-            if 'source_page_number' not in record:
-                # If original_page_number exists from previous run, use it, otherwise use page_number
-                record['source_page_number'] = record.get('original_page_number', record.get('page_number', 0))
-            
-            # Also keep the original_ fields for backwards compatibility
-            record['original_filename'] = record['source_filename']
-            record['original_page_number'] = record['source_page_number']
-            
-            # Group by chapter
             chapter_num = record.get('chapter_number')
             if chapter_num is not None:
                 if chapter_num not in chapters_records:
@@ -1286,58 +1289,38 @@ class ChapterAssignmentTool(QMainWindow):
             chapter_info = chapter_to_file[chapter_num]
             chapter_records = chapters_records[chapter_num]
             
-            # Validate data integrity - check for issues
-            issues_found = []
-            
-            # Check for mixed types in page numbers (use source as truth)
-            page_types = set()
-            for record in chapter_records:
-                source_page = record.get('source_page_number', record.get('original_page_number', record.get('page_number')))
-                if source_page is not None:
-                    page_types.add(type(source_page).__name__)
-            
-            if len(page_types) > 1:
-                issues_found.append(f"Mixed data types in page numbers: {page_types}")
-                logging.error(f"Chapter {chapter_num}: Mixed page number types detected: {page_types}")
-            
-            # Check if records are in order (based on source pages)
-            prev_page = None
+            # Validate data integrity - check for sequential page order based on source pages
+            prev_source_page = None
             out_of_order = False
             for record in chapter_records:
-                source_page = record.get('source_page_number', record.get('original_page_number', record.get('page_number', 0)))
-                # Convert to int for comparison if needed
+                source_page = record.get('source_page_number', 0)
                 try:
-                    current_page = int(source_page) if source_page is not None else 0
+                    current_source_page = int(source_page) if source_page is not None else 0
                 except (ValueError, TypeError):
-                    logging.error(f"Chapter {chapter_num}: Invalid page number: {source_page}")
-                    issues_found.append(f"Invalid page number: {source_page}")
-                    current_page = 0
+                    logging.error(f"Chapter {chapter_num}: Invalid source page number: {source_page}")
+                    current_source_page = 0
                 
-                if prev_page is not None and current_page < prev_page:
+                if prev_source_page is not None and current_source_page < prev_source_page:
                     out_of_order = True
-                    logging.warning(f"Chapter {chapter_num}: Pages out of order - page {current_page} comes after {prev_page}")
-                prev_page = current_page
+                    logging.warning(f"Chapter {chapter_num}: Pages out of order - source page {current_source_page} comes after {prev_source_page}")
+                prev_source_page = current_source_page
             
             if out_of_order:
-                issues_found.append("Pages are not in sequential order")
+                logging.error(f"Chapter {chapter_num} has pages out of sequential order")
             
-            # Report issues but continue processing
-            if issues_found:
-                logging.error(f"Chapter {chapter_num} has data integrity issues: {', '.join(issues_found)}")
-            
-            # Assign sequential page numbers based on record order (don't sort)
+            # Assign new filename, filepath, and sequential page numbers
             for i, record in enumerate(chapter_records, start=1):
-                # Update filename and path
+                # Update filename and path (chapter-specific PDF)
                 record['filename'] = chapter_info['filename']
                 record['filepath'] = chapter_info['filepath']
                 
-                # Set sequential page number within chapter PDF
+                # Set sequential page number within chapter PDF (1, 2, 3, ...)
                 record['page_number'] = i
                 
                 updated_count += 1
                 
-                original_page = record.get('original_page_number', record.get('page_number', 'unknown'))
-                logging.debug(f"Chapter {chapter_num}: Original page {original_page} -> Page {i} in {chapter_info['filename']}")
+                source_page = record.get('source_page_number', 'unknown')
+                logging.debug(f"Chapter {chapter_num}: Source page {source_page} -> Page {i} in {chapter_info['filename']}")
         
         # Log summary
         logging.info(f"Updated {updated_count} JSON records with new chapter PDF filenames and sequential page numbers")
@@ -1347,6 +1330,74 @@ class ChapterAssignmentTool(QMainWindow):
                 logging.info(f"  Chapter {chapter_num}: {page_count} pages (numbered 1-{page_count})")
         
         return updated_count
+    
+    def apply_chapter_assignments(self):
+        """Apply chapter assignments to JSON records in memory.
+        
+        This method ONLY assigns chapter_number and chapter_name fields.
+        It does NOT modify filename, filepath, or page_number fields.
+        Uses source_page_number as the authoritative reference for chapter assignment.
+        
+        Returns:
+            int: Number of records that received chapter assignments
+        """
+        if not self.json_data:
+            logging.warning("No JSON data to process")
+            return 0
+            
+        if not self.chapters:
+            logging.warning("No chapters defined for assignment")
+            return 0
+            
+        chapter_counts = {}  # Track assignments for logging
+        assigned_count = 0
+        
+        for record in self.json_data:
+            # Use source_page_number as the authoritative reference for chapter assignment
+            # Fall back through the chain: source -> original -> current page_number
+            page_num = record.get('source_page_number', 
+                      record.get('original_page_number', 
+                      record.get('page_number', 0)))
+            
+            # Convert to int for comparison
+            try:
+                page_num = int(page_num) if page_num is not None else 0
+            except (ValueError, TypeError):
+                logging.warning(f"Invalid page number for chapter assignment: {page_num}")
+                page_num = 0
+            
+            # Find matching chapter for this page
+            chapter_assigned = False
+            for chapter in self.chapters:
+                if chapter.start_page <= page_num <= chapter.end_page:
+                    # Assign ONLY chapter fields - no filename/page modifications
+                    record['chapter_number'] = chapter.chapter_number
+                    record['chapter_name'] = chapter.chapter_name
+                    chapter_assigned = True
+                    assigned_count += 1
+                    
+                    # Track assignment for logging
+                    chapter_counts[chapter.chapter_number] = chapter_counts.get(chapter.chapter_number, 0) + 1
+                    
+                    logging.debug(f"Assigned page {page_num} to Chapter {chapter.chapter_number}: {chapter.chapter_name}")
+                    break
+                    
+            # Clear chapter assignment if page doesn't fall in any chapter
+            if not chapter_assigned:
+                record.pop('chapter_number', None)
+                record.pop('chapter_name', None)
+                chapter_counts['unassigned'] = chapter_counts.get('unassigned', 0) + 1
+                logging.debug(f"Page {page_num} left unassigned (no matching chapter)")
+        
+        # Log chapter assignment summary
+        logging.info(f"Applied chapter assignments to {assigned_count} of {len(self.json_data)} records:")
+        for chapter_num in sorted(chapter_counts.keys()):
+            if chapter_num == 'unassigned':
+                logging.info(f"  Unassigned pages: {chapter_counts[chapter_num]}")
+            else:
+                logging.info(f"  Chapter {chapter_num}: {chapter_counts[chapter_num]} pages")
+                
+        return assigned_count
     
     def save_to_json(self):
         """Save chapter assignments and split PDF"""
@@ -1383,15 +1434,44 @@ class ChapterAssignmentTool(QMainWindow):
         self.split_and_save()
     
     def split_and_save(self):
-        """Split PDF and save both PDFs and updated JSON."""
-        # First split the PDF
+        """Split PDF and save both PDFs and updated JSON.
+        
+        This method orchestrates the complete process:
+        1. Check for previous processing
+        2. Split PDF by chapters
+        3. Save chapter PDF files
+        4. Apply chapter assignments (chapter_number, chapter_name)
+        5. Update filenames and page numbers for chapter PDFs
+        6. Save final JSON
+        """
+        # Check if data has already been processed (idempotency check)
+        if self.json_data:
+            first_record = self.json_data[0]
+            if 'source_filename' in first_record and first_record.get('filename', '').endswith('.pdf'):
+                # Check if filename has already been changed to chapter-specific PDF
+                source_filename = first_record.get('source_filename', '')
+                current_filename = first_record.get('filename', '')
+                
+                if source_filename != current_filename and current_filename.startswith(('00_', '01_', '02_')):
+                    reply = QMessageBox.question(
+                        self, "Already Processed",
+                        "This data appears to have already been processed into chapter files.\n\n"
+                        f"Source: {source_filename}\n"
+                        f"Current: {current_filename}\n\n"
+                        "Do you want to process it again?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return
+        
+        # Step 1: Split the PDF into chapter files
         created_files = self.split_pdf_by_chapters()
         
         if not created_files:
             QMessageBox.warning(self, "Warning", "No chapter PDFs were created")
             return
         
-        # Create output directory
+        # Step 2: Create output directory
         json_dir = os.path.dirname(self.json_file_path)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_folder = f"chapters_{timestamp}"
@@ -1400,7 +1480,7 @@ class ChapterAssignmentTool(QMainWindow):
         try:
             os.makedirs(output_dir, exist_ok=True)
             
-            # Save chapter PDFs
+            # Step 3: Save chapter PDF files to disk
             progress = QProgressDialog(
                 "Saving chapter PDFs...", "Cancel",
                 0, len(created_files), self
@@ -1422,14 +1502,21 @@ class ChapterAssignmentTool(QMainWindow):
             
             progress.setValue(len(created_files))
             
-            # Update JSON with new filenames (in memory)
-            updated_count = self.update_json_with_chapter_files(saved_files, output_dir)
+            # Step 4: Apply chapter assignments (chapter_number, chapter_name only)
+            # This step uses source_page_number as reference and does NOT modify filenames
+            assigned_count = self.apply_chapter_assignments()
+            logging.info(f"Applied chapter assignments to {assigned_count} records")
             
-            # Save the updated JSON in the output directory with the PDFs
+            # Step 5: Update JSON records with new chapter filenames and sequential page numbers
+            # This step updates filename, filepath, and page_number fields only
+            updated_count = self.update_json_with_chapter_files(saved_files, output_dir)
+            logging.info(f"Updated {updated_count} records with chapter PDF references")
+            
+            # Step 6: Save the fully processed JSON file
             output_json_name = "stage1_input.json"  # Clear name for Stage 1
             output_json_path = os.path.join(output_dir, output_json_name)
             
-            # Save updated JSON
+            # Save updated JSON (pure file I/O - no data processing)
             self.save_json_to_file(output_json_path)
             
             QMessageBox.information(
@@ -1442,8 +1529,8 @@ class ChapterAssignmentTool(QMainWindow):
             )
             
         except Exception as e:
-            logging.error(f"Error saving chapter PDFs: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to save chapter PDFs:\n{str(e)}")
+            logging.error(f"Error in split_and_save process: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to complete split and save process:\n{str(e)}")
         
     def save_as_json(self):
         """Save chapter assignments to a new JSON file"""
@@ -1455,63 +1542,42 @@ class ChapterAssignmentTool(QMainWindow):
             self.save_to_json()  # This will handle PDF splitting if needed
             
     def save_json_to_file(self, file_path: str):
-        """Save the updated JSON data to file"""
+        """Save the current JSON data to file (pure file I/O operation).
+        
+        This method performs NO data processing whatsoever.
+        It assumes all data processing (chapter assignments, filename updates, etc.)
+        has already been applied to self.json_data in memory.
+        
+        Args:
+            file_path: Absolute path to the output JSON file
+        """
         if not self.json_data:
             QMessageBox.warning(self, "Warning", "No data to save")
             return
             
         try:
-            # Apply chapter assignments
-            chapter_counts = {}  # Track assignments for logging
-            for record in self.json_data:
-                # ALWAYS use source_page_number for chapter assignment (the true original)
-                # Fall back through the chain: source -> original -> current page_number
-                page_num = record.get('source_page_number', 
-                          record.get('original_page_number', 
-                          record.get('page_number', 0)))
-                
-                # Diagnostic: log which field we're using
-                if 'source_page_number' in record:
-                    logging.debug(f"Using source_page_number {page_num} for chapter assignment")
-                elif 'original_page_number' in record:
-                    logging.debug(f"Using original_page_number {page_num} for chapter assignment")
-                else:
-                    logging.debug(f"Using page_number {page_num} for chapter assignment (no source/original found)")
-                
-                chapter_assigned = False
-                for chapter in self.chapters:
-                    if chapter.start_page <= page_num <= chapter.end_page:
-                        record['chapter_number'] = chapter.chapter_number
-                        record['chapter_name'] = chapter.chapter_name
-                        chapter_assigned = True
-                        
-                        # Track assignment
-                        chapter_counts[chapter.chapter_number] = chapter_counts.get(chapter.chapter_number, 0) + 1
-                        break
-                        
-                if not chapter_assigned:
-                    record.pop('chapter_number', None)
-                    record.pop('chapter_name', None)
-                    chapter_counts['unassigned'] = chapter_counts.get('unassigned', 0) + 1
-            
-            # Log chapter assignment summary
-            logging.info("Chapter assignment summary:")
-            for chapter_num in sorted(chapter_counts.keys()):
-                if chapter_num == 'unassigned':
-                    logging.info(f"  Unassigned pages: {chapter_counts[chapter_num]}")
-                else:
-                    logging.info(f"  Chapter {chapter_num}: {chapter_counts[chapter_num]} pages")
-                    
-            # Save to file
+            # Pure file I/O - write JSON data as-is to disk
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.json_data, f, indent=2, ensure_ascii=False)
                 
+            # Update UI state
             self.unsaved_changes = False
             self.setWindowTitle(f"Chapter Assignment Tool - {os.path.basename(file_path)}")
             self.status_bar.showMessage(f"Saved to {os.path.basename(file_path)}")
-            QMessageBox.information(self, "Success", "Chapter assignments saved successfully!")
+            
+            # Log successful save
+            logging.info(f"Successfully saved {len(self.json_data)} records to {file_path}")
+            
+            # Log a sample of what was saved for verification
+            if self.json_data:
+                sample_record = self.json_data[0]
+                logging.debug(f"Sample record: filename='{sample_record.get('filename', 'N/A')}', "
+                            f"page_number={sample_record.get('page_number', 'N/A')}, "
+                            f"chapter_number={sample_record.get('chapter_number', 'N/A')}, "
+                            f"source_filename='{sample_record.get('source_filename', 'N/A')}'")
             
         except Exception as e:
+            logging.error(f"Failed to save file to {file_path}: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save file:\n{str(e)}")
             
     def mark_unsaved_changes(self):
