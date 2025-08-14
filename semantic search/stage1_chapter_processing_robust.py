@@ -204,6 +204,7 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
 def read_from_nas(share_name, nas_path_relative):
     """Reads content (as bytes) from a file path on the NAS using pysmb."""
     conn = None
+    file_obj = None
     try:
         conn = create_nas_connection()
         if not conn:
@@ -218,6 +219,11 @@ def read_from_nas(share_name, nas_path_relative):
         logging.error(f"Error reading from NAS: {e}")
         return None
     finally:
+        if file_obj:
+            try:
+                file_obj.close()
+            except:
+                pass
         if conn:
             conn.close()
 
@@ -342,7 +348,11 @@ def _setup_ssl_from_nas() -> bool:
 
 def _get_oauth_token(oauth_url=OAUTH_URL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET, ssl_verify_path=SSL_LOCAL_PATH) -> Optional[str]:
     """Retrieves OAuth token."""
-    verify_path = ssl_verify_path if Path(ssl_verify_path).exists() else True
+    # Handle None or empty ssl_verify_path safely
+    try:
+        verify_path = ssl_verify_path if ssl_verify_path and Path(ssl_verify_path).exists() else True
+    except (TypeError, OSError):
+        verify_path = True
 
     payload = {'grant_type': 'client_credentials', 'client_id': client_id, 'client_secret': client_secret}
     try:
@@ -389,6 +399,11 @@ def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperat
     """
     tool_name = tool_schema["function"]["name"]
     
+    # Validate messages list is not empty
+    if not messages:
+        logging.error("Messages list is empty")
+        return None, None
+    
     for attempt in range(TOOL_RESPONSE_RETRIES):
         try:
             if attempt > 0:
@@ -399,6 +414,8 @@ def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperat
                     "content": f"CRITICAL: You MUST use the '{tool_name}' tool to provide your response. Do not respond with plain text."
                 }
                 # Insert enforcement message before the last user message
+                # Safe because we checked messages is not empty above
+                # messages[-1:] returns a list, so this is correct
                 enhanced_messages = messages[:-1] + [enforcement_msg] + messages[-1:]
             else:
                 enhanced_messages = messages
@@ -455,7 +472,9 @@ def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperat
                 return function_args, usage_info
                 
             except json.JSONDecodeError as e:
+                # Log the actual malformed JSON for debugging
                 logging.warning(f"Attempt {attempt + 1}: Invalid JSON in tool arguments: {e}")
+                logging.debug(f"Malformed JSON content: {tool_call.function.arguments[:500]}...")  # First 500 chars
                 time.sleep(TOOL_RESPONSE_RETRY_DELAY)
                 continue
                 
@@ -667,15 +686,22 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
     total_tokens = count_tokens(chapter_text)
     total_chars = len(chapter_text)
     
-    available_for_content = GPT_INPUT_TOKEN_LIMIT - TOKEN_BUFFER
+    # Ensure we have positive available tokens
+    available_for_content = max(1000, GPT_INPUT_TOKEN_LIMIT - TOKEN_BUFFER)  # Minimum 1000 tokens
     needs_segmentation = total_tokens > available_for_content
     
     if needs_segmentation:
         # Calculate number of segments needed using ceiling division
-        num_segments = (total_tokens + available_for_content - 1) // available_for_content
+        # Ensure available_for_content is positive to avoid division by zero
+        if available_for_content <= 0:
+            logging.error(f"Invalid available_for_content: {available_for_content}")
+            return None, None
+        
+        num_segments = max(1, (total_tokens + available_for_content - 1) // available_for_content)
         
         # Calculate target tokens per segment for better distribution
-        target_tokens_per_segment = total_tokens // num_segments
+        # num_segments is guaranteed to be >= 1 from above
+        target_tokens_per_segment = max(1, total_tokens // num_segments)
         
         # Estimate characters per token for this specific text
         chars_per_token = total_chars / total_tokens if total_tokens > 0 else 3.5
@@ -683,23 +709,26 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
         # Calculate segment length in characters
         segment_len_chars = int(target_tokens_per_segment * chars_per_token)
         
-        # Create segments with better distribution
+        # Create segments with correct indexing
         segments = []
         start = 0
-        remaining_text = chapter_text
         
         for i in range(num_segments):
+            # Check if we've already consumed all text
+            if start >= len(chapter_text):
+                break
+                
             if i == num_segments - 1:
-                # Last segment gets all remaining text
-                segment = remaining_text[start:]
+                # Last segment gets all remaining text from start to end
+                segment = chapter_text[start:]
             else:
                 # Calculate end position for this segment
-                end = min(start + segment_len_chars, len(remaining_text))
-                segment = remaining_text[start:end]
-                start = end
+                end = min(start + segment_len_chars, len(chapter_text))
+                segment = chapter_text[start:end]
+                start = end  # Update start for next iteration
             
             # Only add non-empty segments
-            if segment.strip():
+            if segment and segment.strip():
                 segments.append(segment)
         
         # Log segment distribution for debugging
@@ -723,8 +752,11 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
             else:
                 log_progress(f"    📑 Segment {idx+1}: {len(seg):,} chars (~{seg_tokens:,} tokens)")
         
-        if abs(total_segment_tokens - total_tokens) > 100:
-            log_progress(f"    ⚠️ Token count mismatch: original {total_tokens:,} vs sum {total_segment_tokens:,}")
+        # Use proportional threshold for token count validation (1% tolerance)
+        token_difference = abs(total_segment_tokens - total_tokens)
+        token_tolerance = max(100, int(total_tokens * 0.01))  # 1% or minimum 100 tokens
+        if token_difference > token_tolerance:
+            log_progress(f"    ⚠️ Token count mismatch: original {total_tokens:,} vs sum {total_segment_tokens:,} (diff: {token_difference:,})")
         
         current_summary = None
         current_tags = []
@@ -743,7 +775,8 @@ def get_chapter_summary_and_tags_robust(chapter_text: str, client: OpenAI, model
         for seg_idx, (original_idx, segment_text) in enumerate(non_empty_segments):
             segment_tokens = count_tokens(segment_text)
             
-            # Determine if this is the final segment based on non-empty segments
+            # Determine if this is the final segment (clearer logic)
+            # seg_idx is the index in the non_empty_segments list
             is_final = (seg_idx == len(non_empty_segments) - 1)
             
             log_progress(f"  🔄 Processing segment {seg_idx+1}/{len(non_empty_segments)} ({segment_tokens:,} tokens)...", end='')
@@ -838,6 +871,11 @@ def group_pages_by_chapter(json_data: List[Dict]) -> Dict[int, List[Dict]]:
 
 def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[OpenAI]) -> List[Dict]:
     """Process pages in a chapter with robust tag generation."""
+    # Check if pages list is empty
+    if not pages:
+        log_progress(f"⚠️ Chapter {chapter_num} has no pages")
+        return []
+    
     first_page = pages[0]
     chapter_name = first_page.get('chapter_name', f'Chapter {chapter_num}')
     chapter_filename = first_page.get('filename', 'unknown.pdf')
@@ -924,26 +962,34 @@ def cleanup_logging_handlers():
     """Safely cleanup logging handlers."""
     # Clean up progress logger handlers
     progress_logger = logging.getLogger('progress')
-    for handler in list(progress_logger.handlers):
+    handlers_to_remove = list(progress_logger.handlers)  # Create a snapshot
+    for handler in handlers_to_remove:
         try:
             handler.flush()
             handler.close()
         except:
             pass
-        progress_logger.removeHandler(handler)
+        try:
+            progress_logger.removeHandler(handler)
+        except:
+            pass
     
     # Clean up root logger handlers
-    for handler in list(logging.root.handlers):
+    root_handlers_to_remove = list(logging.root.handlers)  # Create a snapshot
+    for handler in root_handlers_to_remove:
         try:
             handler.flush()
             handler.close()
         except:
             pass
-        logging.root.removeHandler(handler)
+        try:
+            logging.root.removeHandler(handler)
+        except:
+            pass
     
     # Clear the handlers list to be sure
-    progress_logger.handlers = []
-    logging.root.handlers = []
+    progress_logger.handlers.clear()
+    logging.root.handlers.clear()
 
 def run_stage1():
     """Main function to execute Stage 1 processing."""
