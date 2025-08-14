@@ -97,6 +97,11 @@ MIN_SECTION_TOKENS = 250  # Sections below this trigger merging
 MAX_SECTION_TOKENS = 750  # Maximum tokens after merging
 ULTRA_SMALL_THRESHOLD = 25  # Very small sections get aggressive merging
 
+# --- Section Identification Parameters ---
+MAX_HEADING_LEVEL = 3  # Only consider headings up to this level (# ## ###)
+# This prevents over-fragmentation from deep heading levels (#### ##### ######)
+# which are typically examples, notes, or minor sub-points in accounting texts
+
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
@@ -510,22 +515,34 @@ def build_page_position_map(pages: List[Dict]) -> Tuple[str, List[Dict]]:
 # Section Identification
 # ==============================================================================
 
-def identify_sections(concatenated_content: str, chapter_metadata: Dict) -> List[Dict]:
+def identify_sections(concatenated_content: str, chapter_metadata: Dict, 
+                     max_heading_level: int = MAX_HEADING_LEVEL) -> List[Dict]:
     """
     Identifies sections based on markdown headings in the concatenated content.
+    
+    Args:
+        concatenated_content: The full chapter text
+        chapter_metadata: Chapter information
+        max_heading_level: Maximum heading level to consider (default from config)
+                          Only headings from # to this level will create sections
     """
     sections = []
     
-    # Find all markdown headings
-    heading_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+    # Find markdown headings up to the specified level
+    # This pattern only matches headings up to max_heading_level
+    pattern = rf'^(#{{1,{max_heading_level}}})\s+(.+)$'
+    heading_pattern = re.compile(pattern, re.MULTILINE)
     headings = []
     
     for match in heading_pattern.finditer(concatenated_content):
-        headings.append({
-            'level': len(match.group(1)),
-            'title': match.group(2).strip(),
-            'start_pos': match.start()
-        })
+        level = len(match.group(1))
+        # Double-check level constraint (redundant but safe)
+        if level <= max_heading_level:
+            headings.append({
+                'level': level,
+                'title': match.group(2).strip(),
+                'start_pos': match.start()
+            })
     
     # Handle content before first heading (if significant)
     first_heading_pos = headings[0]['start_pos'] if headings else len(concatenated_content)
@@ -999,7 +1016,13 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     
     # Step 2: Identify sections
     sections = identify_sections(concatenated_content, chapter_metadata)
-    log_progress(f"  📑 Found {len(sections)} initial sections")
+    log_progress(f"  📑 Found {len(sections)} sections (levels 1-{MAX_HEADING_LEVEL})")
+    
+    # Optional: Count all headings to show the filtering effect
+    all_headings_pattern = re.compile(r'^#{1,6}\s+', re.MULTILINE)
+    all_headings_count = len(all_headings_pattern.findall(concatenated_content))
+    if all_headings_count > len(sections):
+        log_progress(f"     (Filtered from {all_headings_count} total headings in document)")
     
     # Step 3: Merge small sections
     merged_sections = merge_small_sections(sections, concatenated_content)
@@ -1090,6 +1113,7 @@ def run_stage2():
     log_progress("=" * 70)
     log_progress("🚀 Starting Stage 2: Section Processing with Page-Level Output (V2)")
     log_progress("   Using CO-STAR + XML prompting format")
+    log_progress(f"   Section identification: Heading levels 1-{MAX_HEADING_LEVEL} only")
     log_progress("=" * 70)
     
     _setup_ssl_from_nas()
