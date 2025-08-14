@@ -864,7 +864,6 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
     
     # Apply to all pages with reordered fields
     enriched_pages = []
-    chapter_token_count = count_tokens(concatenated_content)
     
     for page in pages:
         # Build enriched page with specified field order
@@ -877,11 +876,9 @@ def process_chapter_pages(chapter_num: int, pages: List[Dict], client: Optional[
             'chapter_name': page.get('chapter_name'),
             'chapter_summary': chapter_summary,
             'chapter_page_count': chapter_page_count,
-            'chapter_token_count': chapter_token_count,
             'page_number': page.get('page_number'),
             'page_reference': page.get('page_reference'),
             'source_page_number': page.get('source_page_number'),
-            'page_token_count': count_tokens(page.get('content', '')),
             'content': page.get('content')
         }
         
@@ -908,11 +905,9 @@ def process_unassigned_pages(pages: List[Dict]) -> List[Dict]:
             'chapter_name': page.get('chapter_name'),
             'chapter_summary': None,
             'chapter_page_count': None,
-            'chapter_token_count': None,
             'page_number': page.get('page_number'),
             'page_reference': page.get('page_reference'),
             'source_page_number': page.get('source_page_number'),
-            'page_token_count': count_tokens(page.get('content', '')),
             'content': page.get('content')
         }
         
