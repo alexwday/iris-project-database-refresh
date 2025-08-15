@@ -104,6 +104,13 @@ ULTRA_SMALL_THRESHOLD = 25  # Very small sections get aggressive merging
 # --- Section Identification Parameters ---
 MAX_HEADING_LEVEL = 6  # Consider all heading levels (H1-H6) like old script
 
+# --- Pre-compiled Regex Patterns for Performance ---
+HEADER_PATTERN = re.compile(r'^<!-- PageHeader[^>]*?-->')
+FOOTER_PATTERN = re.compile(r'<!-- PageFooter[^>]*?-->$')
+PAGE_HEADER_PATTERN = re.compile(r'^<!-- PageHeader PageNumber="(\d+)" PageReference="([^"]*)" -->')
+PAGE_FOOTER_PATTERN = re.compile(r'<!-- PageFooter PageNumber="(\d+)" PageReference="([^"]*)" -->$')
+AZURE_TAG_PATTERN = re.compile(r'<!-- Page[Header|Footer][^>]*?-->', re.IGNORECASE)
+
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
@@ -120,21 +127,21 @@ def validate_configuration():
     """Validates that configuration values have been properly set."""
     errors = []
     
-    if "your_nas_ip" in NAS_PARAMS["ip"]:
+    if NAS_PARAMS["ip"] == "your_nas_ip":
         errors.append("NAS IP address not configured")
-    if "your_share_name" in NAS_PARAMS["share"]:
+    if NAS_PARAMS["share"] == "your_share_name":
         errors.append("NAS share name not configured")
-    if "your_nas_user" in NAS_PARAMS["user"]:
+    if NAS_PARAMS["user"] == "your_nas_user":
         errors.append("NAS username not configured")
-    if "your_nas_password" in NAS_PARAMS["password"]:
+    if NAS_PARAMS["password"] == "your_nas_password":
         errors.append("NAS password not configured")
-    if "api.example.com" in BASE_URL:
+    if BASE_URL == "https://api.example.com/v1":
         errors.append("API base URL not configured")
-    if "api.example.com" in OAUTH_URL:
+    if OAUTH_URL == "https://api.example.com/oauth/token":
         errors.append("OAuth URL not configured")
-    if "your_client_id" in CLIENT_ID:
+    if CLIENT_ID == "your_client_id":
         errors.append("Client ID not configured")
-    if "your_client_secret" in CLIENT_SECRET:
+    if CLIENT_SECRET == "your_client_secret":
         errors.append("Client secret not configured")
     
     if errors:
@@ -315,13 +322,18 @@ def count_tokens(text: str) -> int:
         return 0
     
     char_count = len(text)
-    estimated_tokens = int(char_count / 3.5)
-    
+    if char_count == 0:
+        return 0
+        
+    # Constants for token estimation
+    CHARS_PER_TOKEN_ESTIMATE = 3.5
     MIN_CHARS_PER_TOKEN = 2
     MAX_CHARS_PER_TOKEN = 10
     
+    estimated_tokens = int(char_count / CHARS_PER_TOKEN_ESTIMATE)
+    
     max_possible_tokens = char_count // MIN_CHARS_PER_TOKEN
-    min_possible_tokens = char_count // MAX_CHARS_PER_TOKEN
+    min_possible_tokens = max(1, char_count // MAX_CHARS_PER_TOKEN)  # Ensure at least 1 token for non-empty text
     
     estimated_tokens = max(min_possible_tokens, min(estimated_tokens, max_possible_tokens))
     
@@ -501,21 +513,26 @@ def clean_existing_page_tags(content: str) -> str:
     
     return content.strip()
 
-def embed_page_tags(pages: List[Dict]) -> str:
+def build_tagged_content_with_map(pages: List[Dict]) -> Tuple[str, List[Dict]]:
     """
-    Combines page content with embedded HTML page tags.
-    Each page gets header and footer tags with page number and reference.
-    Removes any existing page tags before adding new ones.
+    Combines page content with embedded HTML page tags and tracks page boundaries.
+    Returns the tagged content and a list of page boundary information.
+    Uses efficient string building to avoid O(n²) concatenation.
     """
     if not pages:
-        return ""
+        return "", []
     
-    tagged_content_parts = []
+    content_parts = []  # Use list for efficient string building
+    page_boundaries = []
     
     for page in pages:
         page_num = page.get('page_number')
-        page_ref = page.get('page_reference') or ''  # Handle None values
-        content = page.get('content') or ''  # Handle None values
+        if page_num is None:
+            logging.warning(f"Page missing page_number, skipping")
+            continue
+            
+        page_ref = page.get('page_reference') or ''
+        content = page.get('content') or ''
         
         # Clean any existing page tags from the content
         clean_content = clean_existing_page_tags(content)
@@ -523,23 +540,53 @@ def embed_page_tags(pages: List[Dict]) -> str:
         # Escape special characters in page reference for HTML attributes
         page_ref_escaped = html.escape(page_ref, quote=True)
         
-        # Build tagged content for this page
-        tagged_page = []
+        # Track where this page starts in the combined content
+        start_pos = sum(len(part) for part in content_parts)
         
         # Add header tag
-        tagged_page.append(f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->')
+        header = f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->\n'
+        content_parts.append(header)
         
         # Add cleaned content
-        tagged_page.append(clean_content)
+        content_parts.append(clean_content)
+        if clean_content and not clean_content.endswith('\n'):
+            content_parts.append('\n')
         
         # Add footer tag
-        tagged_page.append(f'<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->')
+        footer = f'<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->\n'
+        content_parts.append(footer)
         
-        # Join this page's parts and add to overall content
-        tagged_content_parts.append('\n'.join(tagged_page))
+        # Track where this page ends
+        end_pos = sum(len(part) for part in content_parts)
+        
+        # Store page boundary info
+        page_boundaries.append({
+            'start_pos': start_pos,
+            'end_pos': end_pos,
+            'page_num': page_num,
+            'page_ref': page_ref_escaped,
+            'header': header.strip(),
+            'footer': footer.strip()
+        })
     
-    # Join all pages with newlines
-    return '\n'.join(tagged_content_parts)
+    # Efficiently combine all parts at once
+    tagged_content = ''.join(content_parts)
+    return tagged_content, page_boundaries
+
+def find_page_at_position(pos: int, page_boundaries: List[Dict]) -> Optional[Dict]:
+    """
+    Finds which page boundary contains the given position.
+    Returns the page info dict or None if position is outside all pages.
+    """
+    for page_info in page_boundaries:
+        if page_info['start_pos'] <= pos < page_info['end_pos']:
+            return page_info
+    
+    # If position is at the very end, return the last page
+    if page_boundaries and pos == page_boundaries[-1]['end_pos']:
+        return page_boundaries[-1]
+    
+    return None
 
 def extract_page_range_from_content(content: str) -> Tuple[Optional[int], Optional[int]]:
     """
@@ -556,40 +603,41 @@ def extract_page_range_from_content(content: str) -> Tuple[Optional[int], Option
     page_numbers = [int(m) for m in matches]
     return min(page_numbers), max(page_numbers)
 
-def fix_section_boundaries(section_content: str) -> str:
+def fix_section_boundaries_with_map(section_content: str, start_pos: int, end_pos: int, 
+                                    page_boundaries: List[Dict]) -> str:
     """
     Ensures section content starts with a PageHeader and ends with a PageFooter.
-    When a section starts or ends mid-page, it inherits that page's header/footer.
+    Uses the page boundary map to accurately determine which pages to use.
     """
     if not section_content:
         return section_content
     
-    # Pattern to find all page headers and footers
-    header_pattern = r'<!-- PageHeader PageNumber="(\d+)" PageReference="([^"]*)" -->'
-    footer_pattern = r'<!-- PageFooter PageNumber="(\d+)" PageReference="([^"]*)" -->'
+    # Find which pages this section actually spans
+    start_page = find_page_at_position(start_pos, page_boundaries)
+    end_page = find_page_at_position(end_pos - 1, page_boundaries)  # -1 because end_pos is exclusive
+    
+    if not start_page or not end_page:
+        logging.warning(f"Could not find page boundaries for section at positions {start_pos}-{end_pos}")
+        return section_content
+    
+    # Validate page boundary consistency
+    if start_page['page_num'] > end_page['page_num']:
+        logging.error(f"Invalid page boundaries: start page {start_page['page_num']} > end page {end_page['page_num']}")
+        return section_content
+    
+    # Pattern to find headers and footers
+    header_pattern = r'^<!-- PageHeader[^>]*?-->'
+    footer_pattern = r'<!-- PageFooter[^>]*?-->$'
     
     # Check if starts with PageHeader
     if not re.match(header_pattern, section_content.strip()):
-        # Section starts mid-page - need to add header for that page
-        # Look for the first footer (which tells us what page we're on)
-        first_footer = re.search(footer_pattern, section_content)
-        if first_footer:
-            page_num = first_footer.group(1)
-            page_ref = first_footer.group(2)
-            # Add the header for this page at the beginning
-            section_content = f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref}" -->\n{section_content}'
+        # Add the correct header from the start page
+        section_content = start_page['header'] + '\n' + section_content
     
-    # Check if ends with PageFooter
-    if not re.search(footer_pattern + r'\s*$', section_content.strip()):
-        # Section ends mid-page - need to add footer for that page
-        # Find the last header (which tells us what page we're on)
-        all_headers = list(re.finditer(header_pattern, section_content))
-        if all_headers:
-            last_header = all_headers[-1]
-            page_num = last_header.group(1)
-            page_ref = last_header.group(2)
-            # Add the footer for this page at the end
-            section_content = f'{section_content}\n<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref}" -->'
+    # Check if ends with PageFooter  
+    if not re.search(footer_pattern, section_content.strip()):
+        # Add the correct footer from the end page
+        section_content = section_content + '\n' + end_page['footer']
     
     return section_content
 
@@ -622,10 +670,11 @@ def verify_section_tags(section_content: str, section_num: int) -> bool:
 def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> List[Dict]:
     """
     Identifies sections based on markdown headings across all pages.
+    Uses position-based tracking to accurately handle page boundaries.
     Returns list of sections with their page ranges and content.
     """
-    # First, create the full tagged content
-    full_content = embed_page_tags(pages)
+    # Create tagged content with position tracking
+    full_content, page_boundaries = build_tagged_content_with_map(pages)
     
     sections = []
     section_pattern = re.compile(f'^(#{{1,{MAX_HEADING_LEVEL}}})\\s+(.+)$', re.MULTILINE)
@@ -637,8 +686,10 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
     if first_heading_pos > 0:
         intro_content_raw = full_content[:first_heading_pos].strip()
         if intro_content_raw:
-            # Fix boundaries for intro section
-            intro_content = fix_section_boundaries(intro_content_raw)
+            # Fix boundaries using position-based approach
+            intro_content = fix_section_boundaries_with_map(
+                intro_content_raw, 0, first_heading_pos, page_boundaries
+            )
             # Extract page range from intro content
             start_page, end_page = extract_page_range_from_content(intro_content)
             sections.append({
@@ -664,8 +715,10 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
         
         section_content_raw = full_content[start_pos:end_pos].strip()
         
-        # Fix page tag boundaries: ensure section starts with header and ends with footer
-        section_content = fix_section_boundaries(section_content_raw)
+        # Fix page tag boundaries using position-based approach
+        section_content = fix_section_boundaries_with_map(
+            section_content_raw, start_pos, end_pos, page_boundaries
+        )
         
         # Extract page range from section content
         start_page, end_page = extract_page_range_from_content(section_content)
