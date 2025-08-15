@@ -486,13 +486,13 @@ CHAPTER_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "provide_chapter_analysis",
-        "description": "Provides structured analysis of chapter content with comprehensive summary",
+        "description": "Provides structured analysis of chapter content with condensed summary",
         "parameters": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "Comprehensive summary with sections: Purpose, Key Topics/Standards, Context/Applicability, Key Outcomes/Decisions"
+                    "description": "Condensed summary (2-3 sentences) covering purpose, key standards/topics, and main outcomes"
                 }
             },
             "required": ["summary"],
@@ -554,24 +554,13 @@ DO NOT provide a plain text response.
     # Add specific instructions
     user_prompt_parts.append("<instructions>")
     user_prompt_parts.append("<summary_requirements>")
-    user_prompt_parts.append("""Create a comprehensive summary with these REQUIRED sections:
+    user_prompt_parts.append("""Create a condensed summary in EXACTLY 2-3 sentences that captures:
+1. The primary purpose and scope of this chapter
+2. The main accounting standards and technical topics covered (e.g., IFRS 16, ASC 842)
+3. Key applicability, outcomes, or decision points
 
-**Purpose:** State the primary objective of this content (1-2 sentences)
-
-**Key Topics/Standards:** List and explain:
-- Specific accounting standards referenced (e.g., IFRS 16, ASC 842)
-- Core concepts and principles discussed
-- Important procedures or methodologies
-
-**Context/Applicability:** Describe:
-- Which entities or transactions this applies to
-- Industry-specific considerations
-- Exceptions or special cases
-
-**Key Outcomes/Decisions:** Identify:
-- Critical judgments required
-- Decision points for practitioners
-- Important implications""")
+Be extremely concise while embedding all critical information. Do NOT use section headers or bullet points.
+Total output must be 2-3 complete sentences only.""")
     user_prompt_parts.append("</summary_requirements>")
     
     # Add segment-specific guidance

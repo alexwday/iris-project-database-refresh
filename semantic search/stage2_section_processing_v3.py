@@ -703,7 +703,7 @@ SECTION_TOOL_SCHEMA = {
             "properties": {
                 "section_summary": {
                     "type": "string",
-                    "description": "A comprehensive summary (3-5 sentences) that explains the section's purpose and content. Must naturally embed relevant accounting standards (e.g., IFRS 16, ASC 842) and key concepts/tags within the narrative."
+                    "description": "A condensed summary (2-3 sentences) that explains the section's purpose and content. Must naturally embed relevant accounting standards (e.g., IFRS 16, ASC 842) and key concepts within the narrative."
                 }
             },
             "required": ["section_summary"],
@@ -737,15 +737,13 @@ def build_section_analysis_prompt(section: Dict, chapter_summary: str, hierarchy
     
     # Add instructions
     user_prompt_parts.append("<instructions>")
-    user_prompt_parts.append("""Create a comprehensive summary (3-5 sentences) that:
-1. Explains the core purpose and content of this section
-2. MUST embed any relevant accounting standards directly in the text (e.g., "This section explains IFRS 16 lease classification...")
-3. MUST include key technical terms and concepts as part of the narrative
-4. MUST mention any specific standard codes referenced (e.g., "Following ASC 842-10-15 requirements...")
-5. Should flow naturally while being information-dense
+    user_prompt_parts.append("""Create a condensed summary in EXACTLY 2-3 sentences that:
+1. Explains what this section covers and its purpose
+2. Embeds relevant accounting standards directly in the text (e.g., "Explains IFRS 16 lease classification...")
+3. Includes key technical terms and any specific standard codes (e.g., "per ASC 842-10-15")
 
-The summary should read as a cohesive explanation while containing all searchable metadata.
-Do NOT create bullet points or lists - write flowing sentences that embed all information.""")
+Be extremely concise while maintaining clarity. Write flowing sentences that naturally embed all metadata.
+Total output must be 2-3 complete sentences only - no more.""")
     user_prompt_parts.append("</instructions>")
     
     user_prompt_parts.append("<response_format>YOU MUST use the 'provide_section_analysis' tool to provide your response.</response_format>")
