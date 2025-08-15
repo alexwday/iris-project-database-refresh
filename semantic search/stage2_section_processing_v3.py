@@ -477,10 +477,35 @@ def call_gpt_with_tool_enforcement(client, model, messages, max_tokens, temperat
 # Page Tag Embedding Functions
 # ==============================================================================
 
+def clean_existing_page_tags(content: str) -> str:
+    """
+    Removes any existing Azure PageHeader/PageFooter tags from content.
+    This ensures we don't have duplicate or conflicting tags.
+    """
+    if not content:
+        return ""
+    
+    # Remove existing PageHeader tags (various formats from Azure)
+    # Matches: <!-- PageHeader... --> or <!-- PageHeader=... --> etc.
+    content = re.sub(r'<!--\s*PageHeader[^>]*?-->', '', content, flags=re.IGNORECASE)
+    
+    # Remove existing PageFooter tags
+    content = re.sub(r'<!--\s*PageFooter[^>]*?-->', '', content, flags=re.IGNORECASE)
+    
+    # Remove other Azure page-related tags that might exist
+    content = re.sub(r'<!--\s*Page[Nn]umber[^>]*?-->', '', content)
+    content = re.sub(r'<!--\s*PageBreak[^>]*?-->', '', content)
+    
+    # Clean up any resulting excessive whitespace
+    content = re.sub(r'\n\n\n+', '\n\n', content)
+    
+    return content.strip()
+
 def embed_page_tags(pages: List[Dict]) -> str:
     """
     Combines page content with embedded HTML page tags.
     Each page gets header and footer tags with page number and reference.
+    Removes any existing page tags before adding new ones.
     """
     if not pages:
         return ""
@@ -492,6 +517,9 @@ def embed_page_tags(pages: List[Dict]) -> str:
         page_ref = page.get('page_reference') or ''  # Handle None values
         content = page.get('content') or ''  # Handle None values
         
+        # Clean any existing page tags from the content
+        clean_content = clean_existing_page_tags(content)
+        
         # Escape special characters in page reference for HTML attributes
         page_ref_escaped = html.escape(page_ref, quote=True)
         
@@ -501,8 +529,8 @@ def embed_page_tags(pages: List[Dict]) -> str:
         # Add header tag
         tagged_page.append(f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->')
         
-        # Add actual content
-        tagged_page.append(content)
+        # Add cleaned content
+        tagged_page.append(clean_content)
         
         # Add footer tag
         tagged_page.append(f'<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->')
@@ -522,10 +550,33 @@ def extract_page_range_from_content(content: str) -> Tuple[Optional[int], Option
     matches = page_pattern.findall(content)
     
     if not matches:
+        logging.warning("No page tags found in section content")
         return None, None
     
     page_numbers = [int(m) for m in matches]
     return min(page_numbers), max(page_numbers)
+
+def verify_section_tags(section_content: str, section_num: int) -> bool:
+    """
+    Verifies that section content has proper page tags at start and end.
+    """
+    if not section_content:
+        logging.warning(f"Section {section_num}: Empty content")
+        return False
+    
+    # Check for header at start
+    header_pattern = r'^<!-- PageHeader PageNumber="\d+" PageReference="[^"]*" -->'
+    if not re.match(header_pattern, section_content.strip()):
+        logging.warning(f"Section {section_num}: Missing PageHeader at start")
+        return False
+    
+    # Check for footer at end
+    footer_pattern = r'<!-- PageFooter PageNumber="\d+" PageReference="[^"]*" -->$'
+    if not re.search(footer_pattern, section_content.strip()):
+        logging.warning(f"Section {section_num}: Missing PageFooter at end")
+        return False
+    
+    return True
 
 # ==============================================================================
 # Section Identification and Processing
@@ -1033,6 +1084,10 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     section_records = []
     
     for section in sections:
+        # Verify section has proper page tags
+        if not verify_section_tags(section['content'], section['section_number']):
+            logging.warning(f"Section {section['section_number']} failed tag verification")
+        
         # Calculate page count for this section with validation
         start_page = section.get('start_page')
         end_page = section.get('end_page')
