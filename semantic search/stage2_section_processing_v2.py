@@ -859,18 +859,69 @@ def process_section_with_gpt(section_content: str, section_metadata: Dict,
     return None
 
 def process_all_sections(sections: List[Dict], concatenated_content: str, 
-                        chapter_context: Dict, client: Optional[OpenAI]) -> Dict[str, Dict]:
+                        chapter_context: Dict, client: Optional[OpenAI], 
+                        position_map: List[Dict]) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
     """
-    Processes all sections and returns a lookup dictionary by section_id.
-    Maintains context by passing previous section summaries.
+    Processes all sections and returns:
+    1. A lookup dictionary by section_id with summaries and metadata
+    2. A lookup dictionary by section_id with page ranges
     """
     processed_sections = {}
+    section_page_ranges = {}  # NEW: Track page ranges for each section
     previous_summaries = []  # Track summaries for context
+    
+    # First, determine page ranges for each section
+    for section in sections:
+        section_id = section['section_id']
+        section_start_pos = section['start_pos']
+        section_end_pos = section['end_pos']
+        
+        # Find which pages this section spans
+        start_page = None
+        end_page = None
+        
+        for page_info in position_map:
+            page_start = page_info['start_pos']
+            page_end = page_info['end_pos']
+            page_num = page_info['source_page_number']  # Use source_page_number for consistency
+            
+            # Check if section starts within this page
+            if start_page is None and section_start_pos >= page_start and section_start_pos < page_end:
+                start_page = page_num
+            
+            # Check if section ends within this page
+            if section_end_pos > page_start and section_end_pos <= page_end:
+                end_page = page_num
+            
+            # If section spans entire page
+            if section_start_pos <= page_start and section_end_pos >= page_end:
+                if start_page is None or page_num < start_page:
+                    start_page = page_num
+                if end_page is None or page_num > end_page:
+                    end_page = page_num
+        
+        # Store the page range for this section
+        section_page_ranges[section_id] = {
+            'start_page': start_page,
+            'end_page': end_page if end_page else start_page  # Handle single-page sections
+        }
     
     if not client:
         log_progress("  ⚠️ No OpenAI client available, skipping section processing")
-        return {}
+        # Still return the page ranges even without GPT processing
+        for section in sections:
+            section_id = section['section_id']
+            processed_sections[section_id] = {
+                'summary': f"Section covering {section['title']}",
+                'tags': [],
+                'standard': 'N/A',
+                'standard_codes': [],
+                'importance_score': 0.5,
+                'references': []
+            }
+        return processed_sections, section_page_ranges
     
+    # Process sections with GPT
     for section in tqdm(sections, desc=f"  Processing sections"):
         section_id = section['section_id']
         section_content = concatenated_content[section['start_pos']:section['end_pos']]
@@ -894,7 +945,7 @@ def process_all_sections(sections: List[Dict], concatenated_content: str,
                 'standard': result.get('section_standard', 'N/A'),
                 'standard_codes': result.get('section_standard_codes', []),
                 'importance_score': result.get('section_importance_score', 0.5),
-                'references': result.get('section_references', [])  # Added references field
+                'references': result.get('section_references', [])
             }
             # Add to context for next sections
             if result.get('section_summary'):
@@ -910,16 +961,18 @@ def process_all_sections(sections: List[Dict], concatenated_content: str,
                 'references': []
             }
     
-    return processed_sections
+    return processed_sections, section_page_ranges
 
 # ==============================================================================
 # Page Enrichment
 # ==============================================================================
 
 def enrich_pages_with_sections(pages: List[Dict], page_sections_map: Dict[int, List[Dict]], 
-                               processed_sections: Dict[str, Dict]) -> List[Dict]:
+                               processed_sections: Dict[str, Dict], 
+                               section_page_ranges: Dict[str, Dict]) -> List[Dict]:
     """
     Enriches each page record with section information.
+    Includes section IDs to enable section-based retrieval.
     """
     enriched_pages = []
     
@@ -932,20 +985,49 @@ def enrich_pages_with_sections(pages: List[Dict], page_sections_map: Dict[int, L
         
         if sections_on_page:
             # Build section details
+            section_ids = []
             section_summaries = []
             section_titles = []
             section_hierarchies = []
+            section_page_positions = []
             all_section_tags = set()
             importance_scores = []
             all_standard_codes = set()
             all_references = set()
+            
+            # Track primary section (with highest page coverage)
+            primary_section_id = None
+            max_coverage = 0
             
             for section_info in sections_on_page:
                 section = section_info['section']
                 section_id = section['section_id']
                 processed = processed_sections.get(section_id, {})
                 
-                # Add section summary
+                # Track section IDs
+                section_ids.append(section_id)
+                
+                # Get page range for this section
+                page_range = section_page_ranges.get(section_id, {})
+                
+                # Track primary section (most coverage on this page)
+                # Using 'spans_entire_page' as proxy for coverage
+                if section_info.get('spans_entire_page', False):
+                    primary_section_id = section_id
+                elif not primary_section_id and section_info.get('starts_on_page', False):
+                    primary_section_id = section_id
+                
+                # Add section position info with page ranges
+                section_page_positions.append({
+                    'section_id': section_id,
+                    'starts_here': section_info.get('starts_on_page', False),
+                    'ends_here': section_info.get('ends_on_page', False),
+                    'spans_entire_page': section_info.get('spans_entire_page', False),
+                    'section_start_page': page_range.get('start_page'),  # NEW
+                    'section_end_page': page_range.get('end_page')      # NEW
+                })
+                
+                # Add section summary and metadata
                 section_summaries.append(processed.get('summary', ''))
                 section_titles.append(section['title'])
                 section_hierarchies.append(' > '.join(section['hierarchy']))
@@ -956,8 +1038,15 @@ def enrich_pages_with_sections(pages: List[Dict], page_sections_map: Dict[int, L
                 all_references.update(processed.get('references', []))
                 importance_scores.append(processed.get('importance_score', 0.5))
             
+            # If no primary section identified, use first section
+            if not primary_section_id and section_ids:
+                primary_section_id = section_ids[0]
+            
             # Add section enrichments to page
             enriched_page['sections_on_page'] = len(sections_on_page)
+            enriched_page['section_ids'] = section_ids  # NEW: For section-based retrieval
+            enriched_page['primary_section_id'] = primary_section_id  # NEW: Main section
+            enriched_page['section_page_positions'] = section_page_positions  # NEW: Position tracking
             enriched_page['section_summaries'] = section_summaries
             enriched_page['section_titles'] = section_titles
             enriched_page['section_hierarchies'] = section_hierarchies
@@ -974,6 +1063,9 @@ def enrich_pages_with_sections(pages: List[Dict], page_sections_map: Dict[int, L
         else:
             # No sections on this page
             enriched_page['sections_on_page'] = 0
+            enriched_page['section_ids'] = []  # NEW
+            enriched_page['primary_section_id'] = None  # NEW
+            enriched_page['section_page_positions'] = []  # NEW
             enriched_page['section_summaries'] = []
             enriched_page['section_titles'] = []
             enriched_page['section_hierarchies'] = []
@@ -1035,13 +1127,13 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     pages_with_sections = sum(1 for sections in page_sections_map.values() if sections)
     log_progress(f"  📍 Sections mapped to {pages_with_sections} pages")
     
-    # Step 5: Process sections with GPT
-    processed_sections = process_all_sections(
-        merged_sections, concatenated_content, chapter_metadata, client
+    # Step 5: Process sections with GPT and get page ranges
+    processed_sections, section_page_ranges = process_all_sections(
+        merged_sections, concatenated_content, chapter_metadata, client, position_map
     )
     
     # Step 6: Enrich pages with section data
-    enriched_pages = enrich_pages_with_sections(pages, page_sections_map, processed_sections)
+    enriched_pages = enrich_pages_with_sections(pages, page_sections_map, processed_sections, section_page_ranges)
     
     # Calculate statistics for this chapter
     multi_section_pages = sum(1 for p in enriched_pages if p.get('sections_on_page', 0) > 1)
