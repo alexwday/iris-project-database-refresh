@@ -84,6 +84,10 @@ API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY = 5
 TOKEN_BUFFER = 2000
 
+# --- Sample Processing Limit ---
+# Set to None to process all chapters, or a number to limit processing for testing
+SAMPLE_CHAPTER_LIMIT = None  # e.g., 3 to process only first 3 chapters
+
 # Tool response validation retries
 TOOL_RESPONSE_RETRIES = 5
 TOOL_RESPONSE_RETRY_DELAY = 3
@@ -1166,12 +1170,19 @@ def run_stage2():
     # Group pages by chapter
     chapters, unassigned_pages = group_pages_by_chapter(page_records)
     log_progress(f"📊 Found {len(chapters)} chapters and {len(unassigned_pages)} unassigned pages")
+    
+    # Apply sample limit if configured
+    chapters_to_process = sorted(chapters.keys())
+    if SAMPLE_CHAPTER_LIMIT is not None and SAMPLE_CHAPTER_LIMIT > 0:
+        chapters_to_process = chapters_to_process[:SAMPLE_CHAPTER_LIMIT]
+        log_progress(f"⚠️  SAMPLE MODE: Processing only first {SAMPLE_CHAPTER_LIMIT} chapters")
+    
     log_progress("-" * 70)
     
     # Process each chapter
     all_section_records = []
     
-    for chapter_num in sorted(chapters.keys()):
+    for chapter_num in chapters_to_process:
         pages = chapters[chapter_num]
         section_records = process_chapter(chapter_num, pages, client)
         all_section_records.extend(section_records)
@@ -1219,7 +1230,10 @@ def run_stage2():
     print("📊 Stage 2 Summary")
     print("-" * 70)
     print(f"  Input: {len(page_records)} page records")
-    print(f"  Chapters processed: {len(chapters)}")
+    print(f"  Chapters available: {len(chapters)}")
+    print(f"  Chapters processed: {len(chapters_to_process)}")
+    if SAMPLE_CHAPTER_LIMIT:
+        print(f"  ⚠️  SAMPLE MODE: Limited to {SAMPLE_CHAPTER_LIMIT} chapters")
     print(f"  Output: {len(all_section_records)} section records")
     print(f"  Output file: {share_name}/{output_path}")
     print("=" * 70)
