@@ -830,7 +830,7 @@ IMPORTANCE_SCORING_TOOL_SCHEMA = {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 2,
-                                "description": "0=No expansion, 1=Expand when chunk retrieved, 2=Always include with chapter"
+                                "description": "0=Standard section (70-90%), 1=Very important (10-25%), 2=Absolutely vital (0-5%)"
                             }
                         },
                         "required": ["section_number", "importance_level"]
@@ -886,15 +886,35 @@ def score_section_importance(sections: List[Dict], chapter_metadata: Dict, clien
     user_prompt_parts.append("""Analyze all section summaries and assign importance levels for retrieval optimization.
 
 IMPORTANCE LEVELS:
-- Level 0 (Default): Standard sections that don't require expansion. Use for most sections.
-- Level 1 (Expand on retrieval): Important sections that provide crucial context. When a chunk from this section is retrieved, the full section should be included. Use for sections that define key concepts, methodologies, or frameworks referenced elsewhere.
-- Level 2 (Always include): Critical foundational sections. When ANY chunk from this chapter is retrieved, these sections should always be included for context. Use VERY SPARINGLY - only for sections absolutely essential to understanding any other part of the chapter (e.g., definitions, scope, critical frameworks).
 
-GUIDELINES:
-- Most sections should be Level 0
-- Level 1 for important conceptual/framework sections (typically 10-30% of sections)
-- Level 2 only for truly critical sections (typically 0-2 per chapter)
-- Consider: Would understanding other sections be significantly impaired without this section?
+Level 0 (DEFAULT - USE FOR 70-90% OF SECTIONS):
+- Standard content sections
+- Examples, illustrations, specific cases
+- Detailed procedures or calculations
+- Supporting information
+- Anything that can be understood in isolation
+
+Level 1 (VERY IMPORTANT - USE FOR 10-25% OF SECTIONS):
+- Core definitions that are referenced throughout the chapter
+- Fundamental frameworks or methodologies that other sections build upon
+- Critical recognition or measurement criteria
+- Scope sections that define what the entire chapter applies to
+- Key principles that govern the entire topic
+Ask yourself: "Would someone be significantly confused reading other sections without this context?"
+
+Level 2 (ABSOLUTELY VITAL - USE FOR 0-5% OF SECTIONS, OFTEN ZERO):
+- ONLY use when the section is ABSOLUTELY ESSENTIAL to understand ANY other section
+- Typically only the chapter's scope/objective or fundamental definition section
+- Must be information that makes other sections incomprehensible without it
+- Most chapters will have 0-1 Level 2 sections, rarely 2
+Ask yourself: "Is it IMPOSSIBLE to understand this chapter without this section?"
+
+STRICT RULES:
+1. Start by marking EVERYTHING as Level 0
+2. Only upgrade to Level 1 if the section defines core concepts used throughout
+3. Only upgrade to Level 2 if the chapter would be incomprehensible without it
+4. When in doubt, use the LOWER importance level
+5. Level 2 should be EXTREMELY RARE
 
 Assign an importance level to EVERY section.""")
     user_prompt_parts.append("</instructions>")
