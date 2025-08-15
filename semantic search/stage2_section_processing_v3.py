@@ -822,7 +822,7 @@ IMPORTANCE_SCORING_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "score_section_importance",
-        "description": "Assigns importance scores to sections for retrieval optimization",
+        "description": "Assigns binary importance flag to sections for retrieval optimization",
         "parameters": {
             "type": "object",
             "properties": {
@@ -835,16 +835,16 @@ IMPORTANCE_SCORING_TOOL_SCHEMA = {
                                 "type": "integer",
                                 "description": "The section number"
                             },
-                            "importance_level": {
+                            "importance": {
                                 "type": "integer",
                                 "minimum": 0,
-                                "maximum": 2,
-                                "description": "0=Not important to overall topic (50-70%), 1=Important to chapter (25-40%), 2=Critical to understanding (0-10%)"
+                                "maximum": 1,
+                                "description": "0=Standard section, 1=Essential for understanding chapter"
                             }
                         },
-                        "required": ["section_number", "importance_level"]
+                        "required": ["section_number", "importance"]
                     },
-                    "description": "Importance scores for each section"
+                    "description": "Binary importance flags for each section"
                 }
             },
             "required": ["importance_scores"],
@@ -855,13 +855,12 @@ IMPORTANCE_SCORING_TOOL_SCHEMA = {
 
 def score_section_importance(sections: List[Dict], chapter_metadata: Dict, client: Optional[OpenAI]) -> Dict[int, int]:
     """
-    Assigns importance scores to sections for retrieval optimization.
-    Returns a dictionary mapping section_number to importance_level (0, 1, or 2).
+    Assigns binary importance flags to sections for retrieval optimization.
+    Returns a dictionary mapping section_number to importance (0 or 1).
     
-    Importance levels:
-    0 = No expansion (default for most sections)
-    1 = Expand to full section when chunk is retrieved (important for context)
-    2 = Always include with any chunk from this chapter (critical foundational sections)
+    Importance:
+    0 = Standard section (default)
+    1 = Essential for understanding the chapter (always include with any chunk from this chapter)
     """
     importance_scores = {s['section_number']: 0 for s in sections}
     
@@ -892,42 +891,38 @@ def score_section_importance(sections: List[Dict], chapter_metadata: Dict, clien
     user_prompt_parts.append("</sections>")
     
     user_prompt_parts.append("<instructions>")
-    user_prompt_parts.append("""Analyze all section summaries and assign importance levels for retrieval optimization.
+    user_prompt_parts.append("""Analyze all section summaries and assign binary importance flags for retrieval optimization.
 
-IMPORTANCE LEVELS:
+BINARY IMPORTANCE SYSTEM:
 
-Level 0 (NOT IMPORTANT TO OVERALL TOPIC - USE FOR 50-70% OF SECTIONS):
+0 = STANDARD SECTION (DEFAULT - USE FOR 85-95% OF SECTIONS)
+- Can be understood independently
 - Examples, illustrations, specific use cases
-- Detailed calculations or procedures
+- Detailed procedures or calculations
 - Industry-specific applications
 - Exceptions or special circumstances
-- Supporting information that stands alone
-- Content that doesn't affect understanding of other sections
+- Supporting information that enriches but isn't essential
 
-Level 1 (IMPORTANT TO OVERALL CHAPTER - USE FOR 25-40% OF SECTIONS):
-- Core definitions and key concepts
-- Main frameworks or methodologies
-- Primary recognition, measurement, or disclosure requirements
-- Scope and applicability sections
-- Key principles and criteria
-- Sections frequently referenced by other sections
-Note: During retrieval, Level 1 sections will expand only if under token limits.
+1 = ESSENTIAL FOR CHAPTER UNDERSTANDING (USE FOR 5-15% OF SECTIONS)
+- Absolutely necessary to understand the chapter's content
+- Core definitions that other sections depend on
+- Fundamental scope that defines what the chapter covers
+- Critical frameworks or principles that govern the entire topic
+- Without this section, other sections would be confusing or incomplete
 
-Level 2 (CRITICAL TO UNDERSTANDING - USE FOR 0-10% OF SECTIONS):
-- Fundamental definitions required throughout
-- Core framework that everything else builds on
-- Critical scope that defines what the entire chapter covers
-- Essential concepts without which other sections lose meaning
-Ask yourself: "Would someone struggle to understand multiple other sections without this?"
+CRITICAL DECISION CRITERIA:
+Ask yourself: "If someone reads any other section from this chapter, would they NEED this section to properly understand it?"
+- If YES → Mark as 1
+- If NO → Mark as 0
 
-GUIDELINES:
-1. Default to Level 0 for standard content
-2. Use Level 1 for important conceptual sections
-3. Reserve Level 2 for truly critical foundations
-4. Consider how often other sections reference or depend on this content
-5. Token limits will prevent excessive expansion, so Level 1 can be used more liberally
+STRICT GUIDELINES:
+1. Default to 0 for everything
+2. Only mark as 1 if the section is TRULY ESSENTIAL
+3. Most chapters will have 1-3 essential sections maximum
+4. Sections marked as 1 will ALWAYS be included when ANY chunk from the chapter is retrieved
+5. Be extremely conservative - when in doubt, use 0
 
-Assign an importance level to EVERY section.""")
+Assign 0 or 1 to EVERY section.""")
     user_prompt_parts.append("</instructions>")
     
     user_prompt_parts.append("<response_format>YOU MUST use the 'score_section_importance' tool to provide your response.</response_format>")
@@ -953,17 +948,16 @@ Assign an importance level to EVERY section.""")
         # Process the results
         for score_data in result['importance_scores']:
             section_num = score_data.get('section_number')
-            importance_level = score_data.get('importance_level', 0)
+            importance = score_data.get('importance', 0)
             if section_num in importance_scores:
-                # Validate importance level is 0, 1, or 2
-                importance_scores[section_num] = max(0, min(2, importance_level))
+                # Validate importance is 0 or 1
+                importance_scores[section_num] = 1 if importance else 0
         
         # Log distribution of scores
-        level_counts = {0: 0, 1: 0, 2: 0}
-        for level in importance_scores.values():
-            level_counts[level] = level_counts.get(level, 0) + 1
+        essential_count = sum(1 for v in importance_scores.values() if v == 1)
+        standard_count = len(importance_scores) - essential_count
         
-        log_progress(f" ✅ (L0: {level_counts[0]}, L1: {level_counts[1]}, L2: {level_counts[2]})")
+        log_progress(f" ✅ (Standard: {standard_count}, Essential: {essential_count})")
     else:
         log_progress(" ❌")
     
@@ -1059,7 +1053,7 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
             'section_number': section['section_number'],
             'section_summary': f"{section['hierarchy']}\n\n{section['gpt_summary']}",  # Hierarchy + GPT summary as designed
             'section_page_count': section_page_count,
-            'section_importance': importance_scores.get(section['section_number'], 0),  # 0, 1, or 2
+            'section_importance': importance_scores.get(section['section_number'], 0),  # Binary: 0 or 1
             
             # Include content with embedded page tags
             'section_content': section['content']
