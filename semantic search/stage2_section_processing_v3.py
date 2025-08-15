@@ -99,7 +99,6 @@ ULTRA_SMALL_THRESHOLD = 25  # Very small sections get aggressive merging
 
 # --- Section Identification Parameters ---
 MAX_HEADING_LEVEL = 6  # Consider all heading levels (H1-H6) like old script
-MAX_CROSS_REFERENCES = 3  # Maximum number of cross-references per section
 
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
@@ -807,18 +806,18 @@ def process_section_summary(section: Dict, chapter_metadata: Dict, hierarchy: st
     return f"Section covering {section['title']}"
 
 # ==============================================================================
-# Cross-Reference Generation
+# Section Importance Scoring
 # ==============================================================================
 
-CROSS_REFERENCE_TOOL_SCHEMA = {
+IMPORTANCE_SCORING_TOOL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "identify_cross_references",
-        "description": "Identifies contextually relevant sections within the chapter",
+        "name": "score_section_importance",
+        "description": "Assigns importance scores to sections for retrieval optimization",
         "parameters": {
             "type": "object",
             "properties": {
-                "cross_references": {
+                "importance_scores": {
                     "type": "array",
                     "items": {
                         "type": "object",
@@ -827,34 +826,39 @@ CROSS_REFERENCE_TOOL_SCHEMA = {
                                 "type": "integer",
                                 "description": "The section number"
                             },
-                            "related_sections": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "description": "List of up to 3 related section numbers that are crucial for understanding this section"
+                            "importance_level": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 2,
+                                "description": "0=No expansion, 1=Expand when chunk retrieved, 2=Always include with chapter"
                             }
                         },
-                        "required": ["section_number", "related_sections"]
+                        "required": ["section_number", "importance_level"]
                     },
-                    "description": "Cross-references between sections"
+                    "description": "Importance scores for each section"
                 }
             },
-            "required": ["cross_references"],
+            "required": ["importance_scores"],
             "additionalProperties": False
         }
     }
 }
 
-def generate_cross_references(sections: List[Dict], chapter_metadata: Dict, client: Optional[OpenAI]) -> Dict[int, List[str]]:
+def score_section_importance(sections: List[Dict], chapter_metadata: Dict, client: Optional[OpenAI]) -> Dict[int, int]:
     """
-    Generates cross-references between sections using GPT to identify semantic relationships.
-    Uses complete summaries (hierarchy + GPT summary) for better context.
-    Returns a dictionary mapping section_number to list of related section IDs.
-    """
-    cross_refs = {s['section_number']: [] for s in sections}
+    Assigns importance scores to sections for retrieval optimization.
+    Returns a dictionary mapping section_number to importance_level (0, 1, or 2).
     
-    # If no client or too few sections, return empty references
-    if not client or len(sections) < 2:
-        return cross_refs
+    Importance levels:
+    0 = No expansion (default for most sections)
+    1 = Expand to full section when chunk is retrieved (important for context)
+    2 = Always include with any chunk from this chapter (critical foundational sections)
+    """
+    importance_scores = {s['section_number']: 0 for s in sections}
+    
+    # If no client, return default scores
+    if not client:
+        return importance_scores
     
     # Build section index with complete summaries for GPT analysis
     section_summaries = []
@@ -864,8 +868,8 @@ def generate_cross_references(sections: List[Dict], chapter_metadata: Dict, clie
         # Format: Section ID + complete summary
         section_summaries.append(f"[Section {section_num}]\n{complete_summary}")
     
-    system_prompt = """<role>You are analyzing sections within a technical accounting chapter to identify crucial cross-references.</role>
-<task>Identify which sections are most important for understanding each other section.</task>"""
+    system_prompt = """<role>You are analyzing sections within a technical accounting chapter to assign importance scores for retrieval optimization.</role>
+<task>Score each section's importance based on how critical it is for understanding the chapter and other sections.</task>"""
     
     user_prompt_parts = ["<prompt>"]
     
@@ -879,15 +883,23 @@ def generate_cross_references(sections: List[Dict], chapter_metadata: Dict, clie
     user_prompt_parts.append("</sections>")
     
     user_prompt_parts.append("<instructions>")
-    user_prompt_parts.append(f"""Analyze the complete section summaries above (which include hierarchy paths and detailed content descriptions).
-For each section, identify up to {MAX_CROSS_REFERENCES} other sections within this chapter that are CRUCIAL for understanding it.
-Only create cross-references when sections are strongly related based on their actual content (e.g., a section on "recognition" and "measurement" of the same topic).
-Cross-references should be bidirectional - if section A references B, then B should reference A.
-Return empty list for sections that don't have crucial relationships.
-Use section numbers (integers) not section IDs.""")
+    user_prompt_parts.append("""Analyze all section summaries and assign importance levels for retrieval optimization.
+
+IMPORTANCE LEVELS:
+- Level 0 (Default): Standard sections that don't require expansion. Use for most sections.
+- Level 1 (Expand on retrieval): Important sections that provide crucial context. When a chunk from this section is retrieved, the full section should be included. Use for sections that define key concepts, methodologies, or frameworks referenced elsewhere.
+- Level 2 (Always include): Critical foundational sections. When ANY chunk from this chapter is retrieved, these sections should always be included for context. Use VERY SPARINGLY - only for sections absolutely essential to understanding any other part of the chapter (e.g., definitions, scope, critical frameworks).
+
+GUIDELINES:
+- Most sections should be Level 0
+- Level 1 for important conceptual/framework sections (typically 10-30% of sections)
+- Level 2 only for truly critical sections (typically 0-2 per chapter)
+- Consider: Would understanding other sections be significantly impaired without this section?
+
+Assign an importance level to EVERY section.""")
     user_prompt_parts.append("</instructions>")
     
-    user_prompt_parts.append("<response_format>YOU MUST use the 'identify_cross_references' tool to provide your response.</response_format>")
+    user_prompt_parts.append("<response_format>YOU MUST use the 'score_section_importance' tool to provide your response.</response_format>")
     user_prompt_parts.append("</prompt>")
     
     messages = [
@@ -895,7 +907,7 @@ Use section numbers (integers) not section IDs.""")
         {"role": "user", "content": "\n".join(user_prompt_parts)}
     ]
     
-    log_progress(f"  🔗 Generating cross-references for {len(sections)} sections...", end='')
+    log_progress(f"  🎯 Scoring importance for {len(sections)} sections...", end='')
     
     result, usage_info = call_gpt_with_tool_enforcement(
         client=client,
@@ -903,33 +915,28 @@ Use section numbers (integers) not section IDs.""")
         messages=messages,
         max_tokens=MAX_COMPLETION_TOKENS,
         temperature=TEMPERATURE,
-        tool_schema=CROSS_REFERENCE_TOOL_SCHEMA
+        tool_schema=IMPORTANCE_SCORING_TOOL_SCHEMA
     )
     
-    if result and 'cross_references' in result:
+    if result and 'importance_scores' in result:
         # Process the results
-        for ref in result['cross_references']:
-            section_num = ref.get('section_number')
-            related = ref.get('related_sections', [])
-            if section_num in cross_refs:
-                # Convert section numbers to IDs and limit to MAX_CROSS_REFERENCES
-                cross_refs[section_num] = [f"s{r}" for r in related[:MAX_CROSS_REFERENCES]]
+        for score_data in result['importance_scores']:
+            section_num = score_data.get('section_number')
+            importance_level = score_data.get('importance_level', 0)
+            if section_num in importance_scores:
+                # Validate importance level is 0, 1, or 2
+                importance_scores[section_num] = max(0, min(2, importance_level))
         
-        # Ensure bidirectionality
-        for section_num, related_nums in list(cross_refs.items()):
-            for related_str in related_nums:
-                # Extract number from "s2" format
-                related_num = int(related_str[1:]) if related_str.startswith('s') else int(related_str)
-                if related_num in cross_refs:
-                    ref_id = f"s{section_num}"
-                    if ref_id not in cross_refs[related_num] and len(cross_refs[related_num]) < MAX_CROSS_REFERENCES:
-                        cross_refs[related_num].append(ref_id)
+        # Log distribution of scores
+        level_counts = {0: 0, 1: 0, 2: 0}
+        for level in importance_scores.values():
+            level_counts[level] = level_counts.get(level, 0) + 1
         
-        log_progress(" ✅")
+        log_progress(f" ✅ (L0: {level_counts[0]}, L1: {level_counts[1]}, L2: {level_counts[2]})")
     else:
         log_progress(" ❌")
     
-    return cross_refs
+    return importance_scores
 
 # ==============================================================================
 # Chapter Processing
@@ -985,8 +992,8 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
         # Complete summary includes hierarchy for context in cross-referencing
         section['complete_summary'] = f"{hierarchy}\n\n{gpt_summary}"
     
-    # Step 5: Generate cross-references using complete summaries
-    cross_refs = generate_cross_references(sections, chapter_metadata, client)
+    # Step 5: Score section importance using complete summaries
+    importance_scores = score_section_importance(sections, chapter_metadata, client)
     
     # Step 6: Build final section records
     section_records = []
@@ -1016,7 +1023,7 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
             'section_number': section['section_number'],
             'section_summary': f"{section['hierarchy']}\n\n{section['gpt_summary']}",  # Hierarchy + GPT summary as designed
             'section_page_count': section_page_count,
-            'section_references': [f"ch{chapter_num}_{ref}" for ref in cross_refs.get(section['section_number'], [])],
+            'section_importance': importance_scores.get(section['section_number'], 0),  # 0, 1, or 2
             
             # Include content with embedded page tags
             'section_content': section['content']
