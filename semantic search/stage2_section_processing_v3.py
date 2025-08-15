@@ -556,6 +556,43 @@ def extract_page_range_from_content(content: str) -> Tuple[Optional[int], Option
     page_numbers = [int(m) for m in matches]
     return min(page_numbers), max(page_numbers)
 
+def fix_section_boundaries(section_content: str) -> str:
+    """
+    Ensures section content starts with a PageHeader and ends with a PageFooter.
+    When a section starts or ends mid-page, it inherits that page's header/footer.
+    """
+    if not section_content:
+        return section_content
+    
+    # Pattern to find all page headers and footers
+    header_pattern = r'<!-- PageHeader PageNumber="(\d+)" PageReference="([^"]*)" -->'
+    footer_pattern = r'<!-- PageFooter PageNumber="(\d+)" PageReference="([^"]*)" -->'
+    
+    # Check if starts with PageHeader
+    if not re.match(header_pattern, section_content.strip()):
+        # Section starts mid-page - need to add header for that page
+        # Look for the first footer (which tells us what page we're on)
+        first_footer = re.search(footer_pattern, section_content)
+        if first_footer:
+            page_num = first_footer.group(1)
+            page_ref = first_footer.group(2)
+            # Add the header for this page at the beginning
+            section_content = f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref}" -->\n{section_content}'
+    
+    # Check if ends with PageFooter
+    if not re.search(footer_pattern + r'\s*$', section_content.strip()):
+        # Section ends mid-page - need to add footer for that page
+        # Find the last header (which tells us what page we're on)
+        all_headers = list(re.finditer(header_pattern, section_content))
+        if all_headers:
+            last_header = all_headers[-1]
+            page_num = last_header.group(1)
+            page_ref = last_header.group(2)
+            # Add the footer for this page at the end
+            section_content = f'{section_content}\n<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref}" -->'
+    
+    return section_content
+
 def verify_section_tags(section_content: str, section_num: int) -> bool:
     """
     Verifies that section content has proper page tags at start and end.
@@ -598,8 +635,10 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
     # Handle content before first heading (if any)
     first_heading_pos = matches[0].start() if matches else len(full_content)
     if first_heading_pos > 0:
-        intro_content = full_content[:first_heading_pos].strip()
-        if intro_content:
+        intro_content_raw = full_content[:first_heading_pos].strip()
+        if intro_content_raw:
+            # Fix boundaries for intro section
+            intro_content = fix_section_boundaries(intro_content_raw)
             # Extract page range from intro content
             start_page, end_page = extract_page_range_from_content(intro_content)
             sections.append({
@@ -623,7 +662,10 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
         else:
             end_pos = len(full_content)
         
-        section_content = full_content[start_pos:end_pos].strip()
+        section_content_raw = full_content[start_pos:end_pos].strip()
+        
+        # Fix page tag boundaries: ensure section starts with header and ends with footer
+        section_content = fix_section_boundaries(section_content_raw)
         
         # Extract page range from section content
         start_page, end_page = extract_page_range_from_content(section_content)
