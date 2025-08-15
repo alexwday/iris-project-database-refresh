@@ -486,8 +486,8 @@ def embed_page_tags(pages: List[Dict]) -> str:
     
     for page in pages:
         page_num = page.get('page_number')
-        page_ref = page.get('page_reference', '')
-        content = page.get('content', '')
+        page_ref = page.get('page_reference') or ''  # Handle None values
+        content = page.get('content') or ''  # Handle None values
         
         # Escape special characters in page reference for HTML attributes
         page_ref_escaped = html.escape(page_ref, quote=True)
