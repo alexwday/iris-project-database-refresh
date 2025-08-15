@@ -711,10 +711,11 @@ SECTION_TOOL_SCHEMA = {
     }
 }
 
-def build_section_analysis_prompt(section: Dict, chapter_summary: str, hierarchy: str):
+def build_section_analysis_prompt(section: Dict, chapter_summary: str, hierarchy: str, previous_summaries: List[str] = None):
     """
     Builds prompt for section analysis with requirement to embed metadata.
     Uses structured XML tags for cleaner prompting.
+    Includes previous section summaries for context.
     """
     system_prompt = """<role>You are an expert financial reporting specialist analyzing EY technical accounting guidance.</role>
 <task>Create comprehensive summaries that naturally embed all relevant metadata within the text.</task>"""
@@ -725,6 +726,13 @@ def build_section_analysis_prompt(section: Dict, chapter_summary: str, hierarchy
     user_prompt_parts.append("<chapter_context>")
     user_prompt_parts.append(f"<chapter_summary>{chapter_summary}</chapter_summary>")
     user_prompt_parts.append("</chapter_context>")
+    
+    # Add previous section summaries for context (last 3-5 sections)
+    if previous_summaries and len(previous_summaries) > 0:
+        recent_context = "\n\n".join(previous_summaries[-5:])  # Last 5 sections for context
+        user_prompt_parts.append("<previous_sections>")
+        user_prompt_parts.append(recent_context)
+        user_prompt_parts.append("</previous_sections>")
     
     # Add section hierarchy
     user_prompt_parts.append(f"<section_hierarchy>{hierarchy}</section_hierarchy>")
@@ -755,9 +763,10 @@ Total output must be 2-3 complete sentences only - no more.""")
     
     return messages
 
-def process_section_summary(section: Dict, chapter_metadata: Dict, hierarchy: str, client: Optional[OpenAI]) -> str:
+def process_section_summary(section: Dict, chapter_metadata: Dict, hierarchy: str, previous_summaries: List[str], client: Optional[OpenAI]) -> str:
     """
     Generates an enriched summary for a section with retry logic.
+    Includes previous section summaries for context.
     """
     if not client:
         return f"Section covering {section['title']}"
@@ -770,9 +779,9 @@ def process_section_summary(section: Dict, chapter_metadata: Dict, hierarchy: st
         max_chars = int((GPT_INPUT_TOKEN_LIMIT - TOKEN_BUFFER - 2000) * 3.5)
         section_copy = section.copy()
         section_copy['content'] = section['content'][:max_chars]
-        messages = build_section_analysis_prompt(section_copy, chapter_metadata.get('chapter_summary', ''), hierarchy)
+        messages = build_section_analysis_prompt(section_copy, chapter_metadata.get('chapter_summary', ''), hierarchy, previous_summaries)
     else:
-        messages = build_section_analysis_prompt(section, chapter_metadata.get('chapter_summary', ''), hierarchy)
+        messages = build_section_analysis_prompt(section, chapter_metadata.get('chapter_summary', ''), hierarchy, previous_summaries)
     
     # Try to get summary with retries
     for attempt in range(API_RETRY_ATTEMPTS):
@@ -830,7 +839,7 @@ IMPORTANCE_SCORING_TOOL_SCHEMA = {
                                 "type": "integer",
                                 "minimum": 0,
                                 "maximum": 2,
-                                "description": "0=Standard section (70-90%), 1=Very important (10-25%), 2=Absolutely vital (0-5%)"
+                                "description": "0=Not important to overall topic (50-70%), 1=Important to chapter (25-40%), 2=Critical to understanding (0-10%)"
                             }
                         },
                         "required": ["section_number", "importance_level"]
@@ -887,34 +896,36 @@ def score_section_importance(sections: List[Dict], chapter_metadata: Dict, clien
 
 IMPORTANCE LEVELS:
 
-Level 0 (DEFAULT - USE FOR 70-90% OF SECTIONS):
-- Standard content sections
-- Examples, illustrations, specific cases
-- Detailed procedures or calculations
-- Supporting information
-- Anything that can be understood in isolation
+Level 0 (NOT IMPORTANT TO OVERALL TOPIC - USE FOR 50-70% OF SECTIONS):
+- Examples, illustrations, specific use cases
+- Detailed calculations or procedures
+- Industry-specific applications
+- Exceptions or special circumstances
+- Supporting information that stands alone
+- Content that doesn't affect understanding of other sections
 
-Level 1 (VERY IMPORTANT - USE FOR 10-25% OF SECTIONS):
-- Core definitions that are referenced throughout the chapter
-- Fundamental frameworks or methodologies that other sections build upon
-- Critical recognition or measurement criteria
-- Scope sections that define what the entire chapter applies to
-- Key principles that govern the entire topic
-Ask yourself: "Would someone be significantly confused reading other sections without this context?"
+Level 1 (IMPORTANT TO OVERALL CHAPTER - USE FOR 25-40% OF SECTIONS):
+- Core definitions and key concepts
+- Main frameworks or methodologies
+- Primary recognition, measurement, or disclosure requirements
+- Scope and applicability sections
+- Key principles and criteria
+- Sections frequently referenced by other sections
+Note: During retrieval, Level 1 sections will expand only if under token limits.
 
-Level 2 (ABSOLUTELY VITAL - USE FOR 0-5% OF SECTIONS, OFTEN ZERO):
-- ONLY use when the section is ABSOLUTELY ESSENTIAL to understand ANY other section
-- Typically only the chapter's scope/objective or fundamental definition section
-- Must be information that makes other sections incomprehensible without it
-- Most chapters will have 0-1 Level 2 sections, rarely 2
-Ask yourself: "Is it IMPOSSIBLE to understand this chapter without this section?"
+Level 2 (CRITICAL TO UNDERSTANDING - USE FOR 0-10% OF SECTIONS):
+- Fundamental definitions required throughout
+- Core framework that everything else builds on
+- Critical scope that defines what the entire chapter covers
+- Essential concepts without which other sections lose meaning
+Ask yourself: "Would someone struggle to understand multiple other sections without this?"
 
-STRICT RULES:
-1. Start by marking EVERYTHING as Level 0
-2. Only upgrade to Level 1 if the section defines core concepts used throughout
-3. Only upgrade to Level 2 if the chapter would be incomprehensible without it
-4. When in doubt, use the LOWER importance level
-5. Level 2 should be EXTREMELY RARE
+GUIDELINES:
+1. Default to Level 0 for standard content
+2. Use Level 1 for important conceptual sections
+3. Reserve Level 2 for truly critical foundations
+4. Consider how often other sections reference or depend on this content
+5. Token limits will prevent excessive expansion, so Level 1 can be used more liberally
 
 Assign an importance level to EVERY section.""")
     user_prompt_parts.append("</instructions>")
@@ -1001,16 +1012,21 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     
     # Step 4: Generate section summaries for all sections
     log_progress(f"  📝 Generating section summaries...")
+    previous_summaries = []  # Track previous summaries for context
+    
     for idx, section in enumerate(tqdm(sections, desc=f"Chapter {chapter_num} Summaries")):
         hierarchy = section['hierarchy']
         
-        # Generate enriched summary
-        gpt_summary = process_section_summary(section, chapter_metadata, hierarchy, client)
+        # Generate enriched summary with previous context
+        gpt_summary = process_section_summary(section, chapter_metadata, hierarchy, previous_summaries, client)
         
         # Store both the GPT summary and complete summary for cross-referencing
         section['gpt_summary'] = gpt_summary
         # Complete summary includes hierarchy for context in cross-referencing
         section['complete_summary'] = f"{hierarchy}\n\n{gpt_summary}"
+        
+        # Add to previous summaries for next section's context
+        previous_summaries.append(f"[Section {section['section_number']}] {section['complete_summary']}")
     
     # Step 5: Score section importance using complete summaries
     importance_scores = score_section_importance(sections, chapter_metadata, client)
