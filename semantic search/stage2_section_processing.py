@@ -420,25 +420,36 @@ def _get_oauth_token(
         return None
 
 
-def get_openai_client(base_url=BASE_URL) -> Optional[OpenAI]:
-    """Initializes and returns the OpenAI client."""
+def get_openai_client(base_url=BASE_URL, force_refresh=False) -> Optional[OpenAI]:
+    """
+    Initializes and returns the OpenAI client.
+    
+    Args:
+        base_url: API base URL
+        force_refresh: If True, refreshes OAuth token even if client exists
+    """
     global _OPENAI_CLIENT
-    if _OPENAI_CLIENT:
-        return _OPENAI_CLIENT
-    if not OpenAI:
-        return None
-    if not _setup_ssl_from_nas():
-        pass
+    
+    # Force refresh or create new client
+    if force_refresh or not _OPENAI_CLIENT:
+        if not OpenAI:
+            return None
+        if not _setup_ssl_from_nas():
+            pass
 
-    api_key = _get_oauth_token()
-    if not api_key:
-        return None
-    try:
-        _OPENAI_CLIENT = OpenAI(api_key=api_key, base_url=base_url)
-        return _OPENAI_CLIENT
-    except Exception as e:
-        logging.error(f"Failed to create OpenAI client: {e}")
-        return None
+        api_key = _get_oauth_token()
+        if not api_key:
+            return None
+        try:
+            _OPENAI_CLIENT = OpenAI(api_key=api_key, base_url=base_url)
+            if force_refresh:
+                print(f"  🔑 Refreshed OAuth token")
+            return _OPENAI_CLIENT
+        except Exception as e:
+            logging.error(f"Failed to create OpenAI client: {e}")
+            return None
+    
+    return _OPENAI_CLIENT
 
 
 # ==============================================================================
@@ -951,7 +962,8 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
             adjusted_positions.append((start_pos, match))
     
     # Handle content before first heading
-    first_heading_pos = adjusted_positions[0][0] if adjusted_positions else len(content)
+    # Use original heading position for intro, not adjusted (to avoid pulling in page tags)
+    first_heading_pos = matches[0].start() if matches else len(content)
     if first_heading_pos > 0:
         intro_content = content[:first_heading_pos].strip()
         if intro_content:
@@ -1941,6 +1953,10 @@ def run_stage2():
     all_section_records = []
 
     for chapter_num in chapters_to_process:
+        # Refresh OAuth token for each chapter to prevent expiration
+        if client and chapter_num > chapters_to_process[0]:
+            client = get_openai_client(force_refresh=True)
+        
         pages = chapters[chapter_num]
         section_records = process_chapter(chapter_num, pages, client)
         all_section_records.extend(section_records)
