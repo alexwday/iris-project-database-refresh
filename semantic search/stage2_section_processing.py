@@ -677,6 +677,7 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
     """
     Splits content by a specific heading level.
     Returns list of sections at that level.
+    Adjusts boundaries to include page tags that appear right before headings.
     """
     pattern = re.compile(f"^(#{{{level}}})\\s+(.+)$", re.MULTILINE)
     matches = list(pattern.finditer(content))
@@ -695,8 +696,36 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
     
     sections = []
     
+    # Page tag pattern to check for headers/footers before headings
+    page_tag_pattern = re.compile(r'<!-- Page(?:Header|Footer) PageNumber="\d+" PageReference="[^"]*" -->')
+    
+    # Adjust match positions to include page tags that appear right before headings
+    adjusted_positions = []
+    for i, match in enumerate(matches):
+        start_pos = match.start()
+        
+        # Look backwards from the heading to find any page tags
+        # Check the content immediately before the heading
+        search_start = max(0, start_pos - 200)  # Look back up to 200 chars
+        preceding_content = content[search_start:start_pos]
+        
+        # Find the last page tag before this heading
+        page_tags_before = list(page_tag_pattern.finditer(preceding_content))
+        if page_tags_before:
+            last_tag = page_tags_before[-1]
+            # Check if there's only whitespace between the tag and the heading
+            between_content = preceding_content[last_tag.end():].strip()
+            if not between_content:  # Only whitespace between tag and heading
+                # Adjust start position to include this page tag
+                actual_start = search_start + last_tag.start()
+                adjusted_positions.append((actual_start, match))
+            else:
+                adjusted_positions.append((start_pos, match))
+        else:
+            adjusted_positions.append((start_pos, match))
+    
     # Handle content before first heading
-    first_heading_pos = matches[0].start()
+    first_heading_pos = adjusted_positions[0][0] if adjusted_positions else len(content)
     if first_heading_pos > 0:
         intro_content = content[:first_heading_pos].strip()
         if intro_content:
@@ -710,13 +739,12 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
                 **page_metadata,
             })
     
-    # Process each heading-defined section
-    for i, match in enumerate(matches):
+    # Process each heading-defined section with adjusted boundaries
+    for i, (start_pos, match) in enumerate(adjusted_positions):
         title = match.group(2).strip()
-        start_pos = match.start()
         
-        if i < len(matches) - 1:
-            end_pos = matches[i + 1].start()
+        if i < len(adjusted_positions) - 1:
+            end_pos = adjusted_positions[i + 1][0]
         else:
             end_pos = len(content)
         
@@ -769,11 +797,14 @@ def recursive_split_section(section: Dict, current_level: int, max_level: int = 
         section["title"]
     )
     
-    # If no meaningful split occurred (only 1 section), try next level
-    if len(subsections) <= 1 and next_level < max_level:
-        # Update the section's level info and recurse deeper
-        section["level"] = next_level
-        return recursive_split_section(section, next_level, max_level, page_threshold)
+    # If no meaningful split occurred (only 1 section)
+    if len(subsections) <= 1:
+        # No headings at this level, but section is still too large
+        # Mark it as split at current level and return (don't skip to H6)
+        section["splitting_level"] = current_level
+        if next_level < max_level:
+            logging.debug(f"No H{next_level} headings found in section '{section.get('title', 'Untitled')[:50]}', keeping as H{current_level}")
+        return [section]
     
     # Process each subsection recursively
     result = []
@@ -855,6 +886,8 @@ def generate_hierarchy_string(section: Dict, all_sections: List[Dict], current_i
 def merge_small_sections(sections: List[Dict]) -> List[Dict]:
     """
     Merges small sections with adjacent sections to avoid fragmentation.
+    Respects heading level boundaries - only merges sections at the same level
+    or child sections with their parent.
     Updates page metadata after merging.
     """
     if not sections:
@@ -870,24 +903,44 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
             continue
 
         current = sections[i]
+        current_level = current.get("level", 1)
 
         if current["token_count"] < MIN_SECTION_TOKENS:
             # Try to merge with previous section first
-            if merged and merged[-1]["token_count"] + current["token_count"] <= MAX_SECTION_TOKENS:
+            if merged:
                 prev = merged[-1]
-                prev["content"] += "\n" + current["content"]
-                prev["token_count"] += current["token_count"]
+                prev_level = prev.get("level", 1)
+                
+                # Only merge if:
+                # 1. Same level (sibling sections)
+                # 2. Current is deeper level (child merging with parent)
+                can_merge_prev = (current_level >= prev_level and 
+                                 prev["token_count"] + current["token_count"] <= MAX_SECTION_TOKENS)
+                
+                if can_merge_prev:
+                    prev["content"] += "\n" + current["content"]
+                    prev["token_count"] += current["token_count"]
 
-                # Update page metadata after merging
-                combined_metadata = extract_page_metadata(prev["content"])
-                prev.update(combined_metadata)
+                    # Update page metadata after merging
+                    combined_metadata = extract_page_metadata(prev["content"])
+                    prev.update(combined_metadata)
 
-                consumed.add(i)  # Mark current as consumed
+                    consumed.add(i)  # Mark current as consumed
+                    i += 1
+                    continue
 
             # Try to merge with next section
-            elif i + 1 < len(sections) and i + 1 not in consumed:
+            if i + 1 < len(sections) and i + 1 not in consumed:
                 next_section = sections[i + 1]
-                if current["token_count"] + next_section["token_count"] <= MAX_SECTION_TOKENS:
+                next_level = next_section.get("level", 1)
+                
+                # Only merge if:
+                # 1. Same level (sibling sections)
+                # 2. Next is deeper level (parent merging with child)
+                can_merge_next = (next_level >= current_level and 
+                                current["token_count"] + next_section["token_count"] <= MAX_SECTION_TOKENS)
+                
+                if can_merge_next:
                     current["content"] += "\n" + next_section["content"]
                     current["token_count"] += next_section["token_count"]
 
