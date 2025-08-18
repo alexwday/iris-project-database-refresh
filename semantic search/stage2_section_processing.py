@@ -1310,7 +1310,7 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
     # 3. Check section content integrity
     for i, section in enumerate(sections):
         section_num = section.get("section_number", i + 1)
-        content = section.get("section_content", "")
+        content = section.get("content", "")  # During processing it's "content", not "section_content"
         
         # Check for empty content
         if not content or not content.strip():
