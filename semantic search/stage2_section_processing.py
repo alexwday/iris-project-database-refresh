@@ -645,35 +645,40 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
     page_positions = [(match.start(), int(match.group(1))) for match in page_pattern.finditer(full_content)]
     
     if not page_positions:
-        logging.warning("No page positions found in content - cannot infer boundaries")
-        return sections
+        # This is expected for content without page headers/footers or after merging
+        if VERBOSE_LOGGING:
+            logging.info("No page header/footer tags found in content - skipping position-based inference")
+        # Continue with neighbor-based inference instead of returning early
+        # return sections  # Don't return - let neighbor-based inference still run
     
-    # Sort by position to ensure correct order
-    page_positions.sort(key=lambda x: x[0])
-    
-    for section in sections:
-        # If section already has page metadata, skip
-        if section.get("section_start_page") is not None:
-            continue
-            
-        # Find section position in full content
-        section_start = full_content.find(section["content"])
-        if section_start == -1:
-            continue
-            
-        # Find the last page marker before this section
-        current_page = None
-        for pos, page_num in page_positions:
-            if pos < section_start:
-                current_page = page_num
-            else:
-                break
+    # Only do position-based inference if we found page markers
+    if page_positions:
+        # Sort by position to ensure correct order
+        page_positions.sort(key=lambda x: x[0])
         
-        # If we found a page context, use it
-        if current_page is not None:
-            section["section_start_page"] = current_page
-            section["section_end_page"] = current_page
-            section["section_page_count"] = calculate_page_count(current_page, current_page)
+        for section in sections:
+            # If section already has page metadata, skip
+            if section.get("section_start_page") is not None:
+                continue
+                
+            # Find section position in full content
+            section_start = full_content.find(section["content"])
+            if section_start == -1:
+                continue
+                
+            # Find the last page marker before this section
+            current_page = None
+            for pos, page_num in page_positions:
+                if pos < section_start:
+                    current_page = page_num
+                else:
+                    break
+            
+            # If we found a page context, use it
+            if current_page is not None:
+                section["section_start_page"] = current_page
+                section["section_end_page"] = current_page
+                section["section_page_count"] = calculate_page_count(current_page, current_page)
     
     # Second pass: use neighboring sections to fill gaps
     print(f"\n🔍 INFERENCE CHECK: Processing {len(sections)} sections for page boundaries")
