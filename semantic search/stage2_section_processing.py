@@ -1109,10 +1109,12 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
     Merges small sections with adjacent sections to avoid fragmentation.
     Respects heading level boundaries - only merges sections at the same level
     or child sections with their parent.
-    Updates page metadata after merging.
+    PRESERVES page metadata instead of re-extracting.
     """
     if not sections:
         return sections
+    
+    print(f"\n📊 MERGING: Processing {len(sections)} sections (preserving page metadata)")
 
     merged = []
     consumed = set()  # Track which sections have been consumed by merging
@@ -1142,15 +1144,31 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
                     prev["content"] += "\n" + current["content"]
                     prev["token_count"] += current["token_count"]
 
-                    # Update page metadata after merging
-                    combined_metadata = extract_page_metadata(prev["content"])
-                    prev.update(combined_metadata)
+                    # PRESERVE page metadata when merging - don't re-extract!
+                    # Keep the earliest start page and latest end page
+                    prev_start = prev.get("section_start_page")
+                    prev_end = prev.get("section_end_page")
+                    curr_start = current.get("section_start_page")
+                    curr_end = current.get("section_end_page")
                     
-                    # Recalculate page count
+                    # Update page boundaries to span both sections
+                    if prev_start is not None and curr_start is not None:
+                        prev["section_start_page"] = min(prev_start, curr_start) if isinstance(prev_start, int) and isinstance(curr_start, int) else prev_start
+                    elif curr_start is not None:
+                        prev["section_start_page"] = curr_start
+                        
+                    if prev_end is not None and curr_end is not None:
+                        prev["section_end_page"] = max(prev_end, curr_end) if isinstance(prev_end, int) and isinstance(curr_end, int) else curr_end
+                    elif curr_end is not None:
+                        prev["section_end_page"] = curr_end
+                    
+                    # Recalculate page count based on preserved boundaries
                     prev["section_page_count"] = calculate_page_count(
                         prev.get("section_start_page"),
                         prev.get("section_end_page")
                     )
+                    
+                    print(f"  ↔ Merged sections: preserved pages {prev.get('section_start_page')}-{prev.get('section_end_page')}")
 
                     consumed.add(i)  # Mark current as consumed
                     i += 1
@@ -1171,11 +1189,25 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
                     current["content"] += "\n" + next_section["content"]
                     current["token_count"] += next_section["token_count"]
 
-                    # Update page metadata after merging
-                    combined_metadata = extract_page_metadata(current["content"])
-                    current.update(combined_metadata)
+                    # PRESERVE page metadata when merging - don't re-extract!
+                    # Keep the earliest start page and latest end page
+                    curr_start = current.get("section_start_page")
+                    curr_end = current.get("section_end_page")
+                    next_start = next_section.get("section_start_page")
+                    next_end = next_section.get("section_end_page")
                     
-                    # Recalculate page count
+                    # Update page boundaries to span both sections
+                    if curr_start is not None and next_start is not None:
+                        current["section_start_page"] = min(curr_start, next_start) if isinstance(curr_start, int) and isinstance(next_start, int) else curr_start
+                    elif next_start is not None:
+                        current["section_start_page"] = next_start
+                        
+                    if curr_end is not None and next_end is not None:
+                        current["section_end_page"] = max(curr_end, next_end) if isinstance(curr_end, int) and isinstance(next_end, int) else next_end
+                    elif next_end is not None:
+                        current["section_end_page"] = next_end
+                    
+                    # Recalculate page count based on preserved boundaries
                     current["section_page_count"] = calculate_page_count(
                         current.get("section_start_page"),
                         current.get("section_end_page")
