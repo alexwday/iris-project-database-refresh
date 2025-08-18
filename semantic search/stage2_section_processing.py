@@ -519,9 +519,12 @@ def embed_page_tags(pages: List[Dict]) -> str:
     Each page gets header and footer tags with page number and reference.
     """
     if not pages:
+        logging.warning("embed_page_tags called with empty pages list")
         return ""
 
     content_parts = []
+    pages_with_content = 0
+    pages_without_content = 0
 
     for page in pages:
         # Use page_number (page within chapter PDF) for tags
@@ -532,6 +535,13 @@ def embed_page_tags(pages: List[Dict]) -> str:
 
         page_ref = page.get("page_reference") or ""
         content = page.get("content") or ""
+        
+        # Debug logging for empty content
+        if not content or not content.strip():
+            pages_without_content += 1
+            logging.warning(f"Page {page_num} has empty or whitespace-only content")
+        else:
+            pages_with_content += 1
 
         # Clean any existing page tags from the content
         clean_content = clean_existing_page_tags(content)
@@ -552,7 +562,15 @@ def embed_page_tags(pages: List[Dict]) -> str:
         footer = f'<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref_escaped}" -->\n'
         content_parts.append(footer)
 
-    return "".join(content_parts)
+    # Log summary of content processing
+    if pages_without_content > 0:
+        logging.warning(f"embed_page_tags: {pages_without_content} pages had empty content, {pages_with_content} had content")
+    
+    result = "".join(content_parts)
+    if not result.strip():
+        logging.error("embed_page_tags returning empty result!")
+    
+    return result
 
 
 def extract_page_metadata(content: str) -> Dict:
@@ -681,6 +699,10 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
     """
     pattern = re.compile(f"^(#{{{level}}})\\s+(.+)$", re.MULTILINE)
     matches = list(pattern.finditer(content))
+    
+    # Debug logging
+    if not content:
+        logging.warning(f"split_by_heading_level called with empty content for level H{level}")
     
     if not matches:
         # No headings at this level, return content as single section
@@ -828,6 +850,14 @@ def hierarchical_split_sections(pages: List[Dict], chapter_metadata: Dict = None
     """
     # Embed page tags
     full_content = embed_page_tags(pages)
+    
+    # Debug check
+    if not full_content or not full_content.strip():
+        logging.error(f"hierarchical_split_sections: full_content is empty after embed_page_tags! Pages count: {len(pages)}")
+        # Check if pages have content
+        for i, page in enumerate(pages[:3]):  # Check first 3 pages
+            page_content = page.get("content", "")
+            logging.error(f"  Page {i}: content length = {len(page_content)}, first 50 chars: {page_content[:50] if page_content else 'EMPTY'}")
     
     # Start with H1 level split
     initial_sections = split_by_heading_level(full_content, level=1, parent_title=chapter_metadata.get("chapter_name", "") if chapter_metadata else "")
@@ -1312,11 +1342,21 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
         section_num = section.get("section_number", i + 1)
         content = section.get("content", "")  # During processing it's "content", not "section_content"
         
+        # Debug: Log what we're actually getting
+        if not content:
+            logging.warning(f"Section {section_num}: content field is None or missing. Keys in section: {list(section.keys())}")
+        
         # Check for empty content
         if not content or not content.strip():
-            warnings.append(f"Section {section_num}: Empty content")
+            # More detailed error message
+            if content is None:
+                warnings.append(f"Section {section_num}: Content field is None")
+            elif content == "":
+                warnings.append(f"Section {section_num}: Content field is empty string")
+            else:
+                warnings.append(f"Section {section_num}: Content is whitespace only (length: {len(content)})")
         
-        # Check for missing title
+        # Check for missing summary
         if not section.get("section_summary"):
             warnings.append(f"Section {section_num}: Missing section_summary")
         
@@ -1574,6 +1614,7 @@ def run_stage2():
     required_fields = ["chapter_number", "content", "page_number"]
     valid_records = []
     invalid_count = 0
+    empty_content_count = 0
 
     for record in page_records:
         missing_fields = [field for field in required_fields if field not in record or record[field] is None]
@@ -1582,11 +1623,22 @@ def run_stage2():
             logging.warning(
                 f"Record missing required fields {missing_fields}: page {record.get('page_number', 'unknown')}"
             )
+        elif not record.get("content") or not record.get("content").strip():
+            # Also check for empty content
+            empty_content_count += 1
+            logging.warning(
+                f"Record has empty content: chapter {record.get('chapter_number')}, page {record.get('page_number')}"
+            )
+            # Still add it but log the warning
+            valid_records.append(record)
         else:
             valid_records.append(record)
 
     if invalid_count > 0:
         log_progress(f"⚠️ Skipped {invalid_count} records with missing required fields")
+    
+    if empty_content_count > 0:
+        log_progress(f"⚠️ Found {empty_content_count} records with empty content (will still process)")
 
     if not valid_records:
         log_progress("❌ No valid records to process after validation")
