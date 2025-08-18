@@ -581,13 +581,53 @@ def extract_page_range_from_content(content: str) -> Tuple[Optional[int], Option
 # Section Identification and Processing
 # ==============================================================================
 
+def ensure_section_has_tags(section_content: str, prev_section: Optional[Dict], next_section: Optional[Dict], 
+                           all_sections: List[Dict], current_idx: int) -> str:
+    """
+    Ensures section has PageHeader at start and PageFooter at end.
+    If missing, inherits from neighboring sections.
+    """
+    if not section_content:
+        return section_content
+        
+    result = section_content
+    
+    # Check if starts with PageHeader
+    if not HEADER_PATTERN.match(result.strip()):
+        # Look for header in previous section's footer area or before
+        if prev_section and prev_section.get('content'):
+            # Extract last footer from previous section (which tells us what page we're on)
+            prev_footers = list(re.finditer(r'<!-- PageFooter PageNumber="(\d+)" PageReference="([^"]*)" -->', prev_section['content']))
+            if prev_footers:
+                last_footer = prev_footers[-1]
+                page_num = last_footer.group(1)
+                page_ref = last_footer.group(2)
+                # Add corresponding header
+                result = f'<!-- PageHeader PageNumber="{page_num}" PageReference="{page_ref}" -->\n' + result
+    
+    # Check if ends with PageFooter
+    if not FOOTER_PATTERN.search(result.strip()):
+        # Look for footer in next section(s)
+        for j in range(current_idx + 1, len(all_sections)):
+            next_content = all_sections[j].get('content', '')
+            if next_content:
+                # Find first footer in next section
+                footer_match = re.search(r'<!-- PageFooter PageNumber="(\d+)" PageReference="([^"]*)" -->', next_content)
+                if footer_match:
+                    page_num = footer_match.group(1)
+                    page_ref = footer_match.group(2) 
+                    result = result + f'\n<!-- PageFooter PageNumber="{page_num}" PageReference="{page_ref}" -->'
+                    break
+    
+    return result
+
 def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> List[Dict]:
     """
     Identifies sections based on markdown headings across all pages.
-    Simple approach: pages already have tags embedded, just split by headings.
+    Ensures sections don't split through HTML tags and inherit tags from neighbors.
     Returns list of sections with their page ranges and content.
     """
-    # Simply embed page tags first, then identify sections
+    # Step 1: Embed page tags
     full_content = embed_page_tags(pages)
     
     sections = []
@@ -600,16 +640,14 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
     if first_heading_pos > 0:
         intro_content = full_content[:first_heading_pos].strip()
         if intro_content:
-            # Extract page range from content (tags are already there)
-            start_page, end_page = extract_page_range_from_content(intro_content)
             sections.append({
                 'section_number': 1,
                 'title': chapter_metadata.get('chapter_name', 'Introduction'),
                 'level': 1,
                 'content': intro_content,
                 'token_count': count_tokens(intro_content),
-                'start_page': start_page,
-                'end_page': end_page
+                'start_page': None,  # Will be set after tag inheritance
+                'end_page': None
             })
     
     # Process each heading-defined section
@@ -625,18 +663,30 @@ def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict) -> L
         
         section_content = full_content[start_pos:end_pos].strip()
         
-        # Extract page range from section content (tags are already embedded)
-        start_page, end_page = extract_page_range_from_content(section_content)
-        
         sections.append({
             'section_number': len(sections) + 1,
             'title': title,
             'level': level,
             'content': section_content,
             'token_count': count_tokens(section_content),
-            'start_page': start_page,
-            'end_page': end_page
+            'start_page': None,  # Will be set after tag inheritance
+            'end_page': None
         })
+    
+    # Step 2: Ensure all sections have page tags through inheritance
+    for i, section in enumerate(sections):
+        prev_section = sections[i-1] if i > 0 else None
+        next_section = sections[i+1] if i < len(sections)-1 else None
+        
+        # Ensure section has tags
+        section['content'] = ensure_section_has_tags(
+            section['content'], prev_section, next_section, sections, i
+        )
+        
+        # Extract page range from the updated content
+        start_page, end_page = extract_page_range_from_content(section['content'])
+        section['start_page'] = start_page
+        section['end_page'] = end_page
     
     return sections
 
