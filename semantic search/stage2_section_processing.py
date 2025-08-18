@@ -1243,6 +1243,134 @@ def process_section_summary(
 
 
 # ==============================================================================
+# Sanity Checks
+# ==============================================================================
+
+
+def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: int) -> None:
+    """
+    Performs comprehensive sanity checks on processed sections.
+    Logs warnings for potential issues without stopping execution.
+    """
+    if not sections:
+        logging.warning(f"Chapter {chapter_num}: No sections generated")
+        return
+    
+    log_progress("  🔍 Running sanity checks...")
+    warnings = []
+    
+    # 1. Check page coverage - are all pages in the chapter represented?
+    chapter_pages = set()
+    for page in pages:
+        page_num = page.get("page_number")
+        if page_num is not None:
+            chapter_pages.add(page_num)
+    
+    section_pages = set()
+    for section in sections:
+        start_page = section.get("section_start_page")
+        end_page = section.get("section_end_page")
+        if start_page is not None and end_page is not None:
+            for p in range(start_page, end_page + 1):
+                section_pages.add(p)
+    
+    missing_pages = chapter_pages - section_pages
+    if missing_pages:
+        warnings.append(f"Pages not covered by any section: {sorted(missing_pages)}")
+    
+    extra_pages = section_pages - chapter_pages
+    if extra_pages:
+        warnings.append(f"Sections reference pages not in chapter: {sorted(extra_pages)}")
+    
+    # 2. Check section ordering and continuity
+    prev_end = None
+    for i, section in enumerate(sections):
+        section_num = section.get("section_number", i + 1)
+        start_page = section.get("section_start_page")
+        end_page = section.get("section_end_page")
+        
+        # Check for missing page metadata
+        if start_page is None or end_page is None:
+            warnings.append(f"Section {section_num}: Missing page metadata (start={start_page}, end={end_page})")
+            continue
+        
+        # Check page range validity
+        if start_page > end_page:
+            warnings.append(f"Section {section_num}: Invalid page range (start={start_page} > end={end_page})")
+        
+        # Check for gaps between sections
+        if prev_end is not None:
+            if start_page > prev_end + 1:
+                warnings.append(f"Gap between sections {section_num-1} and {section_num}: pages {prev_end+1} to {start_page-1}")
+            elif start_page < prev_end:
+                warnings.append(f"Overlap between sections {section_num-1} and {section_num}: section {section_num} starts at page {start_page} but previous ended at {prev_end}")
+        
+        prev_end = end_page
+    
+    # 3. Check section content integrity
+    for i, section in enumerate(sections):
+        section_num = section.get("section_number", i + 1)
+        content = section.get("section_content", "")
+        
+        # Check for empty content
+        if not content or not content.strip():
+            warnings.append(f"Section {section_num}: Empty content")
+        
+        # Check for missing title
+        if not section.get("section_summary"):
+            warnings.append(f"Section {section_num}: Missing section_summary")
+        
+        # Check page tags in content match metadata
+        page_pattern = re.compile(r'<!-- Page(?:Header|Footer) PageNumber="(\d+)"')
+        content_pages = set(int(m.group(1)) for m in page_pattern.finditer(content))
+        
+        if content_pages:
+            start_page = section.get("section_start_page")
+            end_page = section.get("section_end_page")
+            
+            if start_page is not None and end_page is not None:
+                expected_pages = set(range(start_page, end_page + 1))
+                
+                # Pages in content but not in metadata range
+                extra_in_content = content_pages - expected_pages
+                if extra_in_content:
+                    warnings.append(f"Section {section_num}: Content has pages {sorted(extra_in_content)} outside metadata range [{start_page}, {end_page}]")
+                
+                # Pages in metadata range but not in content (this is OK for single-page sections)
+                missing_in_content = expected_pages - content_pages
+                if missing_in_content and len(expected_pages) > 1:
+                    warnings.append(f"Section {section_num}: Metadata indicates pages {sorted(missing_in_content)} but not found in content")
+    
+    # 4. Check for extremely large sections that couldn't be split
+    for i, section in enumerate(sections):
+        section_num = section.get("section_number", i + 1)
+        start_page = section.get("section_start_page")
+        end_page = section.get("section_end_page")
+        
+        if start_page is not None and end_page is not None:
+            page_span = end_page - start_page + 1
+            if page_span > 10:  # Flag sections > 10 pages as potentially problematic
+                level = section.get("splitting_level", section.get("level", "?"))
+                warnings.append(f"Section {section_num}: Very large ({page_span} pages) at level H{level}")
+    
+    # 5. Check section numbering
+    expected_numbers = list(range(1, len(sections) + 1))
+    actual_numbers = [s.get("section_number") for s in sections]
+    if actual_numbers != expected_numbers:
+        warnings.append(f"Section numbering issue: expected {expected_numbers[:5]}... but got {actual_numbers[:5]}...")
+    
+    # Log all warnings
+    if warnings:
+        log_progress(f"  ⚠️  Found {len(warnings)} potential issues:")
+        for warning in warnings[:10]:  # Limit to first 10 to avoid spam
+            log_progress(f"     - {warning}")
+        if len(warnings) > 10:
+            log_progress(f"     ... and {len(warnings) - 10} more warnings")
+    else:
+        log_progress("  ✅ All sanity checks passed")
+
+
+# ==============================================================================
 # Chapter Processing
 # ==============================================================================
 
@@ -1315,7 +1443,10 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
         for section in sections:
             section["section_summary"] = section["hierarchy"]
 
-    # Step 5: Build final section records with CORRECT schema (no single-page fields)
+    # Step 5: Run sanity checks on the sections
+    perform_sanity_checks(sections, pages, chapter_num)
+
+    # Step 6: Build final section records with CORRECT schema (no single-page fields)
     section_records = []
 
     for section in sections:
