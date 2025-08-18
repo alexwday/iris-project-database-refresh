@@ -118,7 +118,7 @@ if smb_structs is not None:
 CLIENT_HOSTNAME = socket.gethostname()
 
 # --- Logging Level Control ---
-VERBOSE_LOGGING = False
+VERBOSE_LOGGING = True  # Set to True to see detailed inference logging
 
 # ==============================================================================
 # Configuration Validation
@@ -271,7 +271,7 @@ def setup_logging():
 
     logging.root.handlers = []
 
-    log_level = logging.DEBUG if VERBOSE_LOGGING else logging.WARNING
+    log_level = logging.DEBUG if VERBOSE_LOGGING else logging.INFO
 
     root_file_handler = logging.FileHandler(temp_log_path)
     root_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
@@ -841,7 +841,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 if prev_end == next_start:
                     logging.error(f"Section {section_num}: INFERENCE SHOULD HAVE WORKED! prev_end={prev_end} == next_start={next_start}, but section still missing page metadata")
                 else:
-                    logging.warning(f"Section {section_num}: Inference failed - prev_end={prev_end} != next_start={next_start}")
+                    logging.info(f"Section {section_num}: Inference failed - prev_end={prev_end} != next_start={next_start}")
             else:
                 logging.warning(f"Section {section_num}: Inference failed - missing neighbor data ({prev_info}, {next_info})")
     
