@@ -279,17 +279,20 @@ def setup_logging():
     temp_log_path = temp_log.name
     temp_log.close()
 
-    logging.root.handlers = []
+    # DON'T clear existing handlers - keep the early inference logging setup
+    # logging.root.handlers = []  # REMOVED: This was clearing the inference console handler
 
     log_level = logging.DEBUG if VERBOSE_LOGGING else logging.INFO
 
+    # Set the root logger level
+    logging.root.setLevel(log_level)
+
+    # Add file handler for complete logging
     root_file_handler = logging.FileHandler(temp_log_path)
     root_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logging.root.addHandler(root_file_handler)
 
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[root_file_handler]
-    )
-
+    # Set up progress logger (separate from inference logging)
     progress_logger = logging.getLogger("progress")
     progress_logger.setLevel(logging.INFO)
     progress_logger.propagate = False
@@ -302,14 +305,13 @@ def setup_logging():
     progress_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
     progress_logger.addHandler(progress_file_handler)
 
-    # Always add console handler to see inference messages
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-    if VERBOSE_LOGGING:
-        console_handler.setLevel(logging.DEBUG)  # Show all messages including DEBUG
-    else:
-        console_handler.setLevel(logging.INFO)  # Show INFO and above
-    logging.root.addHandler(console_handler)
+    # Ensure inference messages show on console (don't add duplicate if early setup worked)
+    has_console_handler = any(isinstance(h, logging.StreamHandler) for h in logging.root.handlers)
+    if not has_console_handler:
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        console_handler.setLevel(logging.DEBUG if VERBOSE_LOGGING else logging.INFO)
+        logging.root.addHandler(console_handler)
 
     return temp_log_path
 
@@ -635,11 +637,15 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
     Infers missing page boundaries for sections that fall within a single page.
     Uses multiple passes with position tracking and neighboring sections.
     """
+    # Test logging to verify it's working
+    logging.info(f"🔍 INFERENCE START: Processing {len(sections)} sections for page boundary inference")
+    
     # First pass: track the page context throughout the content
     page_pattern = re.compile(r'<!-- Page(?:Header|Footer) PageNumber="(\d+)" PageReference="([^"]*)" -->')
     page_positions = [(match.start(), int(match.group(1))) for match in page_pattern.finditer(full_content)]
     
     if not page_positions:
+        logging.warning("No page positions found in content - cannot infer boundaries")
         return sections
     
     # Sort by position to ensure correct order
@@ -670,6 +676,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             section["section_page_count"] = calculate_page_count(current_page, current_page)
     
     # Second pass: use neighboring sections to fill gaps
+    print(f"\n🔍 INFERENCE CHECK: Processing {len(sections)} sections for page boundaries")
     logging.info(f"Starting second pass inference for {len(sections)} sections")
     for i, section in enumerate(sections):
         section_num = section.get("section_number", i + 1)
@@ -709,6 +716,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             next_page_int = int(next_page) if isinstance(next_page, str) else next_page
             
             # Section is between two known pages
+            print(f"  → Section {section_num}: prev_end={prev_page}, next_start={next_page}")
             logging.debug(f"Section {section_num}: Checking inference - prev_end={prev_page} (type={type(prev_page).__name__}), next_start={next_page} (type={type(next_page).__name__}), equals={prev_page_int == next_page_int}")
             if prev_page_int == next_page_int:
                 # Previous section ends and next section starts on same page
@@ -716,8 +724,10 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 section["section_start_page"] = prev_page
                 section["section_end_page"] = prev_page
                 section["section_page_count"] = calculate_page_count(prev_page, prev_page)
+                print(f"  ✓ Section {section_num}: INFERRED to page {prev_page} (prev_end={prev_page} == next_start={next_page})")
                 logging.info(f"Section {section_num}: INFERENCE SUCCESS - Set to page {prev_page} (prev_end={prev_page} == next_start={next_page})")
             else:
+                print(f"  ✗ Section {section_num}: NO MATCH - prev_end={prev_page} != next_start={next_page}")
                 logging.info(f"Section {section_num}: INFERENCE CHECK - prev_end={prev_page} != next_start={next_page}, trying alternative inference...")
                 # Might span from previous to before next
                 # Conservative: assume single page, but could span multiple
