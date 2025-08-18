@@ -603,9 +603,9 @@ def extract_page_metadata(content: str) -> Dict:
 def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]:
     """
     Infers missing page boundaries for sections that fall within a single page.
-    Uses position tracking and surrounding sections to determine the correct page.
+    Uses multiple passes with position tracking and neighboring sections.
     """
-    # First, track the page context throughout the content
+    # First pass: track the page context throughout the content
     page_pattern = re.compile(r'<!-- Page(?:Header|Footer) PageNumber="(\d+)" PageReference="([^"]*)" -->')
     page_positions = [(match.start(), int(match.group(1))) for match in page_pattern.finditer(full_content)]
     
@@ -639,7 +639,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             section["section_end_page"] = current_page
             section["section_page_count"] = 1
     
-    # Second pass: use neighboring sections to fill any remaining gaps
+    # Second pass: use neighboring sections to fill gaps
     for i, section in enumerate(sections):
         if section.get("section_start_page") is not None:
             continue
@@ -682,6 +682,77 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             section["section_start_page"] = next_page
             section["section_end_page"] = next_page
             section["section_page_count"] = 1
+    
+    # Third pass: Handle consecutive sections where previous.end_page == next.start_page
+    # This specifically addresses sections sandwiched between two sections on the same page
+    for i in range(1, len(sections) - 1):  # Skip first and last
+        current = sections[i]
+        
+        # Skip if already has page info
+        if current.get("section_start_page") is not None:
+            continue
+        
+        prev = sections[i - 1]
+        next_section = sections[i + 1]
+        
+        # Check if previous and next sections have page info
+        prev_end = prev.get("section_end_page")
+        next_start = next_section.get("section_start_page")
+        
+        if prev_end is not None and next_start is not None:
+            # If previous ends and next starts on same page, current must be on that page
+            if prev_end == next_start:
+                current["section_start_page"] = prev_end
+                current["section_end_page"] = prev_end
+                current["section_page_count"] = 1
+                logging.info(f"Section {current.get('section_number', i+1)}: Inferred page {prev_end} from adjacent sections")
+            # If there's exactly one page gap, current spans that gap
+            elif prev_end + 1 == next_start:
+                # Current section is likely entirely on the page between
+                # But this is unusual - log it
+                logging.warning(f"Section {current.get('section_number', i+1)}: Found between pages {prev_end} and {next_start}")
+                # Conservatively assign to the earlier page
+                current["section_start_page"] = prev_end
+                current["section_end_page"] = prev_end
+                current["section_page_count"] = 1
+    
+    # Fourth pass: Special handling for first and last sections
+    if sections:
+        # First section: if missing, use page 1 or next section's start page
+        first = sections[0]
+        if first.get("section_start_page") is None:
+            # Look for the first section with page info
+            for s in sections[1:]:
+                if s.get("section_start_page") is not None:
+                    # First section should be on or before this page
+                    first["section_start_page"] = s["section_start_page"]
+                    first["section_end_page"] = s["section_start_page"]
+                    first["section_page_count"] = 1
+                    logging.info(f"First section: Inferred page {s['section_start_page']} from next section")
+                    break
+        
+        # Last section: if missing, use previous section's end page
+        last = sections[-1]
+        if last.get("section_start_page") is None:
+            # Look for the last section before this with page info
+            for s in reversed(sections[:-1]):
+                if s.get("section_end_page") is not None:
+                    # Last section should be on or after this page
+                    last["section_start_page"] = s["section_end_page"]
+                    last["section_end_page"] = s["section_end_page"]
+                    last["section_page_count"] = 1
+                    logging.info(f"Last section: Inferred page {s['section_end_page']} from previous section")
+                    break
+    
+    # Final pass: Log any sections still missing page info
+    missing_count = 0
+    for i, section in enumerate(sections):
+        if section.get("section_start_page") is None:
+            missing_count += 1
+            logging.warning(f"Section {section.get('section_number', i+1)}: Could not infer page boundaries")
+    
+    if missing_count > 0:
+        logging.warning(f"Total sections with missing page boundaries after inference: {missing_count}")
     
     return sections
 
@@ -1313,6 +1384,7 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
         warnings.append(f"Sections reference pages not in chapter: {sorted(extra_pages)}")
     
     # 2. Check section ordering and continuity
+    sections_with_inferred_pages = 0
     prev_end = None
     for i, section in enumerate(sections):
         section_num = section.get("section_number", i + 1)
@@ -1321,7 +1393,7 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
         
         # Check for missing page metadata
         if start_page is None or end_page is None:
-            warnings.append(f"Section {section_num}: Missing page metadata (start={start_page}, end={end_page})")
+            warnings.append(f"Section {section_num}: Missing page metadata (start={start_page}, end={end_page}) - inference failed")
             continue
         
         # Check page range validity
@@ -1399,6 +1471,10 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
     if actual_numbers != expected_numbers:
         warnings.append(f"Section numbering issue: expected {expected_numbers[:5]}... but got {actual_numbers[:5]}...")
     
+    # Count sections with complete page metadata
+    sections_with_pages = sum(1 for s in sections if s.get("section_start_page") is not None and s.get("section_end_page") is not None)
+    sections_without_pages = len(sections) - sections_with_pages
+    
     # Log all warnings
     if warnings:
         log_progress(f"  ⚠️  Found {len(warnings)} potential issues:")
@@ -1408,6 +1484,12 @@ def perform_sanity_checks(sections: List[Dict], pages: List[Dict], chapter_num: 
             log_progress(f"     ... and {len(warnings) - 10} more warnings")
     else:
         log_progress("  ✅ All sanity checks passed")
+    
+    # Always log page metadata summary
+    if sections_without_pages > 0:
+        log_progress(f"  📄 Page metadata: {sections_with_pages}/{len(sections)} sections have page info ({sections_without_pages} missing)")
+    else:
+        log_progress(f"  📄 Page metadata: All {len(sections)} sections have page boundaries")
 
 
 # ==============================================================================
