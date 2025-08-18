@@ -120,6 +120,16 @@ CLIENT_HOSTNAME = socket.gethostname()
 # --- Logging Level Control ---
 VERBOSE_LOGGING = True  # Set to True to see detailed inference logging
 
+# Set up basic console logging for inference messages (before main logging setup)
+import logging
+if not logging.getLogger().handlers:
+    # Add a simple console handler for inference messages
+    _console = logging.StreamHandler()
+    _console.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    _console.setLevel(logging.DEBUG if VERBOSE_LOGGING else logging.INFO)
+    logging.getLogger().addHandler(_console)
+    logging.getLogger().setLevel(logging.DEBUG if VERBOSE_LOGGING else logging.INFO)
+
 # ==============================================================================
 # Configuration Validation
 # ==============================================================================
@@ -292,11 +302,14 @@ def setup_logging():
     progress_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
     progress_logger.addHandler(progress_file_handler)
 
+    # Always add console handler to see inference messages
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
     if VERBOSE_LOGGING:
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-        console_handler.setLevel(logging.WARNING)
-        logging.root.addHandler(console_handler)
+        console_handler.setLevel(logging.DEBUG)  # Show all messages including DEBUG
+    else:
+        console_handler.setLevel(logging.INFO)  # Show INFO and above
+    logging.root.addHandler(console_handler)
 
     return temp_log_path
 
