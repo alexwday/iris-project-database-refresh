@@ -967,14 +967,24 @@ def split_by_heading_level(content: str, level: int, parent_title: str = "") -> 
     if first_heading_pos > 0:
         intro_content = content[:first_heading_pos].strip()
         if intro_content:
+            # Introduction/first section always starts at page 1
+            # Only look for the last page it appears on
             page_metadata = extract_page_metadata(intro_content)
+            
+            # Override start page to 1, keep the end page from extraction
+            # If no pages found, default to page 1 for both
+            intro_start = 1
+            intro_end = page_metadata.get("section_end_page", 1)
+            
             sections.append({
                 "title": parent_title or "Introduction",
                 "level": level,
                 "content": intro_content,
                 "token_count": count_tokens(intro_content),
                 "parent_title": parent_title,
-                **page_metadata,
+                "section_start_page": intro_start,
+                "section_end_page": intro_end,
+                "section_page_count": calculate_page_count(intro_start, intro_end),
             })
     
     # Process each heading-defined section with adjusted boundaries
