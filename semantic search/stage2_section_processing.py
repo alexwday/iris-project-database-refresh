@@ -600,6 +600,13 @@ def extract_page_metadata(content: str) -> Dict:
     }
 
 
+def calculate_page_count(start_page: Optional[int], end_page: Optional[int]) -> int:
+    """Calculate the number of pages a section spans."""
+    if start_page is None or end_page is None:
+        return 0
+    return max(1, end_page - start_page + 1)
+
+
 def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]:
     """
     Infers missing page boundaries for sections that fall within a single page.
@@ -637,7 +644,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
         if current_page is not None:
             section["section_start_page"] = current_page
             section["section_end_page"] = current_page
-            section["section_page_count"] = 1
+            section["section_page_count"] = calculate_page_count(current_page, current_page)
     
     # Second pass: use neighboring sections to fill gaps
     for i, section in enumerate(sections):
@@ -665,23 +672,30 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 # All on the same page
                 section["section_start_page"] = prev_page
                 section["section_end_page"] = prev_page
-                section["section_page_count"] = 1
+                section["section_page_count"] = calculate_page_count(prev_page, prev_page)
             else:
-                # Likely on the previous page's end or next page's start
-                # Use the previous page as a conservative estimate
-                section["section_start_page"] = prev_page
-                section["section_end_page"] = prev_page
-                section["section_page_count"] = 1
+                # Might span from previous to before next
+                # Conservative: assume single page, but could span multiple
+                if next_page - prev_page == 1:
+                    # Adjacent pages - section is on the boundary
+                    section["section_start_page"] = prev_page
+                    section["section_end_page"] = prev_page
+                    section["section_page_count"] = calculate_page_count(prev_page, prev_page)
+                else:
+                    # Gap between pages - section might span multiple pages
+                    section["section_start_page"] = prev_page
+                    section["section_end_page"] = next_page - 1  # Up to but not including next
+                    section["section_page_count"] = calculate_page_count(prev_page, next_page - 1)
         elif prev_page is not None:
             # Only have previous context
             section["section_start_page"] = prev_page
             section["section_end_page"] = prev_page
-            section["section_page_count"] = 1
+            section["section_page_count"] = calculate_page_count(prev_page, prev_page)
         elif next_page is not None:
             # Only have next context
             section["section_start_page"] = next_page
             section["section_end_page"] = next_page
-            section["section_page_count"] = 1
+            section["section_page_count"] = calculate_page_count(next_page, next_page)
     
     # Third pass: Handle consecutive sections where previous.end_page == next.start_page
     # This specifically addresses sections sandwiched between two sections on the same page
@@ -704,7 +718,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             if prev_end == next_start:
                 current["section_start_page"] = prev_end
                 current["section_end_page"] = prev_end
-                current["section_page_count"] = 1
+                current["section_page_count"] = calculate_page_count(prev_end, prev_end)
                 logging.info(f"Section {current.get('section_number', i+1)}: Inferred page {prev_end} from adjacent sections")
             # If there's exactly one page gap, current spans that gap
             elif prev_end + 1 == next_start:
@@ -714,7 +728,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 # Conservatively assign to the earlier page
                 current["section_start_page"] = prev_end
                 current["section_end_page"] = prev_end
-                current["section_page_count"] = 1
+                current["section_page_count"] = calculate_page_count(prev_end, prev_end)
     
     # Fourth pass: Special handling for first and last sections
     if sections:
@@ -727,7 +741,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                     # First section should be on or before this page
                     first["section_start_page"] = s["section_start_page"]
                     first["section_end_page"] = s["section_start_page"]
-                    first["section_page_count"] = 1
+                    first["section_page_count"] = calculate_page_count(s["section_start_page"], s["section_start_page"])
                     logging.info(f"First section: Inferred page {s['section_start_page']} from next section")
                     break
         
@@ -740,7 +754,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                     # Last section should be on or after this page
                     last["section_start_page"] = s["section_end_page"]
                     last["section_end_page"] = s["section_end_page"]
-                    last["section_page_count"] = 1
+                    last["section_page_count"] = calculate_page_count(s["section_end_page"], s["section_end_page"])
                     logging.info(f"Last section: Inferred page {s['section_end_page']} from previous section")
                     break
     
@@ -906,7 +920,10 @@ def recursive_split_section(section: Dict, current_level: int, max_level: int = 
         if subsection.get("section_start_page") is None:
             subsection["section_start_page"] = section.get("section_start_page")
             subsection["section_end_page"] = section.get("section_end_page")
-            subsection["section_page_count"] = section.get("section_page_count", 0)
+            subsection["section_page_count"] = calculate_page_count(
+                subsection.get("section_start_page"), 
+                subsection.get("section_end_page")
+            )
         
         split_results = recursive_split_section(subsection, next_level, max_level, page_threshold)
         result.extend(split_results)
@@ -1025,6 +1042,12 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
                     # Update page metadata after merging
                     combined_metadata = extract_page_metadata(prev["content"])
                     prev.update(combined_metadata)
+                    
+                    # Recalculate page count
+                    prev["section_page_count"] = calculate_page_count(
+                        prev.get("section_start_page"),
+                        prev.get("section_end_page")
+                    )
 
                     consumed.add(i)  # Mark current as consumed
                     i += 1
@@ -1048,6 +1071,12 @@ def merge_small_sections(sections: List[Dict]) -> List[Dict]:
                     # Update page metadata after merging
                     combined_metadata = extract_page_metadata(current["content"])
                     current.update(combined_metadata)
+                    
+                    # Recalculate page count
+                    current["section_page_count"] = calculate_page_count(
+                        current.get("section_start_page"),
+                        current.get("section_end_page")
+                    )
 
                     merged.append(current)
                     consumed.add(i + 1)  # Mark next as consumed
