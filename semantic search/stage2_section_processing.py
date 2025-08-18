@@ -29,8 +29,12 @@ from collections import defaultdict
 from datetime import datetime
 
 # --- pysmb imports for NAS access ---
-from smb.SMBConnection import SMBConnection
-from smb import smb_structs
+try:
+    from smb.SMBConnection import SMBConnection
+    from smb import smb_structs
+except ImportError:
+    SMBConnection = None
+    smb_structs = None
 
 # --- Dependencies Check ---
 try:
@@ -108,8 +112,9 @@ MAX_HEADING_LEVEL = 6  # Consider all heading levels (H1-H6)
 SAMPLE_CHAPTER_LIMIT = None  # Set to None to process all chapters, or a number to limit
 
 # --- pysmb Configuration ---
-smb_structs.SUPPORT_SMB2 = True
-smb_structs.MAX_PAYLOAD_SIZE = 65536
+if smb_structs is not None:
+    smb_structs.SUPPORT_SMB2 = True
+    smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
 # --- Logging Level Control ---
@@ -604,6 +609,11 @@ def calculate_page_count(start_page: Optional[int], end_page: Optional[int]) -> 
     """Calculate the number of pages a section spans."""
     if start_page is None or end_page is None:
         return 0
+    # Convert to int if string
+    if isinstance(start_page, str):
+        start_page = int(start_page)
+    if isinstance(end_page, str):
+        end_page = int(end_page)
     return max(1, end_page - start_page + 1)
 
 
@@ -647,11 +657,13 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             section["section_page_count"] = calculate_page_count(current_page, current_page)
     
     # Second pass: use neighboring sections to fill gaps
+    logging.info(f"Starting second pass inference for {len(sections)} sections")
     for i, section in enumerate(sections):
-        if section.get("section_start_page") is not None:
-            continue
-            
         section_num = section.get("section_number", i + 1)
+        
+        if section.get("section_start_page") is not None:
+            logging.debug(f"Section {section_num}: Already has page info (start={section.get('section_start_page')}, end={section.get('section_end_page')}), skipping inference")
+            continue
         
         # Look at previous section's END page (where it ends)
         prev_page = None
@@ -660,6 +672,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             if sections[j].get("section_end_page") is not None:
                 prev_page = sections[j]["section_end_page"]
                 prev_section_num = sections[j].get("section_number", j + 1)
+                logging.debug(f"Section {section_num}: Found previous section {prev_section_num} with end_page={prev_page}")
                 break
         
         # Look at next section's START page (where it begins)
@@ -669,6 +682,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             if sections[j].get("section_start_page") is not None:
                 next_page = sections[j]["section_start_page"]
                 next_section_num = sections[j].get("section_number", j + 1)
+                logging.debug(f"Section {section_num}: Found next section {next_section_num} with start_page={next_page}")
                 break
         
         # Debug logging for sections being inferred
@@ -677,18 +691,24 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
         
         # Infer based on neighbors
         if prev_page is not None and next_page is not None:
+            # Convert to int for comparison if strings
+            prev_page_int = int(prev_page) if isinstance(prev_page, str) else prev_page
+            next_page_int = int(next_page) if isinstance(next_page, str) else next_page
+            
             # Section is between two known pages
-            if prev_page == next_page:
+            logging.debug(f"Section {section_num}: Checking inference - prev_end={prev_page} (type={type(prev_page).__name__}), next_start={next_page} (type={type(next_page).__name__}), equals={prev_page_int == next_page_int}")
+            if prev_page_int == next_page_int:
                 # Previous section ends and next section starts on same page
                 # This means current section is sandwiched between them on that page
                 section["section_start_page"] = prev_page
                 section["section_end_page"] = prev_page
                 section["section_page_count"] = calculate_page_count(prev_page, prev_page)
-                logging.info(f"Section {section_num}: Inferred page {prev_page} (sandwiched between sections on same page - prev ends on {prev_page}, next starts on {next_page})")
+                logging.info(f"Section {section_num}: INFERENCE SUCCESS - Set to page {prev_page} (prev_end={prev_page} == next_start={next_page})")
             else:
+                logging.info(f"Section {section_num}: INFERENCE CHECK - prev_end={prev_page} != next_start={next_page}, trying alternative inference...")
                 # Might span from previous to before next
                 # Conservative: assume single page, but could span multiple
-                if next_page - prev_page == 1:
+                if next_page_int - prev_page_int == 1:
                     # Adjacent pages - section is on the boundary
                     section["section_start_page"] = prev_page
                     section["section_end_page"] = prev_page
@@ -696,8 +716,10 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 else:
                     # Gap between pages - section might span multiple pages
                     section["section_start_page"] = prev_page
-                    section["section_end_page"] = next_page - 1  # Up to but not including next
-                    section["section_page_count"] = calculate_page_count(prev_page, next_page - 1)
+                    # Use the integer version for calculation, keep original type
+                    end_page = str(next_page_int - 1) if isinstance(next_page, str) else next_page_int - 1
+                    section["section_end_page"] = end_page
+                    section["section_page_count"] = calculate_page_count(prev_page, end_page)
         elif prev_page is not None:
             # Only have previous context
             section["section_start_page"] = prev_page
@@ -800,9 +822,28 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             missing_sections.append(section_num)
             
             # Log details about why inference might have failed
-            prev_info = "no prev" if i == 0 else f"prev_end={sections[i-1].get('section_end_page')}"
-            next_info = "no next" if i == len(sections)-1 else f"next_start={sections[i+1].get('section_start_page')}"
-            logging.warning(f"Section {section_num}: Inference failed - missing page metadata ({prev_info}, {next_info})")
+            if i == 0:
+                prev_end = None
+                prev_info = "no prev (first section)"
+            else:
+                prev_end = sections[i-1].get('section_end_page')
+                prev_info = f"prev_end={prev_end}"
+            
+            if i == len(sections)-1:
+                next_start = None
+                next_info = "no next (last section)"
+            else:
+                next_start = sections[i+1].get('section_start_page')
+                next_info = f"next_start={next_start}"
+            
+            # Check if inference should have worked
+            if prev_end is not None and next_start is not None:
+                if prev_end == next_start:
+                    logging.error(f"Section {section_num}: INFERENCE SHOULD HAVE WORKED! prev_end={prev_end} == next_start={next_start}, but section still missing page metadata")
+                else:
+                    logging.warning(f"Section {section_num}: Inference failed - prev_end={prev_end} != next_start={next_start}")
+            else:
+                logging.warning(f"Section {section_num}: Inference failed - missing neighbor data ({prev_info}, {next_info})")
     
     if missing_sections:
         logging.warning(f"Sections with missing page boundaries after all inference: {missing_sections}")
