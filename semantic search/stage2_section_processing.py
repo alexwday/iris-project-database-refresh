@@ -651,19 +651,29 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
         if section.get("section_start_page") is not None:
             continue
             
+        section_num = section.get("section_number", i + 1)
+        
         # Look at previous section with valid page info
         prev_page = None
+        prev_section_num = None
         for j in range(i - 1, -1, -1):
             if sections[j].get("section_end_page") is not None:
                 prev_page = sections[j]["section_end_page"]
+                prev_section_num = sections[j].get("section_number", j + 1)
                 break
         
         # Look at next section with valid page info
         next_page = None
+        next_section_num = None
         for j in range(i + 1, len(sections)):
             if sections[j].get("section_start_page") is not None:
                 next_page = sections[j]["section_start_page"]
+                next_section_num = sections[j].get("section_number", j + 1)
                 break
+        
+        # Debug logging for sections being inferred
+        if prev_page is not None or next_page is not None:
+            logging.debug(f"Section {section_num}: prev_page={prev_page} (from section {prev_section_num}), next_page={next_page} (from section {next_section_num})")
         
         # Infer based on neighbors
         if prev_page is not None and next_page is not None:
@@ -673,6 +683,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 section["section_start_page"] = prev_page
                 section["section_end_page"] = prev_page
                 section["section_page_count"] = calculate_page_count(prev_page, prev_page)
+                logging.info(f"Section {section_num}: Inferred page {prev_page} (both neighbors on same page)")
             else:
                 # Might span from previous to before next
                 # Conservative: assume single page, but could span multiple
@@ -758,15 +769,42 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                     logging.info(f"Last section: Inferred page {s['section_end_page']} from previous section")
                     break
     
+    # Final check and fallback: Try one more time for any still missing
+    for i, section in enumerate(sections):
+        if section.get("section_start_page") is not None:
+            continue
+            
+        section_num = section.get("section_number", i + 1)
+        
+        # Direct neighbor check (simpler than the passes above)
+        if i > 0 and i < len(sections) - 1:
+            prev_section = sections[i - 1]
+            next_section = sections[i + 1]
+            
+            prev_end = prev_section.get("section_end_page")
+            next_start = next_section.get("section_start_page")
+            
+            if prev_end is not None and next_start is not None and prev_end == next_start:
+                # Sandwiched between sections on the same page
+                section["section_start_page"] = prev_end
+                section["section_end_page"] = prev_end
+                section["section_page_count"] = 1
+                logging.info(f"Section {section_num}: Final fallback - inferred page {prev_end} from immediate neighbors")
+    
     # Final pass: Log any sections still missing page info
-    missing_count = 0
+    missing_sections = []
     for i, section in enumerate(sections):
         if section.get("section_start_page") is None:
-            missing_count += 1
-            logging.warning(f"Section {section.get('section_number', i+1)}: Could not infer page boundaries")
+            section_num = section.get('section_number', i+1)
+            missing_sections.append(section_num)
+            
+            # Log details about why inference might have failed
+            prev_info = "no prev" if i == 0 else f"prev end={sections[i-1].get('section_end_page')}"
+            next_info = "no next" if i == len(sections)-1 else f"next start={sections[i+1].get('section_start_page')}"
+            logging.warning(f"Section {section_num}: Could not infer page boundaries ({prev_info}, {next_info})")
     
-    if missing_count > 0:
-        logging.warning(f"Total sections with missing page boundaries after inference: {missing_count}")
+    if missing_sections:
+        logging.warning(f"Sections with missing page boundaries after all inference: {missing_sections}")
     
     return sections
 
@@ -956,12 +994,12 @@ def hierarchical_split_sections(pages: List[Dict], chapter_metadata: Dict = None
         split_sections = recursive_split_section(section, current_level=1, max_level=6, page_threshold=3)
         final_sections.extend(split_sections)
     
-    # Infer missing page boundaries
-    final_sections = infer_page_boundaries(final_sections, full_content)
-    
-    # Renumber sections
+    # Number sections BEFORE inference (so logging is consistent)
     for idx, section in enumerate(final_sections):
         section["section_number"] = idx + 1
+    
+    # Infer missing page boundaries
+    final_sections = infer_page_boundaries(final_sections, full_content)
     
     return final_sections
 
