@@ -582,71 +582,247 @@ def extract_page_metadata(content: str) -> Dict:
     }
 
 
+def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]:
+    """
+    Infers missing page boundaries for sections that fall within a single page.
+    Uses position tracking and surrounding sections to determine the correct page.
+    """
+    # First, track the page context throughout the content
+    page_pattern = re.compile(r'<!-- Page(?:Header|Footer) PageNumber="(\d+)" PageReference="([^"]*)" -->')
+    page_positions = [(match.start(), int(match.group(1))) for match in page_pattern.finditer(full_content)]
+    
+    if not page_positions:
+        return sections
+    
+    # Sort by position to ensure correct order
+    page_positions.sort(key=lambda x: x[0])
+    
+    for section in sections:
+        # If section already has page metadata, skip
+        if section.get("section_start_page") is not None:
+            continue
+            
+        # Find section position in full content
+        section_start = full_content.find(section["content"])
+        if section_start == -1:
+            continue
+            
+        # Find the last page marker before this section
+        current_page = None
+        for pos, page_num in page_positions:
+            if pos < section_start:
+                current_page = page_num
+            else:
+                break
+        
+        # If we found a page context, use it
+        if current_page is not None:
+            section["section_start_page"] = current_page
+            section["section_end_page"] = current_page
+            section["section_page_count"] = 1
+    
+    # Second pass: use neighboring sections to fill any remaining gaps
+    for i, section in enumerate(sections):
+        if section.get("section_start_page") is not None:
+            continue
+            
+        # Look at previous section with valid page info
+        prev_page = None
+        for j in range(i - 1, -1, -1):
+            if sections[j].get("section_end_page") is not None:
+                prev_page = sections[j]["section_end_page"]
+                break
+        
+        # Look at next section with valid page info
+        next_page = None
+        for j in range(i + 1, len(sections)):
+            if sections[j].get("section_start_page") is not None:
+                next_page = sections[j]["section_start_page"]
+                break
+        
+        # Infer based on neighbors
+        if prev_page is not None and next_page is not None:
+            # Section is between two known pages
+            if prev_page == next_page:
+                # All on the same page
+                section["section_start_page"] = prev_page
+                section["section_end_page"] = prev_page
+                section["section_page_count"] = 1
+            else:
+                # Likely on the previous page's end or next page's start
+                # Use the previous page as a conservative estimate
+                section["section_start_page"] = prev_page
+                section["section_end_page"] = prev_page
+                section["section_page_count"] = 1
+        elif prev_page is not None:
+            # Only have previous context
+            section["section_start_page"] = prev_page
+            section["section_end_page"] = prev_page
+            section["section_page_count"] = 1
+        elif next_page is not None:
+            # Only have next context
+            section["section_start_page"] = next_page
+            section["section_end_page"] = next_page
+            section["section_page_count"] = 1
+    
+    return sections
+
+
 # ==============================================================================
 # Section Identification and Processing
 # ==============================================================================
 
 
-def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict = None) -> List[Dict]:
+def split_by_heading_level(content: str, level: int, parent_title: str = "") -> List[Dict]:
     """
-    Identifies sections based on markdown headings.
-    Preserves natural page boundaries without artificial tag addition.
+    Splits content by a specific heading level.
+    Returns list of sections at that level.
     """
-    # Step 1: Embed page tags naturally
-    full_content = embed_page_tags(pages)
-
+    pattern = re.compile(f"^(#{{{level}}})\\s+(.+)$", re.MULTILINE)
+    matches = list(pattern.finditer(content))
+    
+    if not matches:
+        # No headings at this level, return content as single section
+        page_metadata = extract_page_metadata(content)
+        return [{
+            "title": parent_title or "Content",
+            "level": level,
+            "content": content,
+            "token_count": count_tokens(content),
+            "parent_title": parent_title,
+            **page_metadata,
+        }]
+    
     sections = []
-    section_pattern = re.compile(f"^(#{{1,{MAX_HEADING_LEVEL}}})\\s+(.+)$", re.MULTILINE)
-
-    matches = list(section_pattern.finditer(full_content))
-
-    # Handle content before first heading (if any)
-    first_heading_pos = matches[0].start() if matches else len(full_content)
+    
+    # Handle content before first heading
+    first_heading_pos = matches[0].start()
     if first_heading_pos > 0:
-        intro_content = full_content[:first_heading_pos].strip()
+        intro_content = content[:first_heading_pos].strip()
         if intro_content:
             page_metadata = extract_page_metadata(intro_content)
-
-            sections.append(
-                {
-                    "section_number": 1,
-                    "title": (
-                        chapter_metadata.get("chapter_name", "Introduction") if chapter_metadata else "Introduction"
-                    ),
-                    "level": 1,
-                    "content": intro_content,
-                    "token_count": count_tokens(intro_content),
-                    **page_metadata,
-                }
-            )
-
+            sections.append({
+                "title": parent_title or "Introduction",
+                "level": level,
+                "content": intro_content,
+                "token_count": count_tokens(intro_content),
+                "parent_title": parent_title,
+                **page_metadata,
+            })
+    
     # Process each heading-defined section
     for i, match in enumerate(matches):
-        level = len(match.group(1))
         title = match.group(2).strip()
         start_pos = match.start()
-
+        
         if i < len(matches) - 1:
             end_pos = matches[i + 1].start()
         else:
-            end_pos = len(full_content)
-
-        section_content = full_content[start_pos:end_pos].strip()
-
+            end_pos = len(content)
+        
+        section_content = content[start_pos:end_pos].strip()
         page_metadata = extract_page_metadata(section_content)
-
-        sections.append(
-            {
-                "section_number": len(sections) + 1,
-                "title": title,
-                "level": level,
-                "content": section_content,
-                "token_count": count_tokens(section_content),
-                **page_metadata,
-            }
-        )
-
+        
+        sections.append({
+            "title": title,
+            "level": level,
+            "content": section_content,
+            "token_count": count_tokens(section_content),
+            "parent_title": parent_title,
+            **page_metadata,
+        })
+    
     return sections
+
+
+def recursive_split_section(section: Dict, current_level: int, max_level: int = 6, page_threshold: int = 3) -> List[Dict]:
+    """
+    Recursively splits a section if it spans more than page_threshold pages.
+    Stops at max_level (default 6 for H6).
+    """
+    # Calculate page span
+    start_page = section.get("section_start_page")
+    end_page = section.get("section_end_page")
+    
+    # If we can't determine pages, keep as is
+    if start_page is None or end_page is None:
+        section["splitting_level"] = current_level
+        return [section]
+    
+    page_span = end_page - start_page + 1
+    
+    # If within threshold or at max level, return as is
+    if page_span <= page_threshold or current_level >= max_level:
+        section["splitting_level"] = current_level
+        if page_span > page_threshold and current_level >= max_level:
+            logging.info(f"Section '{section.get('title', 'Untitled')[:50]}' spans {page_span} pages but reached max level H{max_level}")
+        return [section]
+    
+    # Log the split attempt
+    logging.debug(f"Splitting section '{section.get('title', 'Untitled')[:50]}' (spans {page_span} pages) at H{current_level + 1}")
+    
+    # Try splitting at next level
+    next_level = current_level + 1
+    subsections = split_by_heading_level(
+        section["content"], 
+        next_level, 
+        section["title"]
+    )
+    
+    # If no meaningful split occurred (only 1 section), try next level
+    if len(subsections) <= 1 and next_level < max_level:
+        # Update the section's level info and recurse deeper
+        section["level"] = next_level
+        return recursive_split_section(section, next_level, max_level, page_threshold)
+    
+    # Process each subsection recursively
+    result = []
+    for subsection in subsections:
+        # Inherit parent's page info if subsection has none
+        if subsection.get("section_start_page") is None:
+            subsection["section_start_page"] = section.get("section_start_page")
+            subsection["section_end_page"] = section.get("section_end_page")
+            subsection["section_page_count"] = section.get("section_page_count", 0)
+        
+        split_results = recursive_split_section(subsection, next_level, max_level, page_threshold)
+        result.extend(split_results)
+    
+    return result
+
+
+def hierarchical_split_sections(pages: List[Dict], chapter_metadata: Dict = None) -> List[Dict]:
+    """
+    Performs hierarchical splitting of chapter content.
+    Starts with H1, recursively splits sections that span > 3 pages.
+    """
+    # Embed page tags
+    full_content = embed_page_tags(pages)
+    
+    # Start with H1 level split
+    initial_sections = split_by_heading_level(full_content, level=1, parent_title=chapter_metadata.get("chapter_name", "") if chapter_metadata else "")
+    
+    # Recursively split large sections
+    final_sections = []
+    for section in initial_sections:
+        split_sections = recursive_split_section(section, current_level=1, max_level=6, page_threshold=3)
+        final_sections.extend(split_sections)
+    
+    # Infer missing page boundaries
+    final_sections = infer_page_boundaries(final_sections, full_content)
+    
+    # Renumber sections
+    for idx, section in enumerate(final_sections):
+        section["section_number"] = idx + 1
+    
+    return final_sections
+
+
+def identify_sections_from_pages(pages: List[Dict], chapter_metadata: Dict = None) -> List[Dict]:
+    """
+    Identifies sections using hierarchical splitting approach.
+    Adaptively splits based on page span threshold.
+    """
+    return hierarchical_split_sections(pages, chapter_metadata)
 
 
 def generate_hierarchy_string(section: Dict, all_sections: List[Dict], current_idx: int) -> str:
@@ -1042,13 +1218,23 @@ def process_chapter(chapter_num: int, pages: List[Dict], client: Optional[OpenAI
     log_progress(f"📚 Processing Chapter {chapter_num}: {chapter_metadata['chapter_name']}")
     log_progress(f"  📄 {len(pages)} pages to process")
 
-    # Step 1: Identify sections from pages
+    # Step 1: Identify sections using hierarchical splitting
     sections = identify_sections_from_pages(pages, chapter_metadata)
-    log_progress(f"  📑 Found {len(sections)} initial sections")
+    log_progress(f"  📑 After hierarchical splitting: {len(sections)} sections")
+    
+    # Log splitting details
+    splitting_levels = {}
+    for section in sections:
+        level = section.get("splitting_level", section.get("level", 1))
+        splitting_levels[level] = splitting_levels.get(level, 0) + 1
+    
+    if len(splitting_levels) > 1:
+        level_summary = ", ".join([f"H{k}: {v}" for k, v in sorted(splitting_levels.items())])
+        log_progress(f"  🎯 Splitting breakdown: {level_summary}")
 
     # Step 2: Merge small sections
     sections = merge_small_sections(sections)
-    log_progress(f"  🔀 After merging: {len(sections)} sections")
+    log_progress(f"  🔀 After merging small sections: {len(sections)} sections")
 
     # Step 3: Generate hierarchies for all sections
     for idx, section in enumerate(sections):
