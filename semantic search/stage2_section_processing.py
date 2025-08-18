@@ -653,7 +653,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             
         section_num = section.get("section_number", i + 1)
         
-        # Look at previous section with valid page info
+        # Look at previous section's END page (where it ends)
         prev_page = None
         prev_section_num = None
         for j in range(i - 1, -1, -1):
@@ -662,7 +662,7 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
                 prev_section_num = sections[j].get("section_number", j + 1)
                 break
         
-        # Look at next section with valid page info
+        # Look at next section's START page (where it begins)
         next_page = None
         next_section_num = None
         for j in range(i + 1, len(sections)):
@@ -673,17 +673,18 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
         
         # Debug logging for sections being inferred
         if prev_page is not None or next_page is not None:
-            logging.debug(f"Section {section_num}: prev_page={prev_page} (from section {prev_section_num}), next_page={next_page} (from section {next_section_num})")
+            logging.debug(f"Section {section_num}: prev_end_page={prev_page} (from section {prev_section_num}), next_start_page={next_page} (from section {next_section_num})")
         
         # Infer based on neighbors
         if prev_page is not None and next_page is not None:
             # Section is between two known pages
             if prev_page == next_page:
-                # All on the same page
+                # Previous section ends and next section starts on same page
+                # This means current section is sandwiched between them on that page
                 section["section_start_page"] = prev_page
                 section["section_end_page"] = prev_page
                 section["section_page_count"] = calculate_page_count(prev_page, prev_page)
-                logging.info(f"Section {section_num}: Inferred page {prev_page} (both neighbors on same page)")
+                logging.info(f"Section {section_num}: Inferred page {prev_page} (sandwiched between sections on same page - prev ends on {prev_page}, next starts on {next_page})")
             else:
                 # Might span from previous to before next
                 # Conservative: assume single page, but could span multiple
@@ -799,9 +800,9 @@ def infer_page_boundaries(sections: List[Dict], full_content: str) -> List[Dict]
             missing_sections.append(section_num)
             
             # Log details about why inference might have failed
-            prev_info = "no prev" if i == 0 else f"prev end={sections[i-1].get('section_end_page')}"
-            next_info = "no next" if i == len(sections)-1 else f"next start={sections[i+1].get('section_start_page')}"
-            logging.warning(f"Section {section_num}: Could not infer page boundaries ({prev_info}, {next_info})")
+            prev_info = "no prev" if i == 0 else f"prev_end={sections[i-1].get('section_end_page')}"
+            next_info = "no next" if i == len(sections)-1 else f"next_start={sections[i+1].get('section_start_page')}"
+            logging.warning(f"Section {section_num}: Inference failed - missing page metadata ({prev_info}, {next_info})")
     
     if missing_sections:
         logging.warning(f"Sections with missing page boundaries after all inference: {missing_sections}")
