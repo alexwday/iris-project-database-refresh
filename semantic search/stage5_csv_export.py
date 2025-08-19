@@ -12,7 +12,7 @@ Key Features:
 - Uses NAS for input/output operations
 
 Input: JSON file from Stage 4 output (stage4_embedded_chunks.json)
-Output: CSV file named iris_semantic_search_YYYYMMDD_HHMMSS.csv
+Output: CSV file named iris_semantic_search_YYYY-MM-DD_HH-MM-SS.csv
 """
 
 import os
@@ -482,7 +482,7 @@ def main():
         log_progress("\n✅ All chunks passed validation")
     
     # Generate output filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_filename = f"iris_semantic_search_{timestamp}.csv"
     output_path = os.path.join(NAS_OUTPUT_PATH, output_filename).replace("\\", "/")
     
