@@ -366,16 +366,71 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
         
         # Write data rows with same exclusions
         row_count = 0
+        embedding_issues = []
+        
         for row in csv_reader:
             modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
+            
+            # Validate embedding field (column 22 in modified row, was column 23 in original)
+            embedding_col_index = 21  # 0-indexed position of embedding in modified row
+            if embedding_col_index < len(modified_row):
+                embedding_str = modified_row[embedding_col_index]
+                
+                # Check embedding format and dimensions
+                if embedding_str and embedding_str.strip() and embedding_str != '':
+                    try:
+                        # PostgreSQL expects format: [1.0,2.0,3.0,...]
+                        if not embedding_str.startswith('[') or not embedding_str.endswith(']'):
+                            embedding_issues.append(f"Row {row_count+1}: Embedding not in [x,y,z] format")
+                            if row_count < 3:
+                                logging.warning(f"Row {row_count+1} embedding format issue: missing brackets")
+                        else:
+                            # Parse the embedding to check dimensions
+                            embedding_list = json.loads(embedding_str)
+                            if not isinstance(embedding_list, list):
+                                embedding_issues.append(f"Row {row_count+1}: Embedding is not a list")
+                            elif len(embedding_list) != 2000:
+                                embedding_issues.append(f"Row {row_count+1}: Embedding has {len(embedding_list)} dimensions, expected 2000")
+                                if row_count < 3:
+                                    logging.warning(f"Row {row_count+1} embedding has {len(embedding_list)} dimensions, expected 2000")
+                            
+                            # Validate all values are numbers
+                            for i, val in enumerate(embedding_list[:10]):  # Check first 10 values
+                                if not isinstance(val, (int, float)):
+                                    embedding_issues.append(f"Row {row_count+1}: Non-numeric value in embedding at position {i}")
+                                    break
+                            
+                            # Convert back to PostgreSQL format (ensure no spaces after commas for consistency)
+                            modified_row[embedding_col_index] = '[' + ','.join(str(float(x)) for x in embedding_list) + ']'
+                            
+                    except json.JSONDecodeError as e:
+                        embedding_issues.append(f"Row {row_count+1}: Failed to parse embedding as JSON: {e}")
+                        if row_count < 3:
+                            logging.error(f"Row {row_count+1} embedding parse error: {e}")
+                            logging.error(f"Embedding string preview: {embedding_str[:100]}...")
+                    except Exception as e:
+                        embedding_issues.append(f"Row {row_count+1}: Unexpected error validating embedding: {e}")
+            
             csv_writer.writerow(modified_row)
             row_count += 1
             
             # Log first row for debugging
             if row_count == 1:
                 logging.info(f"First data row (should start with document_id value): {modified_row[:3]}")
+                if len(modified_row) > embedding_col_index:
+                    emb_preview = modified_row[embedding_col_index][:50] if modified_row[embedding_col_index] else "NULL"
+                    logging.info(f"First row embedding preview: {emb_preview}...")
         
         logging.info(f"Processed {row_count} data rows for COPY")
+        
+        # Report embedding issues
+        if embedding_issues:
+            log_progress(f"\n⚠️  Found {len(embedding_issues)} embedding validation issues:")
+            for issue in embedding_issues[:5]:  # Show first 5 issues
+                log_progress(f"   - {issue}")
+            if len(embedding_issues) > 5:
+                log_progress(f"   ... and {len(embedding_issues) - 5} more")
+            logging.warning(f"Total embedding issues: {len(embedding_issues)}")
         
         # Reset to beginning for COPY FROM
         modified_csv.seek(0)
@@ -468,7 +523,8 @@ def get_sample_records(conn, table: str, doc_id: str, limit: int = 5) -> List[Di
         SELECT 
             id, document_id, filename, chunk_number, 
             LENGTH(chunk_content) as content_length,
-            CASE WHEN embedding IS NOT NULL THEN 'Present' ELSE 'NULL' END as embedding_status
+            CASE WHEN embedding IS NOT NULL THEN 'Present' ELSE 'NULL' END as embedding_status,
+            CASE WHEN embedding IS NOT NULL THEN array_length(embedding, 1) ELSE 0 END as embedding_dimensions
         FROM {table} 
         WHERE document_id = %s 
         ORDER BY id 
@@ -600,9 +656,41 @@ def main():
             if samples:
                 log_progress("\n📋 Sample records:")
                 for i, sample in enumerate(samples, 1):
+                    emb_info = f"{sample['embedding_status']}"
+                    if sample['embedding_dimensions'] > 0:
+                        emb_info += f" ({sample['embedding_dimensions']} dims)"
                     log_progress(f"  {i}. ID: {sample['id']}, File: {sample['filename']}, "
                                f"Chunk: {sample['chunk_number']}, Content: {sample['content_length']} chars, "
-                               f"Embedding: {sample['embedding_status']}")
+                               f"Embedding: {emb_info}")
+            
+            # Get embedding statistics
+            try:
+                with conn.cursor() as cur:
+                    stats_sql = f"""
+                        SELECT 
+                            COUNT(*) as total_records,
+                            COUNT(embedding) as records_with_embeddings,
+                            COUNT(*) - COUNT(embedding) as records_without_embeddings,
+                            MIN(array_length(embedding, 1)) as min_dimensions,
+                            MAX(array_length(embedding, 1)) as max_dimensions,
+                            AVG(array_length(embedding, 1))::int as avg_dimensions
+                        FROM {TARGET_TABLE}
+                        WHERE document_id = %s;
+                    """
+                    cur.execute(stats_sql, (DOCUMENT_ID,))
+                    stats = cur.fetchone()
+                    
+                    if stats:
+                        log_progress("\n📊 Embedding Statistics:")
+                        log_progress(f"  Total records: {stats[0]}")
+                        log_progress(f"  Records with embeddings: {stats[1]}")
+                        log_progress(f"  Records without embeddings: {stats[2]}")
+                        if stats[3] is not None:
+                            log_progress(f"  Embedding dimensions: min={stats[3]}, max={stats[4]}, avg={stats[5]}")
+                            if stats[3] != 2000 or stats[4] != 2000:
+                                log_progress(f"  ⚠️  Warning: Expected 2000 dimensions for all embeddings")
+            except Exception as e:
+                logging.error(f"Error getting embedding statistics: {e}")
         else:
             success = False
             log_progress("❌ Verification failed - counts don't match")
