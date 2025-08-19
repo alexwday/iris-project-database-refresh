@@ -364,10 +364,11 @@ def connect_to_nas() -> Optional[SMBConnection]:
             NAS_PARAMS["password"],
             CLIENT_HOSTNAME,
             NAS_PARAMS["ip"],
-            use_ntlm_v2=True
+            use_ntlm_v2=True,
+            is_direct_tcp=(NAS_PARAMS["port"] == 445)  # Add missing parameter
         )
         
-        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"])
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60)  # Add timeout
         if connected:
             logging.info("Successfully connected to NAS")
             return conn
@@ -442,9 +443,34 @@ def delete_existing_data(conn, table: str, doc_id: str) -> bool:
 # Main Execution
 # ==============================================================================
 
+def validate_configuration() -> bool:
+    """Validate that all configuration values have been set."""
+    errors = []
+    
+    if "your_nas_ip" in NAS_PARAMS["ip"]:
+        errors.append("NAS IP address not configured")
+    if "your_share_name" in NAS_PARAMS["share"]:
+        errors.append("NAS share name not configured")
+    if "your_nas_user" in NAS_PARAMS["user"]:
+        errors.append("NAS username not configured")
+    if "your_nas_password" in NAS_PARAMS["password"]:
+        errors.append("NAS password not configured")
+    
+    if errors:
+        print("❌ Configuration errors detected:")
+        for error in errors:
+            print(f"  - {error}")
+        print("\nPlease update the configuration values in the script before running.")
+        return False
+    return True
+
 def main():
     """Main execution function."""
     start_time = datetime.now()
+    
+    # Validate configuration first
+    if not validate_configuration():
+        return 1
     
     # Setup logging
     log_file = f"stage6_upload_{start_time.strftime('%Y%m%d_%H%M%S')}.log"
