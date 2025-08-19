@@ -343,21 +343,40 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
         return 0, 0
     
     try:
-        # Create a file-like object from the CSV content
-        csv_file = io.StringIO(csv_content)
+        # Process CSV to exclude auto-generated columns
+        # The CSV has all columns, but we need to skip: id (col 0), created_at (col 26), last_modified (col 27)
+        csv_reader = csv.reader(io.StringIO(csv_content))
+        header = next(csv_reader)  # Read header
+        
+        # Create new CSV without auto-generated columns
+        # Columns to keep: 1-25 (skip 0, 26, 27)
+        modified_csv = io.StringIO()
+        csv_writer = csv.writer(modified_csv)
+        
+        # Write modified header (excluding id, created_at, last_modified)
+        modified_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
+        csv_writer.writerow(modified_header)
+        
+        # Write data rows with same exclusions
+        for row in csv_reader:
+            modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
+            csv_writer.writerow(modified_row)
+        
+        # Reset to beginning for COPY FROM
+        modified_csv.seek(0)
         
         with conn.cursor() as cur:
             # Use COPY FROM to load the CSV data
-            # Skip the header row and use NULL for empty fields
+            # Now the CSV only has the columns we want to insert
             cur.copy_expert(
                 f"""COPY {table} (
-                    id, document_id, filename, filepath, source_filename,
+                    document_id, filename, filepath, source_filename,
                     chapter_number, chapter_name, chapter_summary, chapter_page_count,
                     section_number, section_summary, section_start_page, section_end_page,
                     section_page_count, section_start_reference, section_end_reference,
                     chunk_number, chunk_content, chunk_start_page, chunk_end_page,
                     chunk_start_reference, chunk_end_reference, embedding,
-                    extra1, extra2, extra3, created_at, last_modified
+                    extra1, extra2, extra3
                 ) FROM STDIN WITH (
                     FORMAT csv,
                     HEADER true,
@@ -365,7 +384,7 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
                     QUOTE '"',
                     ESCAPE '"'
                 )""",
-                csv_file
+                modified_csv
             )
             
             inserted_count = cur.rowcount
