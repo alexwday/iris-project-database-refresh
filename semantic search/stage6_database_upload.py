@@ -348,6 +348,10 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
         csv_reader = csv.reader(io.StringIO(csv_content))
         header = next(csv_reader)  # Read header
         
+        # Debug: Log the header to verify column positions
+        logging.info(f"Original CSV header columns: {header}")
+        logging.info(f"Total columns in CSV: {len(header)}")
+        
         # Create new CSV without auto-generated columns
         # Columns to keep: 1-25 (skip 0, 26, 27)
         modified_csv = io.StringIO()
@@ -357,10 +361,21 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
         modified_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
         csv_writer.writerow(modified_header)
         
+        logging.info(f"Modified header (should start with document_id): {modified_header[:3]}")
+        logging.info(f"Modified header column count: {len(modified_header)}")
+        
         # Write data rows with same exclusions
+        row_count = 0
         for row in csv_reader:
             modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
             csv_writer.writerow(modified_row)
+            row_count += 1
+            
+            # Log first row for debugging
+            if row_count == 1:
+                logging.info(f"First data row (should start with document_id value): {modified_row[:3]}")
+        
+        logging.info(f"Processed {row_count} data rows for COPY")
         
         # Reset to beginning for COPY FROM
         modified_csv.seek(0)
@@ -396,11 +411,23 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
     except psycopg2.Error as e:
         logging.error(f"Database error during COPY FROM: {e}", exc_info=True)
         log_progress(f"❌ Failed to insert records: {e}")
+        
+        # Log more details about the error
+        if hasattr(e, 'diag'):
+            if e.diag.message_detail:
+                logging.error(f"Error detail: {e.diag.message_detail}")
+                log_progress(f"   Detail: {e.diag.message_detail}")
+            if e.diag.message_hint:
+                logging.error(f"Error hint: {e.diag.message_hint}")
+                log_progress(f"   Hint: {e.diag.message_hint}")
+        
         conn.rollback()
         
         # Try to parse the error to get more details
         if "invalid input syntax for type vector" in str(e):
             log_progress("⚠️  Error appears to be related to embedding format. Check that embeddings are in [x,y,z] format.")
+        elif "null value in column" in str(e):
+            log_progress("⚠️  Error appears to be a NULL constraint violation. Check the CSV structure.")
         
         return 0, 0
     except Exception as e:
