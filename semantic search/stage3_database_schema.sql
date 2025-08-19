@@ -25,12 +25,16 @@ CREATE TABLE iris_semantic_search (
     section_start_page INTEGER, -- First page number where this section begins
     section_end_page INTEGER, -- Last page number where this section ends
     section_page_count INTEGER, -- Total number of pages in the section
+    section_start_reference VARCHAR(50), -- Page reference for section start (e.g., "1-5")
+    section_end_reference VARCHAR(50), -- Page reference for section end (e.g., "1-8")
     
     -- Chunk Fields
     chunk_number INTEGER NOT NULL, -- Sequential chunk number within each section (starts at 1 for each section)
     chunk_content TEXT NOT NULL, -- The actual text content of this chunk (400-500 tokens)
     chunk_start_page INTEGER, -- First page number this chunk spans
     chunk_end_page INTEGER, -- Last page number this chunk spans
+    chunk_start_reference VARCHAR(50), -- Page reference for chunk start (e.g., "1-5")
+    chunk_end_reference VARCHAR(50), -- Page reference for chunk end (e.g., "1-7")
     
     -- Embedding Field
     embedding HALFVEC(3072), -- 3072-dimensional embedding vector using half precision (uses 2 bytes per dimension)
@@ -69,12 +73,16 @@ CREATE TABLE iris_semantic_search (
     section_start_page INTEGER, -- First page number where this section begins
     section_end_page INTEGER, -- Last page number where this section ends
     section_page_count INTEGER, -- Total number of pages in the section
+    section_start_reference VARCHAR(50), -- Page reference for section start (e.g., "1-5")
+    section_end_reference VARCHAR(50), -- Page reference for section end (e.g., "1-8")
     
     -- Chunk Fields
     chunk_number INTEGER NOT NULL, -- Sequential chunk number within each section (starts at 1 for each section)
     chunk_content TEXT NOT NULL, -- The actual text content of this chunk (400-500 tokens)
     chunk_start_page INTEGER, -- First page number this chunk spans
     chunk_end_page INTEGER, -- Last page number this chunk spans
+    chunk_start_reference VARCHAR(50), -- Page reference for chunk start (e.g., "1-5")
+    chunk_end_reference VARCHAR(50), -- Page reference for chunk end (e.g., "1-7")
     
     -- Embedding Field
     embedding VECTOR(2000), -- 2000-dimensional embedding vector (uses 4 bytes per dimension)
