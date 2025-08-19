@@ -116,73 +116,59 @@ def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) 
         return []
     
     ranges = []
-    pages_seen = {}  # Track start and end positions for each page
     
-    # First pass: collect all positions for each page
-    for pos, tag_type, page_num, page_ref in page_tags:
-        if page_num not in pages_seen:
-            pages_seen[page_num] = {'headers': [], 'footers': []}
-        
+    # Process tags in order to build page ranges
+    current_page = None
+    page_start = 0
+    
+    for i, (pos, tag_type, page_num, page_ref) in enumerate(page_tags):
         if tag_type == 'header':
-            pages_seen[page_num]['headers'].append(pos)
-        else:  # footer
-            pages_seen[page_num]['footers'].append(pos)
-    
-    # Second pass: build ranges for each page
-    for page_num in sorted(pages_seen.keys()):
-        page_info = pages_seen[page_num]
-        
-        # Determine start position
-        if page_info['headers']:
-            # Page has header(s) - use first header position
-            start_pos = min(page_info['headers'])
-        elif page_info['footers']:
-            # Page has only footer(s) - must start from beginning or after previous page
-            # Look for previous page's last position
-            prev_page = page_num - 1
-            if prev_page in pages_seen and pages_seen[prev_page]['footers']:
-                # Start after previous page's last footer
-                prev_footer_pos = max(pages_seen[prev_page]['footers'])
-                # Find end of footer tag
-                footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[prev_footer_pos:prev_footer_pos+100])
+            # If we were tracking a previous page without a footer, end it here
+            if current_page is not None and current_page != page_num:
+                ranges.append((page_start, pos - 1, current_page))
+            
+            # Start tracking this page
+            current_page = page_num
+            page_start = pos
+            
+        elif tag_type == 'footer':
+            # This should be the end of the current page
+            if current_page == page_num:
+                # Find the actual end of the footer tag
+                footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+100])
                 if footer_match:
-                    start_pos = prev_footer_pos + footer_match.end()
+                    page_end = pos + footer_match.end() - 1
                 else:
-                    start_pos = prev_footer_pos + 50  # Estimate
-            else:
-                # No previous page or it has no footer - start from beginning
-                start_pos = 0
-        else:
-            # Shouldn't happen but handle gracefully
-            continue
-        
-        # Determine end position
-        if page_info['footers']:
-            # Page has footer(s) - use last footer position + tag length
-            last_footer_pos = max(page_info['footers'])
-            footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[last_footer_pos:last_footer_pos+100])
-            if footer_match:
-                end_pos = last_footer_pos + footer_match.end()
-            else:
-                end_pos = last_footer_pos + 50  # Estimate
-        elif page_info['headers']:
-            # Page has only header(s) - find next page's start or use end of content
-            next_page = page_num + 1
-            if next_page in pages_seen:
-                if pages_seen[next_page]['headers']:
-                    # End just before next page's header
-                    end_pos = min(pages_seen[next_page]['headers']) - 1
+                    page_end = pos + 50  # Estimate
+                
+                ranges.append((page_start, page_end, current_page))
+                current_page = None
+                
+                # If there's a gap before the next tag, track it
+                if i + 1 < len(page_tags):
+                    next_pos = page_tags[i + 1][0]
+                    if next_pos > page_end + 1:
+                        # There's content between pages - for now skip it
+                        pass
+            elif current_page is None:
+                # Footer without header - page starts from beginning or after previous
+                if ranges:
+                    page_start = ranges[-1][1] + 1
                 else:
-                    # Next page has no header, use current estimate
-                    end_pos = len(content)
-            else:
-                # No next page - use end of content
-                end_pos = len(content)
-        else:
-            # Shouldn't happen
-            continue
-        
-        ranges.append((start_pos, end_pos, page_num))
+                    page_start = 0
+                
+                # Find the actual end of the footer tag
+                footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+100])
+                if footer_match:
+                    page_end = pos + footer_match.end() - 1
+                else:
+                    page_end = pos + 50  # Estimate
+                
+                ranges.append((page_start, page_end, page_num))
+    
+    # If we ended while tracking a page (header without footer), close it
+    if current_page is not None:
+        ranges.append((page_start, len(content) - 1, current_page))
     
     # Sort ranges by start position
     ranges.sort(key=lambda x: x[0])
@@ -211,12 +197,12 @@ def build_position_map(sections: List[Dict]) -> Tuple[str, Dict[int, Tuple[int, 
             content = ""
         
         start_pos = current_pos
-        end_pos = current_pos + len(content)
+        end_pos = current_pos + len(content) - 1  # -1 for inclusive end position
         
         section_positions[section_num] = (start_pos, end_pos)
         full_content_parts.append(content)
         
-        current_pos = end_pos
+        current_pos = current_pos + len(content)  # Next section starts after this content
     
     full_content = ''.join(full_content_parts)
     return full_content, section_positions
