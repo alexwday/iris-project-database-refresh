@@ -356,8 +356,8 @@ def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, in
 # NAS File Operations (kept from original)
 # ==============================================================================
 
-def connect_to_nas() -> Optional[SMBConnection]:
-    """Establish SMB connection to NAS."""
+def create_nas_connection():
+    """Creates and returns an authenticated SMBConnection object."""
     try:
         conn = SMBConnection(
             NAS_PARAMS["user"],
@@ -365,61 +365,99 @@ def connect_to_nas() -> Optional[SMBConnection]:
             CLIENT_HOSTNAME,
             NAS_PARAMS["ip"],
             use_ntlm_v2=True,
-            is_direct_tcp=(NAS_PARAMS["port"] == 445)  # Add missing parameter
+            is_direct_tcp=(NAS_PARAMS["port"] == 445),
         )
-        
-        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60)  # Add timeout
-        if connected:
-            logging.info("Successfully connected to NAS")
-            return conn
-        else:
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60)
+        if not connected:
             logging.error("Failed to connect to NAS")
             return None
+        logging.info("Successfully connected to NAS")
+        return conn
     except Exception as e:
-        logging.error(f"NAS connection error: {e}", exc_info=True)
+        logging.error(f"Exception creating NAS connection: {e}")
         return None
 
-def read_file_from_nas(nas_conn: SMBConnection, file_path: str) -> Optional[str]:
-    """Read file content from NAS."""
+def read_from_nas(share_name, nas_path_relative):
+    """Reads content (as bytes) from a file path on the NAS using pysmb."""
+    conn = None
+    file_obj = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            nas_conn.retrieveFile(NAS_PARAMS["share"], file_path, temp_file)
-            temp_file_path = temp_file.name
-        
-        with open(temp_file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        os.unlink(temp_file_path)
-        return content
-        
-    except Exception as e:
-        logging.error(f"Error reading file from NAS: {e}", exc_info=True)
-        return None
-
-def find_latest_csv_on_nas(nas_conn: SMBConnection) -> Optional[str]:
-    """Find the most recent CSV file in the Stage 5 output directory."""
-    try:
-        files = nas_conn.listPath(NAS_PARAMS["share"], NAS_INPUT_PATH)
-        
-        csv_files = [
-            f for f in files 
-            if f.filename.startswith("iris_semantic_search_") 
-            and f.filename.endswith(".csv")
-            and not f.isDirectory
-        ]
-        
-        if not csv_files:
+        conn = create_nas_connection()
+        if not conn:
             return None
         
-        # Sort by filename (which includes timestamp)
-        csv_files.sort(key=lambda x: x.filename, reverse=True)
-        latest_file = csv_files[0].filename
-        
-        return f"{NAS_INPUT_PATH}/{latest_file}"
-        
+        file_obj = io.BytesIO()
+        _, _ = conn.retrieveFile(share_name, nas_path_relative, file_obj)
+        file_obj.seek(0)
+        content_bytes = file_obj.read()
+        return content_bytes
     except Exception as e:
-        logging.error(f"Error listing NAS directory: {e}", exc_info=True)
+        logging.error(f"Error reading from NAS: {e}")
         return None
+    finally:
+        if file_obj:
+            try:
+                file_obj.close()
+            except Exception:
+                pass
+        if conn:
+            conn.close()
+
+def list_nas_files(share_name, path_relative):
+    """List files in a NAS directory."""
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return None
+        
+        files = conn.listPath(share_name, path_relative)
+        # Filter out . and .. entries
+        files = [f for f in files if f.filename not in ['.', '..']]
+        return files
+    except Exception as e:
+        logging.error(f"Error listing NAS files: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def write_to_nas(share_name, nas_path_relative, content_bytes):
+    """Writes bytes to a file path on the NAS using pysmb."""
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False
+        
+        # Ensure directory exists
+        dir_path = os.path.dirname(nas_path_relative).replace("\\", "/")
+        if dir_path:
+            path_parts = dir_path.strip("/").split("/")
+            current_path = ""
+            for part in path_parts:
+                if not part:
+                    continue
+                current_path = os.path.join(current_path, part).replace("\\", "/")
+                try:
+                    conn.listPath(share_name, current_path)
+                except:
+                    conn.createDirectory(share_name, current_path)
+        
+        file_obj = io.BytesIO(content_bytes)
+        bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
+        
+        if bytes_written == 0 and len(content_bytes) > 0:
+            logging.error(f"No bytes written to {nas_path_relative}")
+            return False
+        
+        return True
+    except Exception as e:
+        logging.error(f"Error writing to NAS: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 def delete_existing_data(conn, table: str, doc_id: str) -> bool:
     """Delete existing data for document_id from table."""
@@ -482,36 +520,55 @@ def main():
     log_progress(f"   Document ID: {DOCUMENT_ID}")
     log_progress("="*60)
     
-    # Connect to NAS
+    # Step 1: Connect to NAS and find latest CSV file
     log_progress("\n📁 Connecting to NAS...")
-    nas_conn = connect_to_nas()
-    if not nas_conn:
-        log_progress("❌ Failed to connect to NAS. Exiting.")
-        return
+    log_progress(f"   NAS: {NAS_PARAMS['ip']}:{NAS_PARAMS['port']}")
+    log_progress(f"   Share: {NAS_PARAMS['share']}")
+    log_progress(f"   Path: {NAS_INPUT_PATH}")
     
-    # Find latest CSV file
-    log_progress("\n🔍 Finding latest CSV file...")
-    csv_path = find_latest_csv_on_nas(nas_conn)
-    if not csv_path:
-        log_progress("❌ No CSV file found. Exiting.")
-        nas_conn.close()
-        return
+    # List files in the Stage 5 output directory
+    files = list_nas_files(NAS_PARAMS["share"], NAS_INPUT_PATH)
+    if files is None:
+        log_progress("❌ Failed to connect to NAS or list files. Exiting.")
+        return 1
     
-    log_progress(f"   Found: {csv_path}")
+    # Find CSV files
+    csv_files = [
+        f for f in files
+        if f.filename.startswith("iris_semantic_search_")
+        and f.filename.endswith(".csv")
+        and not f.isDirectory
+    ]
     
-    # Read CSV content
-    log_progress("\n📖 Reading CSV file from NAS...")
-    csv_content = read_file_from_nas(nas_conn, csv_path)
-    if not csv_content:
-        log_progress("❌ Failed to read CSV file. Exiting.")
-        nas_conn.close()
-        return
+    if not csv_files:
+        log_progress(f"❌ No CSV files found in {NAS_INPUT_PATH}")
+        log_progress(f"   Looking for files starting with 'iris_semantic_search_' and ending with '.csv'")
+        return 1
     
-    csv_lines = csv_content.count('\n')
-    log_progress(f"   Read {csv_lines} lines from CSV")
+    # Sort by filename (which includes timestamp) to get the latest
+    csv_files.sort(key=lambda x: x.filename, reverse=True)
+    latest_csv = csv_files[0].filename
+    csv_path = f"{NAS_INPUT_PATH}/{latest_csv}"
     
-    # Close NAS connection
-    nas_conn.close()
+    log_progress(f"✅ Found latest CSV: {latest_csv}")
+    log_progress(f"   Full path: {csv_path}")
+    
+    # Step 2: Read CSV content from NAS
+    log_progress("\n📥 Reading CSV content from NAS...")
+    csv_bytes = read_from_nas(NAS_PARAMS["share"], csv_path)
+    if not csv_bytes:
+        log_progress("❌ Failed to read CSV file from NAS. Exiting.")
+        return 1
+    
+    # Decode bytes to string
+    try:
+        csv_content = csv_bytes.decode('utf-8')
+        # Count lines for verification
+        line_count = len(csv_content.splitlines())
+        log_progress(f"✅ Successfully read CSV: {len(csv_bytes):,} bytes, {line_count:,} lines")
+    except UnicodeDecodeError as e:
+        log_progress(f"❌ Failed to decode CSV content: {e}")
+        return 1
     
     # Connect to database
     log_progress("\n🔌 Connecting to database...")
@@ -561,4 +618,4 @@ def main():
         log_progress("❌ Stage 6 failed - please check the logs")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
