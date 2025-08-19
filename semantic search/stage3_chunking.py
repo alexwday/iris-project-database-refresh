@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Stage 3: Content Chunking Pipeline
+Stage 3: Content Chunking Pipeline (Local Version)
 Chunks sections from Stage 2.5 into 500-750 token chunks for semantic search
+
+This is the local version for development and testing.
+For production use with NAS, use stage3_chunking_nas.py
 """
 
 import json
@@ -12,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import argparse
 from pathlib import Path
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(
