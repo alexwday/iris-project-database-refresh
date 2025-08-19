@@ -102,7 +102,7 @@ def extract_page_tags_with_positions(content: str) -> List[Tuple[int, str, int, 
     return tags
 
 
-def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) -> List[Tuple[int, int, int]]:
+def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) -> Tuple[List[Tuple[int, int, int]], Dict[int, str]]:
     """
     Build page ranges from extracted tags.
     
@@ -111,18 +111,26 @@ def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) 
         content: The full content string
     
     Returns:
-        List of tuples: (start_position, end_position, page_number)
+        Tuple of:
+        - List of tuples: (start_position, end_position, page_number)
+        - Dict mapping page_number to page_reference
     """
     if not page_tags:
-        return []
+        return [], {}
     
     ranges = []
+    page_references = {}  # Map page number to reference
     
     # Process tags in order to build page ranges
     current_page = None
     page_start = 0
     
     for i, (pos, tag_type, page_num, page_ref) in enumerate(page_tags):
+        # Store page reference for this page number
+        if page_num not in page_references or tag_type == 'header':
+            # Prefer header references, but use footer if no header exists
+            page_references[page_num] = page_ref
+        
         if tag_type == 'header':
             # If we were tracking a previous page without a footer, end it here
             if current_page is not None and current_page != page_num:
@@ -187,7 +195,7 @@ def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) 
     # Sort ranges by start position
     ranges.sort(key=lambda x: x[0])
     
-    return ranges
+    return ranges, page_references
 
 
 def build_position_map(sections: List[Dict]) -> Tuple[str, Dict[int, Tuple[int, int]]]:
@@ -288,7 +296,7 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
         return chapter_sections, stats
     
     # Step 3: Build page ranges from tags
-    page_ranges = build_page_ranges(page_tags, full_content)
+    page_ranges, page_references = build_page_ranges(page_tags, full_content)
     
     if not page_ranges:
         logging.warning(f"Chapter {chapter_sections[0].get('chapter_number', '?')}: Could not build page ranges")
@@ -321,6 +329,10 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             section['section_end_page'] = new_end
             section['section_page_count'] = new_end - new_start + 1
             
+            # Add page references
+            section['section_start_reference'] = page_references.get(new_start, '')
+            section['section_end_reference'] = page_references.get(new_end, '')
+            
             # Add debug fields if enabled
             if DEBUG_MODE:
                 section['original_start_page'] = original_start
@@ -347,6 +359,10 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             first['section_start_page'] = 1
             first['section_end_page'] = 1  # Will be adjusted if we find next section info
             first['section_page_count'] = 1
+            
+            # Add page references (if available)
+            first['section_start_reference'] = page_references.get(1, '')
+            first['section_end_reference'] = page_references.get(1, '')
             
             # Add debug fields if enabled
             if DEBUG_MODE:
@@ -416,6 +432,10 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             if inferred:
                 section['section_page_count'] = section['section_end_page'] - section['section_start_page'] + 1
                 
+                # Add page references (if available)
+                section['section_start_reference'] = page_references.get(section['section_start_page'], '')
+                section['section_end_reference'] = page_references.get(section['section_end_page'], '')
+                
                 # Add debug fields if enabled
                 if DEBUG_MODE:
                     section['original_start_page'] = original_start  # Note: original_start is from earlier in function
@@ -428,12 +448,27 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
                 logging.info(f"Section {section.get('section_number', '?')}: Inferred pages {section['section_start_page']}-{section['section_end_page']}")
     
     # Step 6: Validate and fix continuity
-    chapter_sections = validate_and_fix_continuity(chapter_sections, stats)
+    chapter_sections = validate_and_fix_continuity(chapter_sections, stats, page_references)
+    
+    # Step 7: Recalculate all page counts and ensure all sections have references
+    for section in chapter_sections:
+        if section.get('section_start_page') is not None and section.get('section_end_page') is not None:
+            # Recalculate page count
+            correct_count = section['section_end_page'] - section['section_start_page'] + 1
+            if section.get('section_page_count') != correct_count:
+                logging.debug(f"Section {section.get('section_number')}: Recalculated page count from {section.get('section_page_count')} to {correct_count}")
+                section['section_page_count'] = correct_count
+            
+            # Ensure page references are set (even for sections that weren't corrected)
+            if 'section_start_reference' not in section:
+                section['section_start_reference'] = page_references.get(section['section_start_page'], '')
+            if 'section_end_reference' not in section:
+                section['section_end_reference'] = page_references.get(section['section_end_page'], '')
     
     return chapter_sections, stats
 
 
-def validate_and_fix_continuity(sections: List[Dict], stats: Dict) -> List[Dict]:
+def validate_and_fix_continuity(sections: List[Dict], stats: Dict, page_references: Dict[int, str] = None) -> List[Dict]:
     """
     Validate page continuity and fix any gaps or inconsistencies.
     """
@@ -466,6 +501,9 @@ def validate_and_fix_continuity(sections: List[Dict], stats: Dict) -> List[Dict]
             if next_start > current.get('section_start_page', 0):
                 current['section_end_page'] = next_start - 1
                 current['section_page_count'] = current['section_end_page'] - current['section_start_page'] + 1
+                # Update page reference if available
+                if page_references:
+                    current['section_end_reference'] = page_references.get(current['section_end_page'], '')
                 stats['continuity_fixed'] += 1
                 logging.info(f"Fixed overlap: Section {i+1} now ends at page {current['section_end_page']}")
     
@@ -532,7 +570,9 @@ def process_sections(input_data: List[Dict], chapter_filter: Optional[List[int]]
         'sections_inferred': 0,
         'sections_with_tags': 0,
         'sections_without_tags': 0,
-        'chapters_without_tags': 0
+        'chapters_without_tags': 0,
+        'large_sections': [],  # Track sections with >5 pages
+        'chapters_with_large_sections': set()  # Track which chapters have large sections
     }
     
     for chapter_num in sorted(chapters.keys()):
@@ -552,8 +592,23 @@ def process_sections(input_data: List[Dict], chapter_filter: Optional[List[int]]
             overall_stats['chapters_without_tags'] += 1
             overall_stats['sections_without_tags'] += chapter_stats['no_tags_found']
         
+        # Check for large sections (>5 pages)
+        for section in corrected_sections:
+            page_count = section.get('section_page_count', 0)
+            if page_count > 5:
+                overall_stats['large_sections'].append({
+                    'chapter': chapter_num,
+                    'section': section.get('section_number'),
+                    'page_count': page_count,
+                    'pages': f"{section.get('section_start_page')}-{section.get('section_end_page')}"
+                })
+                overall_stats['chapters_with_large_sections'].add(chapter_num)
+        
         # Add to results
         all_corrected_sections.extend(corrected_sections)
+    
+    # Convert set to sorted list for JSON serialization
+    overall_stats['chapters_with_large_sections'] = sorted(list(overall_stats['chapters_with_large_sections']))
     
     return all_corrected_sections, overall_stats
 
@@ -574,13 +629,27 @@ def print_statistics(stats: Dict) -> None:
     if stats['chapters_without_tags'] > 0:
         print(f"  ⚠️  Chapters without any tags: {stats['chapters_without_tags']}")
     
+    # Large sections warning
+    if stats.get('large_sections'):
+        print("\n" + "-" * 70)
+        print("⚠️  Large Sections Detected (>5 pages):")
+        print(f"  Found {len(stats['large_sections'])} sections spanning more than 5 pages")
+        print(f"  Affected chapters: {stats.get('chapters_with_large_sections', [])}")
+        print("\n  Details:")
+        for ls in stats['large_sections'][:10]:  # Show first 10
+            print(f"    Chapter {ls['chapter']}, Section {ls['section']}: {ls['page_count']} pages ({ls['pages']})")
+        if len(stats['large_sections']) > 10:
+            print(f"    ... and {len(stats['large_sections']) - 10} more")
+        print("\n  💡 Consider reviewing these sections for potential splitting")
+    
     # Summary message
+    print("-" * 70)
     if stats['sections_corrected'] == 0:
-        print("\n  ✅ All sections already had correct page boundaries!")
+        print("  ✅ All sections already had correct page boundaries!")
     elif stats['sections_corrected'] == stats['total_sections']:
-        print(f"\n  ✅ Corrected page boundaries for all {stats['total_sections']} sections")
+        print(f"  ✅ Corrected page boundaries for all {stats['total_sections']} sections")
     else:
-        print(f"\n  ✅ Corrected {stats['sections_corrected']} out of {stats['total_sections']} sections")
+        print(f"  ✅ Corrected {stats['sections_corrected']} out of {stats['total_sections']} sections")
     
     print("=" * 70)
 
