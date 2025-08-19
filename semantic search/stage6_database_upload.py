@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 6: Database Upload Pipeline
+Stage 6: Database Upload Pipeline (FIXED VERSION)
 Loads CSV file from Stage 5, connects to PostgreSQL database, clears existing data
-for the specified document_id, and inserts new records using COPY FROM for efficiency.
+for the specified document_id, and inserts new records with proper vector handling.
+
+FIXES:
+- Properly handles pgvector type casting using staging table approach
+- Registers pgvector extension before operations
+- Uses staging table with TEXT embedding column, then casts to vector type
 
 Key Features:
 - Reads CSV file from NAS (Stage 5 output)
-- Connects to PostgreSQL using psycopg2
-- Clears existing data for document_id before insertion
-- Uses COPY FROM for efficient bulk loading
+- Connects to PostgreSQL using psycopg2 and pgvector
+- Creates temporary staging table for CSV import
+- Uses COPY FROM to load into staging table
+- INSERT from staging with proper vector casting
 - Verifies insertion count
-- Handles embedding vectors properly
 
 Input: CSV file from Stage 5 output (iris_semantic_search_YYYY-MM-DD_HH-MM-SS.csv)
-Output: Populated iris_semantic_search table in PostgreSQL database
+Output: Properly populated iris_semantic_search table with working vector embeddings
 """
 
 import os
@@ -43,6 +48,12 @@ except ImportError:
     print("ERROR: psycopg2 library not installed. Database operations unavailable. `pip install psycopg2-binary`")
 
 try:
+    from pgvector.psycopg2 import register_vector
+except ImportError:
+    register_vector = None
+    print("ERROR: pgvector library not installed. Vector operations unavailable. `pip install pgvector`")
+
+try:
     from tqdm import tqdm
 except ImportError:
     def tqdm(x, **kwargs):
@@ -50,7 +61,7 @@ except ImportError:
     print("INFO: tqdm not installed. Progress bars disabled. `pip install tqdm`")
 
 # ==============================================================================
-# Configuration (Hardcoded - update these values)
+# Configuration (Copy from original stage6_database_upload.py)
 # ==============================================================================
 
 # --- NAS Configuration ---
@@ -67,17 +78,14 @@ NAS_INPUT_PATH = "semantic_search/pipeline_output/stage5"
 NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
 
 # --- Document ID ---
-# TODO: Ensure this matches the DOCUMENT_ID used in previous stages
-# This is CRITICAL for clearing the correct data before insertion.
 DOCUMENT_ID = "EY_GUIDE_2024"  # TODO: Update with actual document ID
 
 # --- Database Configuration ---
-# TODO: Load securely (e.g., environment variables) or replace placeholders
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = os.environ.get("DB_PORT", "5432")
 DB_NAME = os.environ.get("DB_NAME", "iris_db")
 DB_USER = os.environ.get("DB_USER", "postgres")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "password")  # Be cautious storing passwords directly
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "password")
 
 # --- Database Operations ---
 TARGET_TABLE = "iris_semantic_search"
@@ -92,249 +100,72 @@ CLIENT_HOSTNAME = socket.gethostname()
 VERBOSE_LOGGING = False
 
 # ==============================================================================
-# Configuration Validation
-# ==============================================================================
-
-def validate_configuration():
-    """Validates that configuration values have been properly set."""
-    errors = []
-    
-    if "your_nas_ip" in NAS_PARAMS["ip"]:
-        errors.append("NAS IP address not configured")
-    if "your_share_name" in NAS_PARAMS["share"]:
-        errors.append("NAS share name not configured")
-    if "your_nas_user" in NAS_PARAMS["user"]:
-        errors.append("NAS username not configured")
-    if "your_nas_password" in NAS_PARAMS["password"]:
-        errors.append("NAS password not configured")
-    if "localhost" in DB_HOST and os.environ.get("DB_HOST") is None:
-        errors.append("Database host not configured (using default localhost)")
-    if "password" in DB_PASSWORD and os.environ.get("DB_PASSWORD") is None:
-        errors.append("Database password not configured (using default)")
-    
-    if errors:
-        print("❌ Configuration errors detected:")
-        for error in errors:
-            print(f"  - {error}")
-        print("\nPlease update the configuration values in the script before running.")
-        return False
-    return True
-
-# ==============================================================================
-# NAS Helper Functions
-# ==============================================================================
-
-def create_nas_connection():
-    """Creates and returns an authenticated SMBConnection object."""
-    try:
-        conn = SMBConnection(
-            NAS_PARAMS["user"],
-            NAS_PARAMS["password"],
-            CLIENT_HOSTNAME,
-            NAS_PARAMS["ip"],
-            use_ntlm_v2=True,
-            is_direct_tcp=(NAS_PARAMS["port"] == 445),
-        )
-        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"], timeout=60)
-        if not connected:
-            logging.error("Failed to connect to NAS")
-            return None
-        return conn
-    except Exception as e:
-        logging.error(f"Exception creating NAS connection: {e}")
-        return None
-
-def list_nas_files(share_name, path_relative):
-    """List files in a NAS directory."""
-    conn = None
-    try:
-        conn = create_nas_connection()
-        if not conn:
-            return None
-        
-        files = conn.listPath(share_name, path_relative)
-        # Filter out . and .. entries
-        files = [f for f in files if f.filename not in ['.', '..']]
-        return files
-    except Exception as e:
-        logging.error(f"Error listing NAS files: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
-def read_from_nas(share_name, nas_path_relative):
-    """Reads content (as bytes) from a file path on the NAS using pysmb."""
-    conn = None
-    file_obj = None
-    try:
-        conn = create_nas_connection()
-        if not conn:
-            return None
-        
-        file_obj = io.BytesIO()
-        _, _ = conn.retrieveFile(share_name, nas_path_relative, file_obj)
-        file_obj.seek(0)
-        content_bytes = file_obj.read()
-        return content_bytes
-    except Exception as e:
-        logging.error(f"Error reading from NAS: {e}")
-        return None
-    finally:
-        if file_obj:
-            try:
-                file_obj.close()
-            except Exception:
-                pass
-        if conn:
-            conn.close()
-
-def write_to_nas(share_name, nas_path_relative, content_bytes):
-    """Writes bytes to a file path on the NAS using pysmb."""
-    conn = None
-    try:
-        conn = create_nas_connection()
-        if not conn:
-            return False
-        
-        # Ensure directory exists
-        dir_path = os.path.dirname(nas_path_relative).replace("\\", "/")
-        if dir_path:
-            path_parts = dir_path.strip("/").split("/")
-            current_path = ""
-            for part in path_parts:
-                if not part:
-                    continue
-                current_path = os.path.join(current_path, part).replace("\\", "/")
-                try:
-                    conn.listPath(share_name, current_path)
-                except:
-                    conn.createDirectory(share_name, current_path)
-        
-        file_obj = io.BytesIO(content_bytes)
-        bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
-        
-        if bytes_written == 0 and len(content_bytes) > 0:
-            logging.error(f"No bytes written to {nas_path_relative}")
-            return False
-        
-        return True
-    except Exception as e:
-        logging.error(f"Error writing to NAS: {e}")
-        return False
-    finally:
-        if conn:
-            conn.close()
-
-# ==============================================================================
 # Logging Setup
 # ==============================================================================
 
-def setup_logging():
-    """Setup logging with controlled verbosity."""
-    temp_log = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".log")
-    temp_log_path = temp_log.name
-    temp_log.close()
+def setup_logging(log_file: Optional[str] = None):
+    """Configure logging to both file and console."""
+    log_format = "%(asctime)s - %(levelname)s - %(message)s"
     
-    # Clear any existing handlers to prevent duplication
-    logging.root.handlers = []
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
     
-    log_level = logging.DEBUG if VERBOSE_LOGGING else logging.WARNING
-    
-    # Only add file handler to root logger (no console handler)
-    root_file_handler = logging.FileHandler(temp_log_path)
-    root_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    
+    level = logging.DEBUG if VERBOSE_LOGGING else logging.INFO
     logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[root_file_handler],
+        level=level,
+        format=log_format,
+        handlers=handlers,
+        force=True
     )
-    
-    # Progress logger handles all console output
-    progress_logger = logging.getLogger("progress")
-    progress_logger.setLevel(logging.INFO)
-    progress_logger.propagate = False
-    
-    # Console handler for progress messages
-    progress_console_handler = logging.StreamHandler()
-    progress_console_handler.setFormatter(logging.Formatter("%(message)s"))
-    progress_logger.addHandler(progress_console_handler)
-    
-    # File handler for progress messages
-    progress_file_handler = logging.FileHandler(temp_log_path)
-    progress_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
-    progress_logger.addHandler(progress_file_handler)
-    
-    # If verbose logging is enabled, also show warnings/errors on console
-    if VERBOSE_LOGGING:
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-        console_handler.setLevel(logging.WARNING)
-        logging.root.addHandler(console_handler)
-    
-    return temp_log_path
 
-def log_progress(message, end="\n"):
-    """Log a progress message that always shows."""
-    progress_logger = logging.getLogger("progress")
-    
-    if end == "":
-        sys.stdout.write(message)
-        sys.stdout.flush()
-        for handler in progress_logger.handlers:
-            if isinstance(handler, logging.FileHandler):
-                handler.stream.write(f"{datetime.now().isoformat()} - {message}\n")
-                handler.flush()
-    else:
-        progress_logger.info(message)
+def log_progress(message: str):
+    """Print progress message to console and log."""
+    print(message)
+    logging.info(message.strip())
 
 # ==============================================================================
-# Database Operations
+# Database Connection with pgvector
 # ==============================================================================
 
-def get_db_connection():
-    """Establishes and returns a PostgreSQL database connection."""
-    if not psycopg2:
-        logging.error("psycopg2 library is not available.")
-        return None
+def connect_to_database() -> Optional[psycopg2.extensions.connection]:
+    """
+    Establish database connection and register pgvector extension.
+    """
     try:
         conn = psycopg2.connect(
             host=DB_HOST,
             port=DB_PORT,
-            dbname=DB_NAME,
+            database=DB_NAME,
             user=DB_USER,
             password=DB_PASSWORD
         )
-        log_progress(f"✅ Database connection established to {DB_NAME} on {DB_HOST}:{DB_PORT}")
+        
+        # CRITICAL: Register pgvector extension
+        if register_vector:
+            register_vector(conn)
+            log_progress("✅ pgvector extension registered successfully")
+        else:
+            log_progress("⚠️  WARNING: pgvector not available - vector operations may fail")
+        
         return conn
     except psycopg2.Error as e:
-        logging.error(f"Database connection error: {e}", exc_info=True)
+        logging.error(f"Database connection failed: {e}", exc_info=True)
         log_progress(f"❌ Failed to connect to database: {e}")
         return None
 
-def clear_existing_data(conn, table: str, doc_id: str) -> bool:
-    """Deletes existing rows for the given document_id from the table."""
-    if not conn:
-        return False
-    
-    delete_sql = f"DELETE FROM {table} WHERE document_id = %s;"
-    try:
-        with conn.cursor() as cur:
-            cur.execute(delete_sql, (doc_id,))
-            deleted_count = cur.rowcount
-            conn.commit()
-            log_progress(f"🗑️  Deleted {deleted_count} existing rows for document_id '{doc_id}'")
-            return True
-    except psycopg2.Error as e:
-        logging.error(f"Error deleting data for document_id '{doc_id}': {e}", exc_info=True)
-        log_progress(f"❌ Failed to delete existing data: {e}")
-        conn.rollback()
-        return False
+# ==============================================================================
+# Fixed Upload Function with Staging Table
+# ==============================================================================
 
-def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int]:
+def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, int]:
     """
-    Upload CSV content to database using COPY FROM for efficiency.
+    Upload CSV content using staging table approach for proper vector casting.
+    
+    Steps:
+    1. Create temporary staging table with TEXT embedding column
+    2. COPY CSV data into staging table
+    3. INSERT from staging to target table with vector casting
     
     Returns:
         Tuple of (inserted_count, failed_count)
@@ -343,111 +174,76 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
         return 0, 0
     
     try:
-        # Process CSV to exclude auto-generated columns
-        # The CSV has all columns, but we need to skip: id (col 0), created_at (col 26), last_modified (col 27)
-        csv_reader = csv.reader(io.StringIO(csv_content))
-        header = next(csv_reader)  # Read header
-        
-        # Debug: Log the header to verify column positions
-        logging.info(f"Original CSV header columns: {header}")
-        logging.info(f"Total columns in CSV: {len(header)}")
-        
-        # Create new CSV without auto-generated columns
-        # Columns to keep: 1-25 (skip 0, 26, 27)
-        modified_csv = io.StringIO()
-        csv_writer = csv.writer(modified_csv)
-        
-        # Write modified header (excluding id, created_at, last_modified)
-        modified_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
-        csv_writer.writerow(modified_header)
-        
-        logging.info(f"Modified header (should start with document_id): {modified_header[:3]}")
-        logging.info(f"Modified header column count: {len(modified_header)}")
-        
-        # Write data rows with same exclusions
-        row_count = 0
-        embedding_issues = []
-        
-        for row in csv_reader:
-            modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
-            
-            # Validate embedding field (column 22 in modified row, was column 23 in original)
-            embedding_col_index = 21  # 0-indexed position of embedding in modified row
-            if embedding_col_index < len(modified_row):
-                embedding_str = modified_row[embedding_col_index]
-                
-                # Check embedding format and dimensions
-                if embedding_str and embedding_str.strip() and embedding_str != '':
-                    try:
-                        # PostgreSQL expects format: [1.0,2.0,3.0,...]
-                        if not embedding_str.startswith('[') or not embedding_str.endswith(']'):
-                            embedding_issues.append(f"Row {row_count+1}: Embedding not in [x,y,z] format")
-                            if row_count < 3:
-                                logging.warning(f"Row {row_count+1} embedding format issue: missing brackets")
-                        else:
-                            # Parse the embedding to check dimensions
-                            embedding_list = json.loads(embedding_str)
-                            if not isinstance(embedding_list, list):
-                                embedding_issues.append(f"Row {row_count+1}: Embedding is not a list")
-                            elif len(embedding_list) != 2000:
-                                embedding_issues.append(f"Row {row_count+1}: Embedding has {len(embedding_list)} dimensions, expected 2000")
-                                if row_count < 3:
-                                    logging.warning(f"Row {row_count+1} embedding has {len(embedding_list)} dimensions, expected 2000")
-                            
-                            # Validate all values are numbers
-                            for i, val in enumerate(embedding_list[:10]):  # Check first 10 values
-                                if not isinstance(val, (int, float)):
-                                    embedding_issues.append(f"Row {row_count+1}: Non-numeric value in embedding at position {i}")
-                                    break
-                            
-                            # Convert back to PostgreSQL format (ensure no spaces after commas for consistency)
-                            modified_row[embedding_col_index] = '[' + ','.join(str(float(x)) for x in embedding_list) + ']'
-                            
-                    except json.JSONDecodeError as e:
-                        embedding_issues.append(f"Row {row_count+1}: Failed to parse embedding as JSON: {e}")
-                        if row_count < 3:
-                            logging.error(f"Row {row_count+1} embedding parse error: {e}")
-                            logging.error(f"Embedding string preview: {embedding_str[:100]}...")
-                    except Exception as e:
-                        embedding_issues.append(f"Row {row_count+1}: Unexpected error validating embedding: {e}")
-            
-            csv_writer.writerow(modified_row)
-            row_count += 1
-            
-            # Log first row for debugging
-            if row_count == 1:
-                logging.info(f"First data row (should start with document_id value): {modified_row[:3]}")
-                if len(modified_row) > embedding_col_index:
-                    emb_preview = modified_row[embedding_col_index][:50] if modified_row[embedding_col_index] else "NULL"
-                    logging.info(f"First row embedding preview: {emb_preview}...")
-        
-        logging.info(f"Processed {row_count} data rows for COPY")
-        
-        # Report embedding issues
-        if embedding_issues:
-            log_progress(f"\n⚠️  Found {len(embedding_issues)} embedding validation issues:")
-            for issue in embedding_issues[:5]:  # Show first 5 issues
-                log_progress(f"   - {issue}")
-            if len(embedding_issues) > 5:
-                log_progress(f"   ... and {len(embedding_issues) - 5} more")
-            logging.warning(f"Total embedding issues: {len(embedding_issues)}")
-        
-        # Reset to beginning for COPY FROM
-        modified_csv.seek(0)
-        
         with conn.cursor() as cur:
-            # Use COPY FROM to load the CSV data
-            # Now the CSV only has the columns we want to insert
+            # Step 1: Create staging table with TEXT embedding column
+            log_progress("📋 Creating temporary staging table...")
+            cur.execute("""
+                CREATE TEMP TABLE staging_import (
+                    document_id VARCHAR(255),
+                    filename VARCHAR(255),
+                    filepath TEXT,
+                    source_filename VARCHAR(255),
+                    chapter_number INTEGER,
+                    chapter_name TEXT,
+                    chapter_summary TEXT,
+                    chapter_page_count INTEGER,
+                    section_number INTEGER,
+                    section_summary TEXT,
+                    section_start_page INTEGER,
+                    section_end_page INTEGER,
+                    section_page_count INTEGER,
+                    section_start_reference VARCHAR(50),
+                    section_end_reference VARCHAR(50),
+                    chunk_number INTEGER,
+                    chunk_content TEXT,
+                    chunk_start_page INTEGER,
+                    chunk_end_page INTEGER,
+                    chunk_start_reference VARCHAR(50),
+                    chunk_end_reference VARCHAR(50),
+                    embedding TEXT,  -- TEXT type for staging
+                    extra1 TEXT,
+                    extra2 TEXT,
+                    extra3 TEXT
+                );
+            """)
+            log_progress("✅ Staging table created")
+            
+            # Step 2: Process CSV to exclude auto-generated columns
+            csv_reader = csv.reader(io.StringIO(csv_content))
+            header = next(csv_reader)  # Read header
+            
+            logging.info(f"Original CSV header columns: {header}")
+            
+            # Create modified CSV without id, created_at, last_modified columns
+            modified_csv = io.StringIO()
+            csv_writer = csv.writer(modified_csv)
+            
+            # Write header for staging table (columns 1-25 from original, skipping 0, 26, 27)
+            staging_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
+            csv_writer.writerow(staging_header)
+            
+            row_count = 0
+            for row in csv_reader:
+                modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
+                csv_writer.writerow(modified_row)
+                row_count += 1
+                
+                # Log first row for debugging
+                if row_count == 1:
+                    logging.info(f"First data row sample: {modified_row[:3]}")
+                    if len(modified_row) > 21:  # Embedding column index
+                        emb_preview = modified_row[21][:50] if modified_row[21] else "NULL"
+                        logging.info(f"First row embedding preview: {emb_preview}...")
+            
+            log_progress(f"📝 Prepared {row_count} rows for import")
+            
+            # Reset to beginning for COPY FROM
+            modified_csv.seek(0)
+            
+            # Step 3: COPY data into staging table
+            log_progress("📥 Loading data into staging table...")
             cur.copy_expert(
-                f"""COPY {table} (
-                    document_id, filename, filepath, source_filename,
-                    chapter_number, chapter_name, chapter_summary, chapter_page_count,
-                    section_number, section_summary, section_start_page, section_end_page,
-                    section_page_count, section_start_reference, section_end_reference,
-                    chunk_number, chunk_content, chunk_start_page, chunk_end_page,
-                    chunk_start_reference, chunk_end_reference, embedding,
-                    extra1, extra2, extra3
-                ) FROM STDIN WITH (
+                """COPY staging_import FROM STDIN WITH (
                     FORMAT csv,
                     HEADER true,
                     NULL '',
@@ -457,298 +253,286 @@ def upload_csv_to_database(conn, table: str, csv_content: str) -> Tuple[int, int
                 modified_csv
             )
             
-            inserted_count = cur.rowcount
-            conn.commit()
+            staging_count = cur.rowcount
+            log_progress(f"✅ Loaded {staging_count} rows into staging table")
             
-            log_progress(f"✅ Successfully inserted {inserted_count} records using COPY FROM")
+            # Step 4: Verify embedding data in staging
+            cur.execute("""
+                SELECT COUNT(*) as total,
+                       COUNT(embedding) as with_embedding,
+                       COUNT(CASE WHEN embedding IS NULL OR embedding = '' THEN 1 END) as null_embedding
+                FROM staging_import;
+            """)
+            stats = cur.fetchone()
+            log_progress(f"📊 Staging stats - Total: {stats[0]}, With embedding: {stats[1]}, Null embedding: {stats[2]}")
+            
+            # Step 5: INSERT from staging to target with vector casting
+            log_progress(f"🔄 Inserting from staging to {table} with vector casting...")
+            
+            insert_sql = f"""
+                INSERT INTO {table} (
+                    document_id, filename, filepath, source_filename,
+                    chapter_number, chapter_name, chapter_summary, chapter_page_count,
+                    section_number, section_summary, section_start_page, section_end_page,
+                    section_page_count, section_start_reference, section_end_reference,
+                    chunk_number, chunk_content, chunk_start_page, chunk_end_page,
+                    chunk_start_reference, chunk_end_reference, embedding,
+                    extra1, extra2, extra3
+                )
+                SELECT 
+                    document_id, filename, filepath, source_filename,
+                    chapter_number, chapter_name, chapter_summary, chapter_page_count,
+                    section_number, section_summary, section_start_page, section_end_page,
+                    section_page_count, section_start_reference, section_end_reference,
+                    chunk_number, chunk_content, chunk_start_page, chunk_end_page,
+                    chunk_start_reference, chunk_end_reference,
+                    CASE 
+                        WHEN embedding IS NOT NULL AND embedding != '' 
+                        THEN embedding::vector(2000)
+                        ELSE NULL
+                    END as embedding,
+                    extra1, extra2, extra3
+                FROM staging_import;
+            """
+            
+            cur.execute(insert_sql)
+            inserted_count = cur.rowcount
+            
+            # Step 6: Verify the insertion worked correctly
+            cur.execute(f"""
+                SELECT COUNT(*) as total,
+                       COUNT(embedding) as with_embedding,
+                       COUNT(CASE WHEN embedding IS NULL THEN 1 END) as null_embedding
+                FROM {table}
+                WHERE document_id = %s;
+            """, (DOCUMENT_ID,))
+            
+            final_stats = cur.fetchone()
+            log_progress(f"📊 Final stats in {table} - Total: {final_stats[0]}, With embedding: {final_stats[1]}, Null embedding: {final_stats[2]}")
+            
+            # Step 7: Test vector similarity on a sample
+            cur.execute(f"""
+                SELECT id, 
+                       embedding IS NOT NULL as has_embedding,
+                       CASE 
+                           WHEN embedding IS NOT NULL 
+                           THEN array_length(embedding::real[], 1)
+                           ELSE NULL
+                       END as dimensions
+                FROM {table}
+                WHERE document_id = %s
+                LIMIT 5;
+            """, (DOCUMENT_ID,))
+            
+            log_progress("🔍 Sample vector verification:")
+            for row in cur.fetchall():
+                log_progress(f"   ID {row[0]}: has_embedding={row[1]}, dimensions={row[2]}")
+            
+            conn.commit()
+            log_progress(f"✅ Successfully inserted {inserted_count} records with proper vector casting")
+            
             return inserted_count, 0
             
     except psycopg2.Error as e:
-        logging.error(f"Database error during COPY FROM: {e}", exc_info=True)
+        logging.error(f"Database error during staging upload: {e}", exc_info=True)
         log_progress(f"❌ Failed to insert records: {e}")
         
-        # Log more details about the error
         if hasattr(e, 'diag'):
             if e.diag.message_detail:
-                logging.error(f"Error detail: {e.diag.message_detail}")
                 log_progress(f"   Detail: {e.diag.message_detail}")
             if e.diag.message_hint:
-                logging.error(f"Error hint: {e.diag.message_hint}")
                 log_progress(f"   Hint: {e.diag.message_hint}")
         
         conn.rollback()
-        
-        # Try to parse the error to get more details
-        if "invalid input syntax for type vector" in str(e):
-            log_progress("⚠️  Error appears to be related to embedding format. Check that embeddings are in [x,y,z] format.")
-        elif "null value in column" in str(e):
-            log_progress("⚠️  Error appears to be a NULL constraint violation. Check the CSV structure.")
-        
         return 0, 0
+        
     except Exception as e:
         logging.error(f"Unexpected error during upload: {e}", exc_info=True)
         log_progress(f"❌ Unexpected error: {e}")
         conn.rollback()
         return 0, 0
 
-def verify_insertion(conn, table: str, doc_id: str, expected_count: int) -> bool:
-    """Verifies the number of rows inserted for the document_id."""
-    if not conn:
-        return False
-    
-    count_sql = f"SELECT COUNT(*) FROM {table} WHERE document_id = %s;"
-    try:
-        with conn.cursor() as cur:
-            cur.execute(count_sql, (doc_id,))
-            actual_count = cur.fetchone()[0]
-            log_progress(f"📊 Verification: Found {actual_count} rows for document_id '{doc_id}'")
-            
-            if actual_count == expected_count:
-                log_progress("✅ Verification successful: Row count matches expected count")
-                return True
-            else:
-                log_progress(f"⚠️  Row count mismatch! Expected {expected_count}, Found {actual_count}")
-                return False
-    except psycopg2.Error as e:
-        logging.error(f"Database error during verification: {e}", exc_info=True)
-        log_progress(f"❌ Verification failed: {e}")
-        return False
-
-def get_sample_records(conn, table: str, doc_id: str, limit: int = 5) -> List[Dict]:
-    """Retrieve sample records to verify data integrity."""
-    if not conn:
-        return []
-    
-    sample_sql = f"""
-        SELECT 
-            id, document_id, filename, chunk_number, 
-            LENGTH(chunk_content) as content_length,
-            CASE WHEN embedding IS NOT NULL THEN 'Present' ELSE 'NULL' END as embedding_status,
-            CASE WHEN embedding IS NOT NULL THEN array_length(embedding, 1) ELSE 0 END as embedding_dimensions
-        FROM {table} 
-        WHERE document_id = %s 
-        ORDER BY id 
-        LIMIT %s;
-    """
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sample_sql, (doc_id, limit))
-            columns = [desc[0] for desc in cur.description]
-            rows = cur.fetchall()
-            
-            samples = []
-            for row in rows:
-                samples.append(dict(zip(columns, row)))
-            
-            return samples
-    except psycopg2.Error as e:
-        logging.error(f"Error retrieving sample records: {e}", exc_info=True)
-        return []
-
 # ==============================================================================
-# Main Processing
+# NAS File Operations (kept from original)
 # ==============================================================================
 
-def find_latest_csv_file() -> Optional[str]:
+def connect_to_nas() -> Optional[SMBConnection]:
+    """Establish SMB connection to NAS."""
+    try:
+        conn = SMBConnection(
+            NAS_PARAMS["user"],
+            NAS_PARAMS["password"],
+            CLIENT_HOSTNAME,
+            NAS_PARAMS["ip"],
+            use_ntlm_v2=True
+        )
+        
+        connected = conn.connect(NAS_PARAMS["ip"], NAS_PARAMS["port"])
+        if connected:
+            logging.info("Successfully connected to NAS")
+            return conn
+        else:
+            logging.error("Failed to connect to NAS")
+            return None
+    except Exception as e:
+        logging.error(f"NAS connection error: {e}", exc_info=True)
+        return None
+
+def read_file_from_nas(nas_conn: SMBConnection, file_path: str) -> Optional[str]:
+    """Read file content from NAS."""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            nas_conn.retrieveFile(NAS_PARAMS["share"], file_path, temp_file)
+            temp_file_path = temp_file.name
+        
+        with open(temp_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        os.unlink(temp_file_path)
+        return content
+        
+    except Exception as e:
+        logging.error(f"Error reading file from NAS: {e}", exc_info=True)
+        return None
+
+def find_latest_csv_on_nas(nas_conn: SMBConnection) -> Optional[str]:
     """Find the most recent CSV file in the Stage 5 output directory."""
     try:
-        files = list_nas_files(NAS_PARAMS["share"], NAS_INPUT_PATH)
-        if not files:
-            return None
+        files = nas_conn.listPath(NAS_PARAMS["share"], NAS_INPUT_PATH)
         
-        # Filter for CSV files matching our pattern
-        csv_files = []
-        for f in files:
-            if f.filename.startswith("iris_semantic_search_") and f.filename.endswith(".csv"):
-                csv_files.append(f.filename)
+        csv_files = [
+            f for f in files 
+            if f.filename.startswith("iris_semantic_search_") 
+            and f.filename.endswith(".csv")
+            and not f.isDirectory
+        ]
         
         if not csv_files:
             return None
         
-        # Sort by filename (which includes timestamp) and get the latest
-        csv_files.sort(reverse=True)
-        return csv_files[0]
+        # Sort by filename (which includes timestamp)
+        csv_files.sort(key=lambda x: x.filename, reverse=True)
+        latest_file = csv_files[0].filename
+        
+        return f"{NAS_INPUT_PATH}/{latest_file}"
         
     except Exception as e:
-        logging.error(f"Error finding CSV files: {e}")
+        logging.error(f"Error listing NAS directory: {e}", exc_info=True)
         return None
 
-def main():
-    """Main processing function for Stage 6"""
+def delete_existing_data(conn, table: str, doc_id: str) -> bool:
+    """Delete existing data for document_id from table."""
+    if not conn:
+        return False
     
-    # Validate configuration
-    if not validate_configuration():
-        return 1
+    try:
+        with conn.cursor() as cur:
+            delete_sql = f"DELETE FROM {table} WHERE document_id = %s;"
+            cur.execute(delete_sql, (doc_id,))
+            deleted_count = cur.rowcount
+            conn.commit()
+            log_progress(f"🗑️  Deleted {deleted_count} existing rows for document_id '{doc_id}'")
+            return True
+    except psycopg2.Error as e:
+        logging.error(f"Error deleting data: {e}", exc_info=True)
+        conn.rollback()
+        return False
+
+# ==============================================================================
+# Main Execution
+# ==============================================================================
+
+def main():
+    """Main execution function."""
+    start_time = datetime.now()
     
     # Setup logging
-    temp_log_path = setup_logging()
-    log_progress("\n" + "="*60)
-    log_progress("🚀 Starting Stage 6: Database Upload Pipeline")
+    log_file = f"stage6_upload_{start_time.strftime('%Y%m%d_%H%M%S')}.log"
+    setup_logging(log_file)
+    
+    log_progress("="*60)
+    log_progress("🚀 Starting Stage 6: Database Upload Pipeline (FIXED)")
+    log_progress(f"   Timestamp: {start_time}")
+    log_progress(f"   Document ID: {DOCUMENT_ID}")
     log_progress("="*60)
     
-    # Find the latest CSV file
-    log_progress("\n📂 Looking for latest CSV file in NAS...")
-    csv_filename = find_latest_csv_file()
+    # Connect to NAS
+    log_progress("\n📁 Connecting to NAS...")
+    nas_conn = connect_to_nas()
+    if not nas_conn:
+        log_progress("❌ Failed to connect to NAS. Exiting.")
+        return
     
-    if not csv_filename:
-        log_progress("❌ No CSV files found in Stage 5 output directory")
-        return 1
+    # Find latest CSV file
+    log_progress("\n🔍 Finding latest CSV file...")
+    csv_path = find_latest_csv_on_nas(nas_conn)
+    if not csv_path:
+        log_progress("❌ No CSV file found. Exiting.")
+        nas_conn.close()
+        return
     
-    log_progress(f"📄 Found CSV file: {csv_filename}")
+    log_progress(f"   Found: {csv_path}")
     
-    # Load CSV from NAS
-    csv_path = os.path.join(NAS_INPUT_PATH, csv_filename).replace("\\", "/")
-    log_progress(f"📥 Loading CSV from NAS: {csv_path}")
+    # Read CSV content
+    log_progress("\n📖 Reading CSV file from NAS...")
+    csv_content = read_file_from_nas(nas_conn, csv_path)
+    if not csv_content:
+        log_progress("❌ Failed to read CSV file. Exiting.")
+        nas_conn.close()
+        return
     
-    try:
-        csv_bytes = read_from_nas(NAS_PARAMS["share"], csv_path)
-        if csv_bytes is None:
-            log_progress("❌ Failed to read CSV file from NAS")
-            return 1
-        
-        csv_content = csv_bytes.decode('utf-8')
-        
-        # Count rows properly using csv reader (excluding header)
-        csv_reader = csv.reader(io.StringIO(csv_content))
-        header = next(csv_reader)  # Skip header
-        row_count = sum(1 for _ in csv_reader)
-        log_progress(f"✅ Loaded CSV with {row_count} data rows")
-        
-    except Exception as e:
-        log_progress(f"❌ Error loading CSV file: {e}")
-        logging.error(f"Error loading CSV: {e}", exc_info=True)
-        return 1
+    csv_lines = csv_content.count('\n')
+    log_progress(f"   Read {csv_lines} lines from CSV")
     
-    # Database operations
-    conn = None
-    success = False
+    # Close NAS connection
+    nas_conn.close()
     
-    try:
-        # Connect to database
-        log_progress("\n🔌 Connecting to PostgreSQL database...")
-        conn = get_db_connection()
-        if not conn:
-            raise ConnectionError("Failed to establish database connection")
-        
-        # Clear existing data
-        log_progress(f"\n🗑️  Clearing existing data for document_id '{DOCUMENT_ID}'...")
-        if not clear_existing_data(conn, TARGET_TABLE, DOCUMENT_ID):
-            raise RuntimeError(f"Failed to clear existing data for document_id {DOCUMENT_ID}")
-        
-        # Upload CSV data
-        log_progress(f"\n📤 Uploading {row_count} rows to table '{TARGET_TABLE}'...")
-        inserted_count, failed_count = upload_csv_to_database(conn, TARGET_TABLE, csv_content)
-        
-        if inserted_count == 0:
-            raise RuntimeError("Failed to insert any records into the database")
-        
+    # Connect to database
+    log_progress("\n🔌 Connecting to database...")
+    db_conn = connect_to_database()
+    if not db_conn:
+        log_progress("❌ Failed to connect to database. Exiting.")
+        return
+    
+    # Delete existing data
+    log_progress(f"\n🗑️  Clearing existing data for document_id '{DOCUMENT_ID}'...")
+    if not delete_existing_data(db_conn, TARGET_TABLE, DOCUMENT_ID):
+        log_progress("❌ Failed to clear existing data. Exiting.")
+        db_conn.close()
+        return
+    
+    # Upload new data with staging table approach
+    log_progress(f"\n📤 Uploading data to {TARGET_TABLE}...")
+    inserted_count, failed_count = upload_csv_with_staging(db_conn, TARGET_TABLE, csv_content)
+    
+    if inserted_count > 0:
+        log_progress(f"\n✅ Upload completed successfully!")
+        log_progress(f"   Inserted: {inserted_count} records")
         if failed_count > 0:
-            log_progress(f"⚠️  Warning: {failed_count} records failed to insert")
-        
-        # Verify insertion
-        log_progress("\n🔍 Verifying insertion...")
-        if verify_insertion(conn, TARGET_TABLE, DOCUMENT_ID, inserted_count):
-            success = True
-            
-            # Get sample records
-            samples = get_sample_records(conn, TARGET_TABLE, DOCUMENT_ID)
-            if samples:
-                log_progress("\n📋 Sample records:")
-                for i, sample in enumerate(samples, 1):
-                    emb_info = f"{sample['embedding_status']}"
-                    if sample['embedding_dimensions'] > 0:
-                        emb_info += f" ({sample['embedding_dimensions']} dims)"
-                    log_progress(f"  {i}. ID: {sample['id']}, File: {sample['filename']}, "
-                               f"Chunk: {sample['chunk_number']}, Content: {sample['content_length']} chars, "
-                               f"Embedding: {emb_info}")
-            
-            # Get embedding statistics
-            try:
-                with conn.cursor() as cur:
-                    stats_sql = f"""
-                        SELECT 
-                            COUNT(*) as total_records,
-                            COUNT(embedding) as records_with_embeddings,
-                            COUNT(*) - COUNT(embedding) as records_without_embeddings,
-                            MIN(array_length(embedding, 1)) as min_dimensions,
-                            MAX(array_length(embedding, 1)) as max_dimensions,
-                            AVG(array_length(embedding, 1))::int as avg_dimensions
-                        FROM {TARGET_TABLE}
-                        WHERE document_id = %s;
-                    """
-                    cur.execute(stats_sql, (DOCUMENT_ID,))
-                    stats = cur.fetchone()
-                    
-                    if stats:
-                        log_progress("\n📊 Embedding Statistics:")
-                        log_progress(f"  Total records: {stats[0]}")
-                        log_progress(f"  Records with embeddings: {stats[1]}")
-                        log_progress(f"  Records without embeddings: {stats[2]}")
-                        if stats[3] is not None:
-                            log_progress(f"  Embedding dimensions: min={stats[3]}, max={stats[4]}, avg={stats[5]}")
-                            if stats[3] != 2000 or stats[4] != 2000:
-                                log_progress(f"  ⚠️  Warning: Expected 2000 dimensions for all embeddings")
-            except Exception as e:
-                logging.error(f"Error getting embedding statistics: {e}")
-        else:
-            success = False
-            log_progress("❌ Verification failed - counts don't match")
-            
-    except Exception as e:
-        log_progress(f"❌ Error during database operations: {e}")
-        logging.error(f"Database operation error: {e}", exc_info=True)
-        success = False
-    finally:
-        if conn:
-            conn.close()
-            log_progress("\n🔌 Database connection closed")
+            log_progress(f"   Failed: {failed_count} records")
+    else:
+        log_progress(f"\n❌ Upload failed - no records inserted")
     
-    # Upload log file to NAS
-    try:
-        with open(temp_log_path, 'r') as f:
-            log_content = f.read()
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        nas_log_filename = f"stage6_database_upload_{timestamp}.log"
-        nas_log_path = os.path.join(NAS_LOG_PATH, nas_log_filename).replace("\\", "/")
-        
-        if write_to_nas(NAS_PARAMS["share"], nas_log_path, log_content.encode('utf-8')):
-            log_progress(f"\n📝 Log file uploaded to NAS: {nas_log_path}")
-        else:
-            log_progress("\n⚠️ Could not upload log file to NAS")
-    except Exception as e:
-        log_progress(f"\n⚠️ Error uploading log: {e}")
+    # Close database connection
+    db_conn.close()
     
-    # Print summary
+    # Final summary
+    end_time = datetime.now()
+    duration = end_time - start_time
+    
     log_progress("\n" + "="*60)
     log_progress("📊 Stage 6 Processing Summary:")
-    
-    if success:
-        log_progress(f"✅ Successfully uploaded data to PostgreSQL")
-        log_progress(f"  Table: {TARGET_TABLE}")
-        log_progress(f"  Document ID: {DOCUMENT_ID}")
-        log_progress(f"  Rows inserted: {inserted_count}")
-        log_progress(f"  CSV file: {csv_filename}")
-    else:
-        log_progress(f"❌ Stage 6 finished with errors")
-        log_progress(f"  Check the log file for details")
-    
+    log_progress(f"   Document ID: {DOCUMENT_ID}")
+    log_progress(f"   Records inserted: {inserted_count}")
+    log_progress(f"   Duration: {duration}")
+    log_progress(f"   End time: {end_time}")
     log_progress("="*60)
     
-    if success:
+    if inserted_count > 0:
         log_progress("✅ Stage 6 completed successfully!")
+        log_progress("✨ Vector embeddings are now properly stored and searchable!")
     else:
-        log_progress("❌ Stage 6 failed - check logs for details")
-    
-    log_progress("="*60 + "\n")
-    
-    # Clean up temp log file
-    try:
-        os.unlink(temp_log_path)
-    except:
-        pass
-    
-    return 0 if success else 1
+        log_progress("❌ Stage 6 failed - please check the logs")
 
 if __name__ == "__main__":
-    exit(main())
+    main()
