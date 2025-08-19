@@ -507,8 +507,10 @@ def main():
         
         csv_content = csv_bytes.decode('utf-8')
         
-        # Count rows (excluding header)
-        row_count = csv_content.count('\n') - 1  # Subtract 1 for header
+        # Count rows properly using csv reader (excluding header)
+        csv_reader = csv.reader(io.StringIO(csv_content))
+        header = next(csv_reader)  # Skip header
+        row_count = sum(1 for _ in csv_reader)
         log_progress(f"✅ Loaded CSV with {row_count} data rows")
         
     except Exception as e:
