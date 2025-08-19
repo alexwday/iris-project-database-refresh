@@ -38,6 +38,7 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # Processing parameters
 VERBOSE_LOGGING = False
+DEBUG_MODE = False  # Set to True to include debug fields in output
 
 
 # ==============================================================================
@@ -126,20 +127,28 @@ def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) 
             # If we were tracking a previous page without a footer, end it here
             if current_page is not None and current_page != page_num:
                 ranges.append((page_start, pos - 1, current_page))
-            
-            # Start tracking this page
-            current_page = page_num
-            page_start = pos
+                current_page = page_num
+                page_start = pos
+            elif current_page != page_num:
+                # Start tracking this page (no previous page being tracked)
+                current_page = page_num
+                page_start = pos
+            # else: duplicate header for same page - ignore it
             
         elif tag_type == 'footer':
             # This should be the end of the current page
             if current_page == page_num:
                 # Find the actual end of the footer tag
-                footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+100])
-                if footer_match:
-                    page_end = pos + footer_match.end() - 1
+                footer_end_pos = content.find('-->', pos)
+                if footer_end_pos != -1:
+                    page_end = footer_end_pos + 2  # +3 for '-->' -1 for inclusive
                 else:
-                    page_end = pos + 50  # Estimate
+                    # Fallback to regex with larger window
+                    footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+200])
+                    if footer_match:
+                        page_end = pos + footer_match.end() - 1
+                    else:
+                        page_end = pos + 54  # Typical footer length
                 
                 ranges.append((page_start, page_end, current_page))
                 current_page = None
@@ -158,11 +167,16 @@ def build_page_ranges(page_tags: List[Tuple[int, str, int, str]], content: str) 
                     page_start = 0
                 
                 # Find the actual end of the footer tag
-                footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+100])
-                if footer_match:
-                    page_end = pos + footer_match.end() - 1
+                footer_end_pos = content.find('-->', pos)
+                if footer_end_pos != -1:
+                    page_end = footer_end_pos + 2  # +3 for '-->' -1 for inclusive
                 else:
-                    page_end = pos + 50  # Estimate
+                    # Fallback to regex with larger window
+                    footer_match = re.search(r'<!-- PageFooter[^>]*?-->', content[pos:pos+200])
+                    if footer_match:
+                        page_end = pos + footer_match.end() - 1
+                    else:
+                        page_end = pos + 54  # Typical footer length
                 
                 ranges.append((page_start, page_end, page_num))
     
@@ -284,11 +298,9 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
     for section in chapter_sections:
         section_num = section.get('section_number', 0)
         
-        # Store original values
+        # Store original values for comparison (not in output)
         original_start = section.get('section_start_page')
         original_end = section.get('section_end_page')
-        section['original_start_page'] = original_start
-        section['original_end_page'] = original_end
         
         # Get section position in concatenated content
         if section_num not in section_positions:
@@ -308,17 +320,20 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             section['section_start_page'] = new_start
             section['section_end_page'] = new_end
             section['section_page_count'] = new_end - new_start + 1
-            section['page_boundary_method'] = 'tag_found'
+            
+            # Add debug fields if enabled
+            if DEBUG_MODE:
+                section['original_start_page'] = original_start
+                section['original_end_page'] = original_end
+                section['page_boundary_method'] = 'tag_found'
+                section['page_correction_applied'] = (original_start != new_start or original_end != new_end)
             
             stats['tag_found'] += 1
             
             # Check if correction was needed
             if original_start != new_start or original_end != new_end:
-                section['page_correction_applied'] = True
                 stats['corrected'] += 1
                 logging.info(f"Section {section_num}: Corrected from pages {original_start}-{original_end} to {new_start}-{new_end}")
-            else:
-                section['page_correction_applied'] = False
         else:
             # No direct page overlap - need to infer
             stats['position_inferred'] += 1
@@ -331,8 +346,15 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             # First section with no page info - set to page 1
             first['section_start_page'] = 1
             first['section_end_page'] = 1  # Will be adjusted if we find next section info
-            first['page_boundary_method'] = 'first_section_rule'
-            first['page_correction_applied'] = True
+            first['section_page_count'] = 1
+            
+            # Add debug fields if enabled
+            if DEBUG_MODE:
+                first['original_start_page'] = None
+                first['original_end_page'] = None
+                first['page_boundary_method'] = 'first_section_rule'
+                first['page_correction_applied'] = True
+            
             stats['inferred'] += 1
             stats['corrected'] += 1
             logging.info(f"Section 1: Set to page 1 (first section rule)")
@@ -343,6 +365,10 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
     # Step 5: Handle sections without direct page assignments
     for i, section in enumerate(chapter_sections):
         if section.get('section_start_page') is None:
+            # Store original values for debug mode
+            original_start = section.get('section_start_page')
+            original_end = section.get('section_end_page')
+            
             # Try to infer from neighbors
             inferred = False
             
@@ -389,14 +415,17 @@ def process_chapter(chapter_sections: List[Dict]) -> Tuple[List[Dict], Dict]:
             
             if inferred:
                 section['section_page_count'] = section['section_end_page'] - section['section_start_page'] + 1
-                section['page_boundary_method'] = 'position_inferred'
-                section['page_correction_applied'] = True
+                
+                # Add debug fields if enabled
+                if DEBUG_MODE:
+                    section['original_start_page'] = original_start  # Note: original_start is from earlier in function
+                    section['original_end_page'] = original_end
+                    section['page_boundary_method'] = 'position_inferred'
+                    section['page_correction_applied'] = True
+                
                 stats['inferred'] += 1
                 stats['corrected'] += 1
-                
-                original_start = section.get('original_start_page')
-                original_end = section.get('original_end_page')
-                logging.info(f"Section {section.get('section_number', '?')}: Inferred pages {section['section_start_page']}-{section['section_end_page']} (was {original_start}-{original_end})")
+                logging.info(f"Section {section.get('section_number', '?')}: Inferred pages {section['section_start_page']}-{section['section_end_page']}")
     
     # Step 6: Validate and fix continuity
     chapter_sections = validate_and_fix_continuity(chapter_sections, stats)
@@ -437,7 +466,6 @@ def validate_and_fix_continuity(sections: List[Dict], stats: Dict) -> List[Dict]
             if next_start > current.get('section_start_page', 0):
                 current['section_end_page'] = next_start - 1
                 current['section_page_count'] = current['section_end_page'] - current['section_start_page'] + 1
-                current['page_boundary_method'] = 'continuity_fixed'
                 stats['continuity_fixed'] += 1
                 logging.info(f"Fixed overlap: Section {i+1} now ends at page {current['section_end_page']}")
     
