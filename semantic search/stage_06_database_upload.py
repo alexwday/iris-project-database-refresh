@@ -7,7 +7,8 @@ clears the ENTIRE table, and inserts all records with proper vector handling.
 
 Key Features:
 - Reads master CSV database file from NAS (master_database.csv)
-- Clears entire PostgreSQL table (not just specific document_id)
+- Clears entire PostgreSQL table using DELETE (works with standard permissions)
+- Falls back to batch deletion if needed for large tables
 - Uploads all records from master CSV
 - Connects to PostgreSQL using psycopg2 and pgvector
 - Creates temporary staging table for CSV import
@@ -481,17 +482,48 @@ def clear_entire_table(conn, table: str) -> bool:
             cur.execute(f"SELECT COUNT(*) FROM {table};")
             before_count = cur.fetchone()[0]
             
-            # TRUNCATE is faster than DELETE for entire table
-            truncate_sql = f"TRUNCATE TABLE {table} RESTART IDENTITY;"
-            cur.execute(truncate_sql)
+            # Use DELETE instead of TRUNCATE (doesn't require special permissions)
+            delete_sql = f"DELETE FROM {table};"
+            cur.execute(delete_sql)
+            deleted_count = cur.rowcount
             conn.commit()
             
-            log_progress(f"🗑️  Cleared entire table: {before_count} records removed")
+            log_progress(f"🗑️  Cleared entire table: {deleted_count} records removed")
+            
+            # Optional: Reset sequence if needed (may fail without permissions)
+            try:
+                cur.execute(f"ALTER SEQUENCE {table}_id_seq RESTART WITH 1;")
+                conn.commit()
+                log_progress("   ID sequence reset to 1")
+            except:
+                # Sequence reset is optional, continue if it fails
+                pass
+                
             return True
     except psycopg2.Error as e:
         logging.error(f"Error clearing table: {e}", exc_info=True)
-        conn.rollback()
-        return False
+        log_progress(f"❌ Failed to clear table: {e}")
+        
+        # If DELETE fails, try alternative approach
+        try:
+            conn.rollback()
+            log_progress("   Trying alternative: DELETE with smaller batches...")
+            with conn.cursor() as cur:
+                # Delete in batches to avoid locks/timeouts
+                while True:
+                    cur.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM {table} LIMIT 10000);")
+                    batch_deleted = cur.rowcount
+                    conn.commit()
+                    if batch_deleted == 0:
+                        break
+                    log_progress(f"   Deleted batch of {batch_deleted} records...")
+                
+                log_progress(f"🗑️  Table cleared using batch deletion")
+                return True
+        except Exception as batch_error:
+            logging.error(f"Batch deletion also failed: {batch_error}")
+            conn.rollback()
+            return False
 
 # ==============================================================================
 # Main Execution
