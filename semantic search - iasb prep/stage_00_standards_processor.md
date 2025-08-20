@@ -69,8 +69,9 @@ def sort_merged_pdfs(pdf_files):
     # Sort by standard number
     parsed_files.sort(key=lambda x: x['number'])
     
-    # Assign chapter numbers sequentially
-    for idx, parsed in enumerate(parsed_files, start=1):
+    # Use actual standard number as chapter number
+    for parsed in parsed_files:
+        chapter_number = parsed['number']  # e.g., 2, 7, 12
         chapter_name = f"{standard.upper()} {number} - {name_formatted}"
         # Returns: (filename, chapter_number, chapter_name)
 ```
@@ -80,10 +81,12 @@ def sort_merged_pdfs(pdf_files):
 Input Order:              Sorted Order (Chapter #):
 ias-8-accounting.pdf  →   Chapter 1: IAS 1 - Presentation
 ias-2-inventories.pdf →   Chapter 2: IAS 2 - Inventories
-ias-1-presentation.pdf →  Chapter 3: IAS 7 - Cash Flows
-ias-12-income-taxes.pdf → Chapter 4: IAS 8 - Accounting
-ias-7-cash-flows.pdf  →   Chapter 5: IAS 12 - Income Taxes
+ias-1-presentation.pdf →  Chapter 7: IAS 7 - Cash Flows
+ias-12-income-taxes.pdf → Chapter 8: IAS 8 - Accounting
+ias-7-cash-flows.pdf  →   Chapter 12: IAS 12 - Income Taxes
 ```
+
+Note: Chapter numbers match the actual standard numbers (not sequential)
 
 ### 2. Page Extraction (From EY Prep)
 ```python
@@ -185,7 +188,9 @@ semantic_search/prep_output/iasb/{standard}/chapters_YYYYMMDD_HHMMSS/
 
 ### Chapter PDF Naming Convention:
 - **Format**: `{chapter_num:02d}_{standard}_{number}_{name}.pdf`
-- **Example**: `01_ias_1_presentation_of_financial_statements.pdf`
+- **Example**: `01_ias_1_presentation_of_financial_statements.pdf` (for IAS 1)
+- **Example**: `07_ias_7_statement_of_cash_flows.pdf` (for IAS 7)
+- **Example**: `12_ias_12_income_taxes.pdf` (for IAS 12)
 
 ### JSON Output Format (Matching EY Prep):
 ```json
@@ -225,9 +230,9 @@ semantic_search/prep_output/iasb/{standard}/chapters_YYYYMMDD_HHMMSS/
 - `content`: Markdown with PageNumber tags removed
 
 #### Chapter Fields (New Logic):
-- `chapter_number`: Based on sorted standard number
+- `chapter_number`: Actual standard number (e.g., 1, 2, 7, 12)
 - `chapter_name`: Formatted as "{STANDARD} {number} - {name}"
-- `filename`: Chapter-specific PDF (not individual pages)
+- `filename`: Chapter-specific PDF with standard number prefix
 - `page_number`: Sequential within chapter (1, 2, 3...)
 
 #### Source Tracking (Matching EY Prep):

@@ -342,7 +342,7 @@ def parse_merged_filename(filename: str) -> Optional[Dict]:
 
 def sort_merged_pdfs(pdf_files: List[str]) -> List[Tuple[str, int, str]]:
     """
-    Sort PDF files by standard number and assign chapter numbers.
+    Sort PDF files by standard number and use standard number as chapter number.
     
     Returns:
         List of tuples: (filename, chapter_number, chapter_name)
@@ -357,13 +357,15 @@ def sort_merged_pdfs(pdf_files: List[str]) -> List[Tuple[str, int, str]]:
     # Sort by standard number
     parsed_files.sort(key=lambda x: x['number'])
     
-    # Assign chapter numbers and format chapter names
+    # Use actual standard number as chapter number
     result = []
-    for idx, parsed in enumerate(parsed_files, start=1):
+    for parsed in parsed_files:
+        # Use the standard number as the chapter number
+        chapter_number = parsed['number']
         # Format chapter name: "IAS 2 - Inventories"
         chapter_name = f"{parsed['standard'].upper()} {parsed['number']} - {parsed['name_formatted']}"
-        result.append((parsed['filename'], idx, chapter_name))
-        logging.info(f"Chapter {idx}: {chapter_name} ({parsed['filename']})")
+        result.append((parsed['filename'], chapter_number, chapter_name))
+        logging.info(f"Chapter {chapter_number}: {chapter_name} ({parsed['filename']})")
     
     return result
 
