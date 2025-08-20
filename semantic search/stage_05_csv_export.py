@@ -9,7 +9,8 @@ Key Features:
 - Automatically updates/replaces data for specific document_ids
 - Creates the master CSV if it doesn't exist
 - Filters and replaces existing document data when updating
-- Creates timestamped backup copies
+- Creates timestamped backup copies in backups/ subdirectory
+- Creates timestamped deployment copy for IT pickup
 - Validates data against PostgreSQL schema requirements
 - Handles NULL values appropriately for auto-generated fields
 
@@ -17,18 +18,21 @@ Input: JSON file from Stage 4 output (stage4_embedded_chunks.json)
 Output: 
   - Master CSV database at configured path (master_database.csv)
   - Timestamped backup copies in backups/ subdirectory
+  - Timestamped deployment copy in deployment folder (iris_semantic_search_YYYY-MM-DD_HH-MM-SS.csv)
 
 Usage:
   python stage_05_csv_export.py [options]
   
 Options:
-  --document-id ID    Document ID to update in master CSV
-  --master-csv PATH   Path to master CSV file on NAS (relative to share)
-  --verbose          Enable verbose logging
+  --document-id ID           Document ID to update in master CSV
+  --master-csv PATH          Path to master CSV file on NAS (relative to share)
+  --deployment-folder PATH   Path to deployment folder on NAS (relative to share)
+  --verbose                  Enable verbose logging
   
 Environment Variables:
-  STAGE5_DOCUMENT_ID  Document ID (if not provided via CLI)
-  STAGE5_MASTER_CSV   Master CSV path (if not provided via CLI)
+  STAGE5_DOCUMENT_ID         Document ID (if not provided via CLI)
+  STAGE5_MASTER_CSV          Master CSV path (if not provided via CLI)
+  STAGE5_DEPLOYMENT_FOLDER   Deployment folder path (if not provided via CLI)
 """
 
 import os
@@ -77,6 +81,10 @@ NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
 # --- Master CSV Configuration ---
 MASTER_CSV_PATH = "semantic_search/pipeline_output/stage5/master_database.csv"  # Master CSV on NAS
 DOCUMENT_ID = None  # Will be extracted from input data or set via config
+
+# --- Deployment Configuration ---
+NAS_DEPLOYMENT_FOLDER_PATH = "semantic_search/deployment"  # Deployment folder for IT pickup
+DEPLOYMENT_PREFIX = "iris_semantic_search"  # Prefix for timestamped deployment files
 
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
@@ -577,6 +585,7 @@ def main():
     # Use local variables instead of modifying globals
     document_id_to_use = DOCUMENT_ID
     master_csv_path_to_use = MASTER_CSV_PATH
+    deployment_folder_to_use = NAS_DEPLOYMENT_FOLDER_PATH
     verbose_logging_to_use = VERBOSE_LOGGING
     
     # Parse command-line arguments if running as script
@@ -584,6 +593,7 @@ def main():
         parser = argparse.ArgumentParser(description="Stage 5: CSV Export Pipeline with Master Database Management")
         parser.add_argument("--document-id", help="Document ID to update in master CSV")
         parser.add_argument("--master-csv", help="Path to master CSV file on NAS (relative to share)")
+        parser.add_argument("--deployment-folder", help="Path to deployment folder on NAS (relative to share)")
         parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
         args = parser.parse_args()
         
@@ -595,6 +605,10 @@ def main():
         if args.master_csv:
             master_csv_path_to_use = args.master_csv
             log_progress(f"Using master CSV path from CLI: {master_csv_path_to_use}")
+        
+        if args.deployment_folder:
+            deployment_folder_to_use = args.deployment_folder
+            log_progress(f"Using deployment folder from CLI: {deployment_folder_to_use}")
         
         if args.verbose:
             verbose_logging_to_use = True
@@ -610,6 +624,10 @@ def main():
     if os.environ.get("STAGE5_MASTER_CSV"):
         master_csv_path_to_use = os.environ.get("STAGE5_MASTER_CSV")
         log_progress(f"Using master CSV path from environment: {master_csv_path_to_use}")
+    
+    if os.environ.get("STAGE5_DEPLOYMENT_FOLDER"):
+        deployment_folder_to_use = os.environ.get("STAGE5_DEPLOYMENT_FOLDER")
+        log_progress(f"Using deployment folder from environment: {deployment_folder_to_use}")
     
     # Validate configuration
     if not validate_configuration():
@@ -695,6 +713,17 @@ def main():
     else:
         log_progress("⚠️ Failed to save backup (master CSV was saved successfully)")
     
+    # Create timestamped deployment copy for IT pickup
+    deployment_filename = f"{DEPLOYMENT_PREFIX}_{timestamp}.csv"
+    deployment_path = os.path.join(deployment_folder_to_use, deployment_filename).replace("\\", "/")
+    
+    log_progress(f"\n🚀 Creating deployment copy for IT pickup: {deployment_filename}")
+    if write_to_nas(NAS_PARAMS["share"], deployment_path, csv_bytes):
+        log_progress(f"✅ Deployment file created successfully")
+        log_progress(f"   Location: {deployment_path}")
+    else:
+        log_progress("⚠️ Failed to create deployment copy (master CSV was saved successfully)")
+    
     # Upload log file to NAS
     try:
         with open(temp_log_path, 'r') as f:
@@ -730,6 +759,7 @@ def main():
     log_progress("="*60)
     log_progress("✅ Stage 5 processing completed successfully!")
     log_progress(f"📄 Master CSV updated at: {master_csv_path_to_use}")
+    log_progress(f"🚀 Deployment file ready for IT: {deployment_filename}")
     if document_id_to_use:
         log_progress(f"🔄 Document '{document_id_to_use}' has been updated in the master database")
     log_progress("="*60 + "\n")
