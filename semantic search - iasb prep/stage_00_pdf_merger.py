@@ -89,7 +89,6 @@ def create_nas_connection():
         if not connected:
             logging.error("Failed to connect to NAS.")
             return None
-        logging.debug(f"Successfully connected to NAS: {NAS_PARAMS['ip']}:{NAS_PARAMS['port']}")
         return conn
     except Exception as e:
         logging.error(f"Exception creating NAS connection: {e}")
@@ -109,9 +108,7 @@ def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
             current_path = os.path.join(current_path, part).replace('\\', '/')
             try:
                 conn.listPath(share_name, current_path)
-                logging.debug(f"Directory exists: {current_path}")
             except Exception:
-                logging.info(f"Creating directory on NAS: {share_name}/{current_path}")
                 conn.createDirectory(share_name, current_path)
         return True
     except Exception as e:
@@ -121,7 +118,6 @@ def ensure_nas_dir_exists(conn, share_name, dir_path_relative):
 def write_to_nas(share_name, nas_path_relative, content_bytes):
     """Writes bytes to a file path on the NAS using pysmb."""
     conn = None
-    logging.info(f"Attempting to write to NAS path: {share_name}/{nas_path_relative}")
     try:
         conn = create_nas_connection()
         if not conn:
@@ -134,7 +130,6 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
 
         file_obj = io.BytesIO(content_bytes)
         bytes_written = conn.storeFile(share_name, nas_path_relative, file_obj)
-        logging.info(f"Successfully wrote {bytes_written} bytes to: {share_name}/{nas_path_relative}")
         return True
     except Exception as e:
         logging.error(f"Unexpected error writing to NAS '{share_name}/{nas_path_relative}': {e}")
@@ -146,7 +141,6 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
 def read_from_nas(share_name, nas_path_relative):
     """Reads content (as bytes) from a file path on the NAS using pysmb."""
     conn = None
-    logging.debug(f"Attempting to read from NAS path: {share_name}/{nas_path_relative}")
     try:
         conn = create_nas_connection()
         if not conn:
@@ -156,7 +150,6 @@ def read_from_nas(share_name, nas_path_relative):
         file_attributes, filesize = conn.retrieveFile(share_name, nas_path_relative, file_obj)
         file_obj.seek(0)
         content_bytes = file_obj.read()
-        logging.debug(f"Successfully read {filesize} bytes from: {share_name}/{nas_path_relative}")
         return content_bytes
     except Exception as e:
         logging.error(f"Unexpected error reading from NAS '{share_name}/{nas_path_relative}': {e}")
@@ -168,7 +161,6 @@ def read_from_nas(share_name, nas_path_relative):
 def download_from_nas(share_name, nas_path_relative, local_temp_dir):
     """Downloads a file from NAS to a local temporary directory."""
     local_file_path = os.path.join(local_temp_dir, os.path.basename(nas_path_relative))
-    logging.debug(f"Attempting to download from NAS: {share_name}/{nas_path_relative}")
     
     content_bytes = read_from_nas(share_name, nas_path_relative)
     if content_bytes is None:
@@ -177,7 +169,6 @@ def download_from_nas(share_name, nas_path_relative, local_temp_dir):
     try:
         with open(local_file_path, 'wb') as f:
             f.write(content_bytes)
-        logging.debug(f"Downloaded to: {local_file_path}")
         return local_file_path
     except Exception as e:
         logging.error(f"Failed to write downloaded file to {local_file_path}: {e}")
@@ -216,22 +207,18 @@ def setup_logging(standard_type: str):
     # Configure logging to write to temp file
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+        format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(temp_log_path),
             logging.StreamHandler()
         ]
     )
     
-    # Suppress pypdf warnings
+    # Suppress all unnecessary logging
     logging.getLogger("pypdf").setLevel(logging.ERROR)
+    logging.getLogger("SMB").setLevel(logging.ERROR)
+    logging.getLogger("SMB.SMBConnection").setLevel(logging.ERROR)
     
-    # Suppress SMB connection details
-    logging.getLogger("SMB").setLevel(logging.WARNING)
-    logging.getLogger("SMB.SMBConnection").setLevel(logging.WARNING)
-    
-    # Log the temp path for later upload
-    logging.info(f"Temporary log file: {temp_log_path}")
     return temp_log_path
 
 # ==============================================================================
@@ -274,7 +261,7 @@ def parse_filename(filename: str) -> Optional[Dict]:
         'base_filename': f"{base_key}.pdf"
     }
 
-def group_files_by_standard(pdf_files: List[str], standard_type: str) -> Dict[str, List[Dict]]:
+def group_files_by_standard(pdf_files: List[str], standard_type: str) -> Tuple[Dict[str, List[Dict]], List[str], List[str]]:
     """
     Group PDF files by their standard-number-name combination.
     
@@ -283,18 +270,24 @@ def group_files_by_standard(pdf_files: List[str], standard_type: str) -> Dict[st
         standard_type: The standard type to filter for (ias, ifrs, ifric, sic)
     
     Returns:
-        Dictionary mapping base_key to list of parsed file info, sorted by prefix priority
+        Tuple of:
+        - Dictionary mapping base_key to list of parsed file info, sorted by prefix priority
+        - List of skipped files (wrong standard)
+        - List of invalid files (wrong pattern)
     """
     groups = defaultdict(list)
+    skipped_files = []
+    invalid_files = []
     
     for filename in pdf_files:
         parsed = parse_filename(filename)
         if not parsed:
+            invalid_files.append(filename)
             continue
         
         # Filter for the specified standard type
         if parsed['standard'] != standard_type.lower():
-            logging.debug(f"Skipping {filename} - not {standard_type}")
+            skipped_files.append(filename)
             continue
         
         groups[parsed['base_key']].append(parsed)
@@ -303,11 +296,10 @@ def group_files_by_standard(pdf_files: List[str], standard_type: str) -> Dict[st
     prefix_priority = {'': 0, 'B': 1, 'C': 2}
     for base_key in groups:
         groups[base_key].sort(key=lambda x: prefix_priority.get(x['prefix'], 999))
-        logging.info(f"Group {base_key}: {[f['filename'] for f in groups[base_key]]}")
     
-    return dict(groups)
+    return dict(groups), skipped_files, invalid_files
 
-def merge_pdf_group(pdf_paths: List[str], output_path: str) -> bool:
+def merge_pdf_group(pdf_paths: List[str], output_path: str) -> Tuple[bool, int]:
     """
     Merge multiple PDFs into a single file in the specified order.
     
@@ -316,14 +308,13 @@ def merge_pdf_group(pdf_paths: List[str], output_path: str) -> bool:
         output_path: Path for the merged output PDF
     
     Returns:
-        True if successful, False otherwise
+        Tuple of (success, total_pages)
     """
     try:
         writer = PdfWriter()
         total_pages = 0
         
         for pdf_path in pdf_paths:
-            logging.info(f"  Adding: {os.path.basename(pdf_path)}")
             reader = PdfReader(pdf_path)
             num_pages = len(reader.pages)
             
@@ -335,12 +326,11 @@ def merge_pdf_group(pdf_paths: List[str], output_path: str) -> bool:
         with open(output_path, 'wb') as output_file:
             writer.write(output_file)
         
-        logging.info(f"  Merged {len(pdf_paths)} files into {os.path.basename(output_path)} ({total_pages} total pages)")
-        return True
+        return True, total_pages
         
     except Exception as e:
         logging.error(f"Failed to merge PDFs: {e}")
-        return False
+        return False, 0
 
 def process_all_pdfs(nas_input_path: str, nas_output_path: str, standard_type: str):
     """
@@ -354,7 +344,7 @@ def process_all_pdfs(nas_input_path: str, nas_output_path: str, standard_type: s
     share_name = NAS_PARAMS["share"]
     
     # List all files in the input directory
-    logging.info(f"Listing files in NAS path: {share_name}/{nas_input_path}")
+    logging.info(f"Scanning input directory: {nas_input_path}")
     nas_files = list_nas_directory(share_name, nas_input_path)
     
     # Filter for PDF files
@@ -362,19 +352,38 @@ def process_all_pdfs(nas_input_path: str, nas_output_path: str, standard_type: s
                  if f.filename.lower().endswith('.pdf') and not f.isDirectory]
     
     if not pdf_files:
-        logging.warning(f"No PDF files found in {share_name}/{nas_input_path}")
+        logging.error(f"No PDF files found in input directory")
         return
     
-    logging.info(f"Found {len(pdf_files)} PDF files to process")
+    logging.info(f"Found {len(pdf_files)} PDF files in input directory")
     
     # Group files by standard-number-name
-    file_groups = group_files_by_standard(pdf_files, standard_type)
+    file_groups, skipped_files, invalid_files = group_files_by_standard(pdf_files, standard_type)
+    
+    # Log file categorization
+    logging.info("=" * 60)
+    logging.info(f"File Analysis for {standard_type.upper()} Processing:")
+    logging.info(f"  Total input files: {len(pdf_files)}")
+    logging.info(f"  {standard_type.upper()} files to process: {sum(len(g) for g in file_groups.values())}")
+    logging.info(f"  Standards to merge: {len(file_groups)}")
+    
+    if skipped_files:
+        logging.info(f"  Skipped (wrong standard): {len(skipped_files)}")
+        for f in skipped_files[:5]:  # Show first 5
+            logging.info(f"    - {f}")
+        if len(skipped_files) > 5:
+            logging.info(f"    ... and {len(skipped_files) - 5} more")
+    
+    if invalid_files:
+        logging.warning(f"  Invalid filename pattern: {len(invalid_files)}")
+        for f in invalid_files:
+            logging.warning(f"    - {f}")
+    
+    logging.info("=" * 60)
     
     if not file_groups:
-        logging.warning(f"No {standard_type.upper()} files found to merge")
+        logging.error(f"No {standard_type.upper()} files found to merge")
         return
-    
-    logging.info(f"Found {len(file_groups)} unique {standard_type.upper()} standards to process")
     
     # Create temporary directory for processing
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -391,41 +400,63 @@ def process_all_pdfs(nas_input_path: str, nas_output_path: str, standard_type: s
             else:
                 logging.error(f"Failed to download {filename}")
         
+        # Track processing statistics
+        total_input_files = sum(len(g) for g in file_groups.values())
+        files_processed = []
+        files_failed = []
+        
         # Process each group
         merged_files = []
+        logging.info("\nStarting merge process...")
+        
         for base_key, file_infos in tqdm(file_groups.items(), desc="Merging PDF groups"):
-            logging.info(f"\nProcessing group: {base_key}")
-            
             # Get local paths for this group in order
             local_paths = []
+            group_files = []
+            
             for file_info in file_infos:
+                group_files.append(file_info['filename'])
                 if file_info['filename'] in local_files:
                     local_paths.append(local_files[file_info['filename']])
+                    files_processed.append(file_info['filename'])
                 else:
-                    logging.warning(f"  Missing local file: {file_info['filename']}")
+                    logging.error(f"Missing download for: {file_info['filename']}")
+                    files_failed.append(file_info['filename'])
             
             if not local_paths:
-                logging.error(f"  No files available for merging in group {base_key}")
+                logging.error(f"Skipping {base_key}: no files available")
                 continue
+            
+            # Log group details
+            prefixes = [f['prefix'] or 'base' for f in file_infos]
+            logging.info(f"Merging {base_key}: {len(local_paths)} files ({', '.join(prefixes)})")
             
             # Output filename is the base filename (no prefix)
             output_filename = file_infos[0]['base_filename']
             temp_output_path = os.path.join(temp_dir, output_filename)
             
             # Merge the PDFs
-            if merge_pdf_group(local_paths, temp_output_path):
+            success, total_pages = merge_pdf_group(local_paths, temp_output_path)
+            if success:
                 merged_files.append({
                     'filename': output_filename,
                     'local_path': temp_output_path,
                     'file_count': len(local_paths),
-                    'standard_number': file_infos[0]['number']
+                    'source_files': group_files,
+                    'standard_number': file_infos[0]['number'],
+                    'total_pages': total_pages
                 })
+                logging.info(f"  → Created {output_filename} ({total_pages} pages)")
+            else:
+                logging.error(f"  → Failed to merge {base_key}")
+                files_failed.extend(group_files)
         
         # Upload merged PDFs to NAS
         logging.info(f"\nUploading {len(merged_files)} merged PDFs to NAS...")
         successful_uploads = 0
+        failed_uploads = []
         
-        for merged_file in tqdm(merged_files, desc="Uploading to NAS"):
+        for merged_file in tqdm(merged_files, desc="Uploading"):
             nas_output_file = os.path.join(nas_output_path, merged_file['filename']).replace('\\', '/')
             
             try:
@@ -434,13 +465,44 @@ def process_all_pdfs(nas_input_path: str, nas_output_path: str, standard_type: s
                 
                 if write_to_nas(share_name, nas_output_file, pdf_bytes):
                     successful_uploads += 1
-                    logging.info(f"Uploaded: {merged_file['filename']}")
                 else:
-                    logging.error(f"Failed to upload: {merged_file['filename']}")
+                    failed_uploads.append(merged_file['filename'])
             except Exception as e:
                 logging.error(f"Error uploading {merged_file['filename']}: {e}")
+                failed_uploads.append(merged_file['filename'])
         
-        logging.info(f"Successfully uploaded {successful_uploads}/{len(merged_files)} merged PDFs")
+        # Final validation and summary
+        logging.info("\n" + "=" * 60)
+        logging.info("PROCESSING SUMMARY")
+        logging.info("=" * 60)
+        logging.info(f"Input Files:")
+        logging.info(f"  Total PDFs found: {len(pdf_files)}")
+        logging.info(f"  {standard_type.upper()} files: {total_input_files}")
+        logging.info(f"  Files processed: {len(files_processed)}")
+        logging.info(f"  Files failed: {len(files_failed)}")
+        
+        logging.info(f"\nOutput Files:")
+        logging.info(f"  Standards merged: {len(merged_files)}")
+        logging.info(f"  Successfully uploaded: {successful_uploads}")
+        logging.info(f"  Failed uploads: {len(failed_uploads)}")
+        
+        # Validation check
+        if len(files_processed) != total_input_files:
+            logging.warning(f"\n⚠️ WARNING: Not all input files were processed!")
+            logging.warning(f"   Expected: {total_input_files}, Processed: {len(files_processed)}")
+            if files_failed:
+                logging.warning(f"   Failed files:")
+                for f in files_failed:
+                    logging.warning(f"     - {f}")
+        else:
+            logging.info(f"\n✓ All {total_input_files} input files were successfully processed")
+        
+        if failed_uploads:
+            logging.error(f"\n❌ Failed to upload:")
+            for f in failed_uploads:
+                logging.error(f"   - {f}")
+        
+        logging.info("=" * 60)
 
 # ==============================================================================
 # Main Execution
@@ -451,24 +513,26 @@ def main():
     # Setup logging
     temp_log_path = setup_logging(STANDARD_TYPE)
     
-    logging.info("=" * 80)
-    logging.info(f"Starting IASB PDF Merger for {STANDARD_TYPE.upper()} standards")
-    logging.info("=" * 80)
+    print("=" * 60)
+    print(f"IASB PDF Merger - {STANDARD_TYPE.upper()} Standards")
+    print("=" * 60)
     
     # Format paths with standard type
     nas_input_path = NAS_INPUT_PATH_TEMPLATE.format(standard=STANDARD_TYPE)
     nas_output_path = NAS_OUTPUT_PATH_TEMPLATE.format(standard=STANDARD_TYPE)
     nas_log_path = NAS_LOG_PATH_TEMPLATE.format(standard=STANDARD_TYPE)
     
-    logging.info(f"Input path: {nas_input_path}")
-    logging.info(f"Output path: {nas_output_path}")
+    logging.info(f"Configuration:")
+    logging.info(f"  Standard type: {STANDARD_TYPE.upper()}")
+    logging.info(f"  Input path: {nas_input_path}")
+    logging.info(f"  Output path: {nas_output_path}")
     
     try:
         # Process all PDFs
         process_all_pdfs(nas_input_path, nas_output_path, STANDARD_TYPE)
         
     except Exception as e:
-        logging.error(f"Unexpected error in main processing: {e}", exc_info=True)
+        logging.error(f"Fatal error: {e}", exc_info=True)
     
     # Upload log file to NAS
     try:
@@ -486,18 +550,17 @@ def main():
             log_content = f.read()
         
         if write_to_nas(share_name, log_path_relative, log_content):
-            print(f"Log file uploaded to NAS: {share_name}/{log_path_relative}")
+            print(f"Log saved to: {log_path_relative}")
         else:
-            print(f"Failed to upload log file to NAS")
+            print(f"Failed to save log file")
         
         # Clean up temp log file
         os.remove(temp_log_path)
     except Exception as e:
-        print(f"Error handling log file: {e}")
+        print(f"Error saving log: {e}")
     
-    print("=" * 80)
-    print(f"IASB PDF Merger completed for {STANDARD_TYPE.upper()}")
-    print("=" * 80)
+    print("\nProcessing complete. Check log for details.")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
