@@ -521,21 +521,24 @@ def process_chunks_to_csv(chunks: List[Dict]) -> tuple[List[List[Any]], List[str
     
     return csv_rows, all_errors, document_id
 
-def merge_with_master_csv(new_rows: List[List[Any]], document_id: Optional[str]) -> List[List[Any]]:
+def merge_with_master_csv(new_rows: List[List[Any]], document_id: Optional[str], master_csv_path: str = None) -> List[List[Any]]:
     """
     Merge new rows with existing master CSV, replacing rows with matching document_id.
     
     Returns:
         Combined list of CSV rows
     """
+    # Use provided path or default
+    master_path = master_csv_path or MASTER_CSV_PATH
+    
     log_progress(f"\n🔄 Managing master CSV database...")
     
     # Check if master CSV exists
-    if file_exists_on_nas(NAS_PARAMS["share"], MASTER_CSV_PATH):
-        log_progress(f"  Master CSV exists, loading from: {MASTER_CSV_PATH}")
+    if file_exists_on_nas(NAS_PARAMS["share"], master_path):
+        log_progress(f"  Master CSV exists, loading from: {master_path}")
         
         # Load existing master CSV
-        existing_rows = load_master_csv_from_nas(NAS_PARAMS["share"], MASTER_CSV_PATH)
+        existing_rows = load_master_csv_from_nas(NAS_PARAMS["share"], master_path)
         
         if existing_rows is None:
             log_progress("  ⚠️ Failed to load master CSV, treating as new")
@@ -565,42 +568,48 @@ def merge_with_master_csv(new_rows: List[List[Any]], document_id: Optional[str])
         return merged_rows
     
     else:
-        log_progress(f"  Master CSV does not exist, creating new at: {MASTER_CSV_PATH}")
+        log_progress(f"  Master CSV does not exist, creating new at: {master_path}")
         return new_rows
 
 def main():
     """Main processing function for Stage 5"""
     
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Stage 5: CSV Export Pipeline with Master Database Management")
-    parser.add_argument("--document-id", help="Document ID to update in master CSV")
-    parser.add_argument("--master-csv", help="Path to master CSV file on NAS (relative to share)")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    args = parser.parse_args()
+    # Use local variables instead of modifying globals
+    document_id_to_use = DOCUMENT_ID
+    master_csv_path_to_use = MASTER_CSV_PATH
+    verbose_logging_to_use = VERBOSE_LOGGING
     
-    # Declare globals and initialize from command-line arguments
-    global DOCUMENT_ID, MASTER_CSV_PATH, VERBOSE_LOGGING
-    
-    # Apply command-line arguments
-    if args.document_id:
-        DOCUMENT_ID = args.document_id
-        log_progress(f"Using document ID from CLI: {DOCUMENT_ID}")
-    
-    if args.master_csv:
-        MASTER_CSV_PATH = args.master_csv
-        log_progress(f"Using master CSV path from CLI: {MASTER_CSV_PATH}")
-    
-    if args.verbose:
-        VERBOSE_LOGGING = True
+    # Parse command-line arguments if running as script
+    try:
+        parser = argparse.ArgumentParser(description="Stage 5: CSV Export Pipeline with Master Database Management")
+        parser.add_argument("--document-id", help="Document ID to update in master CSV")
+        parser.add_argument("--master-csv", help="Path to master CSV file on NAS (relative to share)")
+        parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+        args = parser.parse_args()
+        
+        # Apply command-line arguments
+        if args.document_id:
+            document_id_to_use = args.document_id
+            log_progress(f"Using document ID from CLI: {document_id_to_use}")
+        
+        if args.master_csv:
+            master_csv_path_to_use = args.master_csv
+            log_progress(f"Using master CSV path from CLI: {master_csv_path_to_use}")
+        
+        if args.verbose:
+            verbose_logging_to_use = True
+    except:
+        # In notebook environment, argparse will fail - just use defaults
+        pass
     
     # Check environment variables as fallback
-    if not args.document_id and os.environ.get("STAGE5_DOCUMENT_ID"):
-        DOCUMENT_ID = os.environ.get("STAGE5_DOCUMENT_ID")
-        log_progress(f"Using document ID from environment: {DOCUMENT_ID}")
+    if document_id_to_use is None and os.environ.get("STAGE5_DOCUMENT_ID"):
+        document_id_to_use = os.environ.get("STAGE5_DOCUMENT_ID")
+        log_progress(f"Using document ID from environment: {document_id_to_use}")
     
-    if not args.master_csv and os.environ.get("STAGE5_MASTER_CSV"):
-        MASTER_CSV_PATH = os.environ.get("STAGE5_MASTER_CSV")
-        log_progress(f"Using master CSV path from environment: {MASTER_CSV_PATH}")
+    if os.environ.get("STAGE5_MASTER_CSV"):
+        master_csv_path_to_use = os.environ.get("STAGE5_MASTER_CSV")
+        log_progress(f"Using master CSV path from environment: {master_csv_path_to_use}")
     
     # Validate configuration
     if not validate_configuration():
@@ -634,10 +643,9 @@ def main():
     # Process chunks to CSV
     csv_rows, validation_errors, document_id = process_chunks_to_csv(chunks)
     
-    # Store document_id if found (already declared global at function start)
-    # Use document_id from data if DOCUMENT_ID wasn't set via CLI or env
-    if document_id and DOCUMENT_ID is None:
-        DOCUMENT_ID = document_id
+    # Use document_id from data if not set via CLI or env
+    if document_id and document_id_to_use is None:
+        document_id_to_use = document_id
     
     # Report validation errors
     if validation_errors:
@@ -650,7 +658,7 @@ def main():
         log_progress("\n✅ All chunks passed validation")
     
     # Merge with master CSV
-    all_csv_rows = merge_with_master_csv(csv_rows, document_id)
+    all_csv_rows = merge_with_master_csv(csv_rows, document_id_to_use, master_csv_path_to_use)
     
     # Write merged CSV to memory buffer
     log_progress(f"\n💾 Writing master CSV with {len(all_csv_rows)} total rows...")
@@ -669,8 +677,8 @@ def main():
     csv_bytes = csv_content.encode('utf-8')
     
     # Save master CSV to NAS
-    log_progress(f"💾 Saving master CSV to NAS: {MASTER_CSV_PATH}")
-    if write_to_nas(NAS_PARAMS["share"], MASTER_CSV_PATH, csv_bytes):
+    log_progress(f"💾 Saving master CSV to NAS: {master_csv_path_to_use}")
+    if write_to_nas(NAS_PARAMS["share"], master_csv_path_to_use, csv_bytes):
         log_progress(f"✅ Successfully saved master CSV with {len(all_csv_rows)} total rows")
     else:
         log_progress("❌ Failed to write master CSV to NAS")
@@ -707,7 +715,7 @@ def main():
     log_progress(f"  Total chunks processed: {len(chunks)}")
     log_progress(f"  New CSV rows added: {len(csv_rows)}")
     log_progress(f"  Total rows in master: {len(all_csv_rows)}")
-    log_progress(f"  Document ID: {document_id if document_id else 'Not specified'}")
+    log_progress(f"  Document ID: {document_id_to_use if document_id_to_use else 'Not specified'}")
     log_progress(f"  Master file size: {len(csv_bytes):,} bytes")
     
     # Check for embeddings
@@ -721,9 +729,9 @@ def main():
     
     log_progress("="*60)
     log_progress("✅ Stage 5 processing completed successfully!")
-    log_progress(f"📄 Master CSV updated at: {MASTER_CSV_PATH}")
-    if document_id:
-        log_progress(f"🔄 Document '{document_id}' has been updated in the master database")
+    log_progress(f"📄 Master CSV updated at: {master_csv_path_to_use}")
+    if document_id_to_use:
+        log_progress(f"🔄 Document '{document_id_to_use}' has been updated in the master database")
     log_progress("="*60 + "\n")
     
     # Clean up temp log file
