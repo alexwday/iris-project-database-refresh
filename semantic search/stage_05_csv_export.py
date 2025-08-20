@@ -629,9 +629,8 @@ def main():
     # Process chunks to CSV
     csv_rows, validation_errors, document_id = process_chunks_to_csv(chunks)
     
-    # Store document_id globally if found
-    if document_id:
-        global DOCUMENT_ID
+    # Store document_id if found (already declared global at function start)
+    if document_id and not DOCUMENT_ID:
         DOCUMENT_ID = document_id
     
     # Report validation errors
