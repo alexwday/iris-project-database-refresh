@@ -467,10 +467,9 @@ def process_single_page(di_client: DocumentIntelligenceClient,
                 'success': True,  # Mark as success to include in output
                 'page_number': page_num,
                 'page_reference': None,
-                'content': "",  # Empty content for blank page
+                'content': "(BLANK PAGE)",  # Placeholder text for blank page
                 'chapter_number': chapter_info['chapter_number'],
-                'chapter_name': chapter_info['chapter_name'],
-                'is_blank': True  # Flag to indicate blank page
+                'chapter_name': chapter_info['chapter_name']
             }
             
     except Exception as e:
@@ -524,7 +523,8 @@ def process_chapter_pdf(di_client: DocumentIntelligenceClient,
                 result = future.result()
                 if result['success']:
                     all_results.append(result)
-                    if result.get('is_blank'):
+                    # Track blank pages for logging
+                    if result.get('content') == '(BLANK PAGE)':
                         blank_pages.append(page_info['page_number'])
                 else:
                     failed_pages.append(page_info['page_number'])
@@ -669,17 +669,12 @@ def process_all_standards(standard_type: str):
                     'filepath': chapter_pdf_path,
                     'page_number': page_idx,  # Sequential within chapter
                     'page_reference': page_result.get('page_reference'),
-                    'content': page_result.get('content', ''),  # Empty string for blank pages
+                    'content': page_result['content'],  # Will be "(BLANK PAGE)" for blank pages
                     'chapter_number': chapter_number,
                     'chapter_name': chapter_name,
                     'source_filename': filename,  # Original merged PDF
                     'source_page_number': page_result['page_number']  # Page in merged PDF
                 }
-                
-                # Optionally include blank page flag
-                if page_result.get('is_blank'):
-                    record['is_blank'] = True
-                    
                 all_json_records.append(record)
             
             # Upload chapter PDF to NAS (copy of merged PDF with new name)
