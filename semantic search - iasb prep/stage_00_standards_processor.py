@@ -1,15 +1,15 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-IASB Prep: PDF to Markdown Conversion for IASB Documents
+IASB Prep: Standards Processor - Azure DI Conversion and JSON Generation
 
 Purpose:
-Processes a single EY PDF file from a NAS directory and converts each page to markdown
-using Azure Document Intelligence. Outputs a flat JSON array with document metadata
-and page content, removing only PageNumber tags while preserving other Azure tags.
+Processes merged IASB standard PDFs through Azure Document Intelligence,
+assigns chapter numbers based on standard numbers, and creates stage1_input.json
+matching the EY prep output format.
 
-Input: Single PDF file in NAS_INPUT_PATH on the NAS drive (errors if multiple PDFs)
-Output: Flat JSON array on the NAS containing page-by-page records
-        (e.g., 'semantic_search/prep_output/ey/ey_prep_output.json')
+Input: Merged PDFs from stage_00_pdf_merger.py
+Output: stage1_input.json with all pages converted to markdown
 """
 
 import os
@@ -57,7 +57,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 # Configuration (Hardcoded - update these values)
 # ==============================================================================
 
-# --- NAS Configuration ---
+# --- NAS Configuration (matching EY prep) ---
 NAS_PARAMS = {
     "ip": "your_nas_ip",  # TODO: Replace with actual NAS IP
     "share": "your_share_name",  # TODO: Replace with actual share name
@@ -67,38 +67,38 @@ NAS_PARAMS = {
 }
 
 # --- Directory Paths (Relative to NAS Share) ---
-# Path on NAS where IASB PDF file is stored (relative to share root)
-NAS_INPUT_PATH = "semantic_search/source_documents/iasb"  # TODO: Adjust to your IASB PDF location
-# Path on NAS where output will be saved (relative to share root)
-NAS_OUTPUT_PATH = "semantic_search/prep_output/iasb"
-# Path on NAS where logs will be saved
-NAS_LOG_PATH = "semantic_search/prep_output/iasb/logs"
-OUTPUT_FILENAME = "iasb_prep_output.json"
+# Input path - merged PDFs from stage_00_pdf_merger
+NAS_INPUT_PATH_TEMPLATE = "semantic_search/prep_output/iasb/{standard}/merged"
+# Output path for final JSON and chapter PDFs
+NAS_OUTPUT_PATH_TEMPLATE = "semantic_search/prep_output/iasb/{standard}"
+# Log path
+NAS_LOG_PATH_TEMPLATE = "semantic_search/prep_output/iasb/{standard}/logs"
 
-# --- CA Bundle Configuration ---
+# --- CA Bundle Configuration (matching EY prep) ---
 # Path on NAS where the SSL certificate is stored (relative to share root)
 NAS_SSL_CERT_PATH = "certificates/rbc-ca-bundle.cer"  # TODO: Adjust to match your NAS location
 SSL_LOCAL_PATH = "/tmp/rbc-ca-bundle.cer"  # Temp path for cert
 
 # --- Document Configuration ---
-DOCUMENT_ID = "IASB_STANDARDS_2024"  # TODO: Set appropriate document ID for this IASB document
+STANDARD_TYPE = "ias"  # TODO: Set to "ias", "ifrs", "ifric", or "sic" for current run
+DOCUMENT_ID_TEMPLATE = "{STANDARD}_2024"  # Will be formatted with STANDARD_TYPE.upper()
 
-# --- Azure Document Intelligence Configuration (Hardcoded) ---
+# --- Azure Document Intelligence Configuration (Hardcoded - matching EY prep) ---
 AZURE_DI_ENDPOINT = "YOUR_DI_ENDPOINT"  # TODO: Replace with actual endpoint
 AZURE_DI_KEY = "YOUR_DI_KEY"  # TODO: Replace with actual key
 
-# --- Processing Configuration ---
+# --- Processing Configuration (matching EY prep) ---
 MAX_CONCURRENT_PAGES = 5  # Number of pages to process simultaneously
 API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY = 5  # seconds
 
-# --- pysmb Configuration ---
+# --- pysmb Configuration (matching EY prep) ---
 smb_structs.SUPPORT_SMB2 = True
 smb_structs.MAX_PAYLOAD_SIZE = 65536
 CLIENT_HOSTNAME = socket.gethostname()
 
 # ==============================================================================
-# NAS Helper Functions (from Stage 1 pattern)
+# NAS Helper Functions (from EY prep pattern - identical)
 # ==============================================================================
 
 def create_nas_connection():
@@ -230,10 +230,10 @@ def list_nas_directory(share_name, dir_path_relative):
             conn.close()
 
 # ==============================================================================
-# Logging Setup (Modified for NAS)
+# Logging Setup (matching EY prep)
 # ==============================================================================
 
-def setup_logging():
+def setup_logging(standard_type: str):
     """Setup logging to write to NAS."""
     # Create a temporary local log file first
     temp_log = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.log')
@@ -250,7 +250,7 @@ def setup_logging():
         ]
     )
     
-    # Suppress Azure SDK verbose logging
+    # Suppress Azure SDK verbose logging (matching EY prep)
     logging.getLogger("azure").setLevel(logging.WARNING)
     logging.getLogger("azure.core").setLevel(logging.WARNING)
     logging.getLogger("azure.ai.documentintelligence").setLevel(logging.WARNING)
@@ -270,7 +270,7 @@ def setup_logging():
     return temp_log_path
 
 # ==============================================================================
-# PageNumber Tag Extraction and Removal
+# PageNumber Tag Extraction and Removal (from EY prep)
 # ==============================================================================
 
 # Pattern to extract PageNumber value (captures any format including roman numerals, alphanumeric, etc.)
@@ -312,11 +312,63 @@ def extract_and_clean_page_number(content: str) -> tuple[str, str]:
     return cleaned_content, page_reference
 
 # ==============================================================================
-# Utility Functions
+# PDF Processing Functions
 # ==============================================================================
 
+def parse_merged_filename(filename: str) -> Optional[Dict]:
+    """
+    Parse merged PDF filename to extract standard info.
+    Pattern: standard-number-name.pdf
+    Example: ias-2-inventories.pdf
+    """
+    pattern = r'^([a-z]+)-(\d+)-(.+)\.pdf$'
+    match = re.match(pattern, filename, re.IGNORECASE)
+    
+    if not match:
+        logging.warning(f"Filename does not match expected pattern: {filename}")
+        return None
+    
+    standard = match.group(1).lower()
+    number = int(match.group(2))
+    name = match.group(3)
+    
+    return {
+        'filename': filename,
+        'standard': standard,
+        'number': number,
+        'name': name,
+        'name_formatted': name.replace('-', ' ').title()
+    }
+
+def sort_merged_pdfs(pdf_files: List[str]) -> List[Tuple[str, int, str]]:
+    """
+    Sort PDF files by standard number and assign chapter numbers.
+    
+    Returns:
+        List of tuples: (filename, chapter_number, chapter_name)
+    """
+    parsed_files = []
+    
+    for filename in pdf_files:
+        parsed = parse_merged_filename(filename)
+        if parsed:
+            parsed_files.append(parsed)
+    
+    # Sort by standard number
+    parsed_files.sort(key=lambda x: x['number'])
+    
+    # Assign chapter numbers and format chapter names
+    result = []
+    for idx, parsed in enumerate(parsed_files, start=1):
+        # Format chapter name: "IAS 2 - Inventories"
+        chapter_name = f"{parsed['standard'].upper()} {parsed['number']} - {parsed['name_formatted']}"
+        result.append((parsed['filename'], idx, chapter_name))
+        logging.info(f"Chapter {idx}: {chapter_name} ({parsed['filename']})")
+    
+    return result
+
 def extract_individual_pages(local_pdf_path: str, temp_dir: str) -> List[Dict]:
-    """Extracts each page of a PDF as individual PDF files."""
+    """Extracts each page of a PDF as individual PDF files (from EY prep)."""
     page_files = []
     base_name = os.path.splitext(os.path.basename(local_pdf_path))[0]
     
@@ -352,7 +404,7 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
                             page_file_path: str, 
                             max_retries: int = 3, 
                             retry_delay: int = 5) -> Optional[Any]:
-    """Analyzes a single page PDF using Azure Document Intelligence."""
+    """Analyzes a single page PDF using Azure Document Intelligence (from EY prep)."""
     last_exception = None
     
     for attempt in range(max_retries):
@@ -384,11 +436,11 @@ def analyze_document_with_di(di_client: DocumentIntelligenceClient,
     return None
 
 def process_single_page(di_client: DocumentIntelligenceClient, 
-                       page_info: Dict) -> Dict:
-    """Processes a single PDF page, extracts page reference, and removes PageNumber tags."""
+                       page_info: Dict,
+                       chapter_info: Dict) -> Dict:
+    """Processes a single PDF page (modified from EY prep)."""
     page_num = page_info['page_number']
     page_path = page_info['file_path']
-    original_pdf = page_info['original_pdf']
     
     try:
         # Analyze the page with Azure DI
@@ -401,17 +453,15 @@ def process_single_page(di_client: DocumentIntelligenceClient,
             return {
                 'success': True,
                 'page_number': page_num,
-                'page_reference': page_reference,  # New field with extracted value
+                'page_reference': page_reference,
                 'content': cleaned_content,
-                'original_file': os.path.basename(original_pdf)
+                'chapter_number': chapter_info['chapter_number'],
+                'chapter_name': chapter_info['chapter_name']
             }
         else:
             return {
                 'success': False,
                 'page_number': page_num,
-                'page_reference': None,
-                'content': None,
-                'original_file': os.path.basename(original_pdf),
                 'error': 'No content returned from Azure DI'
             }
             
@@ -420,202 +470,121 @@ def process_single_page(di_client: DocumentIntelligenceClient,
         return {
             'success': False,
             'page_number': page_num,
-            'page_reference': None,
-            'content': None,
-            'original_file': os.path.basename(original_pdf),
             'error': str(e)
         }
 
-def process_pages_batch_incremental(di_client: DocumentIntelligenceClient,
-                                   page_files: List[Dict],
-                                   output_file_path: str,
-                                   document_id: str,
-                                   filename: str,
-                                   filepath: str,
-                                   max_workers: int = 5) -> Tuple[int, List[int]]:
-    """Processes multiple PDF pages concurrently and writes to JSON incrementally."""
-    total_pages = len(page_files)
-    logging.info(f"Starting Azure DI processing for {total_pages} pages (max {max_workers} concurrent)")
-    logging.info(f"Writing results incrementally to: {output_file_path}")
+def process_chapter_pdf(di_client: DocumentIntelligenceClient,
+                       local_pdf_path: str,
+                       chapter_number: int,
+                       chapter_name: str,
+                       temp_dir: str) -> List[Dict]:
+    """Process all pages of a chapter PDF."""
+    logging.info(f"Processing Chapter {chapter_number}: {chapter_name}")
     
-    # Dictionary to store results by page number for ordering
-    results_dict = {}
-    pages_processed = 0
-    pages_written = 0
+    # Extract individual pages
+    page_files = extract_individual_pages(local_pdf_path, temp_dir)
+    
+    if not page_files:
+        logging.error(f"Failed to extract pages from {os.path.basename(local_pdf_path)}")
+        return []
+    
+    chapter_info = {
+        'chapter_number': chapter_number,
+        'chapter_name': chapter_name,
+        'source_filename': os.path.basename(local_pdf_path)
+    }
+    
+    # Process pages concurrently
+    all_results = []
     failed_pages = []
     
-    # Start the JSON array
-    with open(output_file_path, 'w', encoding='utf-8') as f:
-        f.write('[\n')
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_PAGES) as executor:
         # Submit all page processing tasks
         future_to_page = {
-            executor.submit(process_single_page, di_client, page_info): page_info
+            executor.submit(process_single_page, di_client, page_info, chapter_info): page_info
             for page_info in page_files
         }
         
-        # Track the next page number to write (ensures sequential order)
-        next_page_to_write = 1
-        first_record = True
-        
         # Collect results as they complete
-        for future in tqdm(as_completed(future_to_page), total=len(page_files), desc="Processing pages"):
+        for future in tqdm(as_completed(future_to_page), 
+                          total=len(page_files), 
+                          desc=f"Chapter {chapter_number}"):
             page_info = future_to_page[future]
-            pages_processed += 1
             
             try:
                 result = future.result()
-                page_num = result['page_number']
-                
-                if not result['success']:
-                    failed_pages.append(page_num)
-                    logging.warning(f"Page {page_num} failed: {result.get('error', 'Unknown error')}")
-                    # Store None for failed pages to maintain sequence
-                    results_dict[page_num] = None
+                if result['success']:
+                    all_results.append(result)
                 else:
-                    # Store the successful result
-                    results_dict[page_num] = {
-                        'document_id': document_id,
-                        'filename': filename,
-                        'filepath': filepath,
-                        'page_number': page_num,
-                        'page_reference': result.get('page_reference'),  # Include extracted page reference
-                        'content': result['content']
-                    }
-                
+                    failed_pages.append(page_info['page_number'])
+                    logging.warning(f"Failed page {page_info['page_number']}: {result.get('error')}")
             except Exception as e:
-                page_num = page_info['page_number']
-                failed_pages.append(page_num)
-                logging.error(f"Exception for page {page_num}: {e}")
-                results_dict[page_num] = None
-            
-            # Write any sequential pages that are ready
-            with open(output_file_path, 'a', encoding='utf-8') as f:
-                while next_page_to_write in results_dict:
-                    page_data = results_dict[next_page_to_write]
-                    if page_data is not None:  # Only write successful pages
-                        if not first_record:
-                            f.write(',\n')
-                        json.dump(page_data, f, indent=2, ensure_ascii=False)
-                        first_record = False
-                        pages_written += 1
-                    # Remove from dict to free memory
-                    del results_dict[next_page_to_write]
-                    next_page_to_write += 1
-            
-            # Progress update every 100 pages
-            if pages_processed % 100 == 0:
-                buffered_pages = len(results_dict)
-                logging.info(f"Progress: {pages_processed}/{total_pages} processed, {pages_written} written, {buffered_pages} buffered")
-                
-                # Warning if too many pages are buffered in memory
-                if buffered_pages > 500:
-                    logging.warning(f"High memory usage: {buffered_pages} pages buffered waiting for sequential write")
+                failed_pages.append(page_info['page_number'])
+                logging.error(f"Exception for page {page_info['page_number']}: {e}")
     
-    # Close the JSON array
-    with open(output_file_path, 'a', encoding='utf-8') as f:
-        f.write('\n]')
-    
-    successful = pages_written
-    logging.info(f"Azure DI processing completed: {successful}/{total_pages} pages successful")
-    logging.info(f"Results written to: {output_file_path}")
+    # Clean up temp page files
+    for page_info in page_files:
+        try:
+            if os.path.exists(page_info['file_path']):
+                os.remove(page_info['file_path'])
+        except OSError:
+            pass
     
     if failed_pages:
-        logging.warning(f"Failed pages: {failed_pages}")
+        logging.warning(f"Chapter {chapter_number} had {len(failed_pages)} failed pages: {failed_pages}")
     
-    return successful, failed_pages
+    # Sort results by page number
+    all_results.sort(key=lambda x: x['page_number'])
+    
+    return all_results
 
-def process_pdf_file_incremental(local_pdf_path: str,
-                                original_nas_path: str,
-                                filename: str,
-                                di_client: DocumentIntelligenceClient,
-                                temp_dir: str,
-                                output_file_path: str,
-                                document_id: str) -> Dict:
-    """Processes a single PDF file and writes pages incrementally to JSON."""
-    logging.info(f"Processing PDF: {filename}")
-    
+def create_chapter_pdf(reader: PdfReader, output_path: str) -> bool:
+    """Create a chapter PDF file (for compatibility with EY format)."""
     try:
-        # Extract individual pages
-        page_files = extract_individual_pages(local_pdf_path, temp_dir)
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
         
-        if not page_files:
-            return {
-                'filename': filename,
-                'filepath': original_nas_path,
-                'success': False,
-                'error': 'Failed to extract pages',
-                'total_pages': 0,
-                'successful_pages': 0
-            }
-        
-        # Process all pages and write incrementally
-        successful_pages, failed_pages = process_pages_batch_incremental(
-            di_client, page_files, output_file_path, 
-            document_id, filename, original_nas_path,
-            MAX_CONCURRENT_PAGES
-        )
-        
-        # Clean up temp page files
-        for page_info in page_files:
-            try:
-                if os.path.exists(page_info['file_path']):
-                    os.remove(page_info['file_path'])
-            except OSError:
-                pass
-        
-        return {
-            'filename': filename,
-            'filepath': original_nas_path,
-            'success': True,
-            'total_pages': len(page_files),
-            'successful_pages': successful_pages,
-            'failed_pages': failed_pages
-        }
-        
+        with open(output_path, 'wb') as f:
+            writer.write(f)
+        return True
     except Exception as e:
-        logging.error(f"Error processing PDF {filename}: {e}")
-        return {
-            'filename': filename,
-            'filepath': original_nas_path,
-            'success': False,
-            'error': str(e),
-            'total_pages': 0,
-            'successful_pages': 0
-        }
+        logging.error(f"Failed to create chapter PDF: {e}")
+        return False
 
 # ==============================================================================
 # Main Processing Function
 # ==============================================================================
 
-def run_iasb_prep():
-    """Main function to execute IASB document preprocessing."""
-    # Setup logging
-    temp_log_path = setup_logging()
-    
-    logging.info("--- Starting IASB Prep: PDF to Markdown Conversion ---")
-    
+def process_all_standards(standard_type: str):
+    """Main function to process all merged PDFs for a standard type."""
     share_name = NAS_PARAMS["share"]
-    output_path_relative = os.path.join(NAS_OUTPUT_PATH, OUTPUT_FILENAME).replace('\\', '/')
+    document_id = DOCUMENT_ID_TEMPLATE.format(STANDARD=standard_type.upper())
     
-    # Find PDF files on NAS
-    logging.info(f"Looking for PDF files in NAS path: {share_name}/{NAS_INPUT_PATH}")
-    nas_files = list_nas_directory(share_name, NAS_INPUT_PATH)
+    # Format paths
+    nas_input_path = NAS_INPUT_PATH_TEMPLATE.format(standard=standard_type)
+    nas_output_path = NAS_OUTPUT_PATH_TEMPLATE.format(standard=standard_type)
     
-    # Filter for PDF files
-    pdf_files = [f for f in nas_files if f.filename.lower().endswith('.pdf') and not f.isDirectory]
+    logging.info(f"Document ID: {document_id}")
+    logging.info(f"Looking for merged PDFs in: {share_name}/{nas_input_path}")
+    
+    # List merged PDFs from NAS
+    nas_files = list_nas_directory(share_name, nas_input_path)
+    pdf_files = [f.filename for f in nas_files 
+                 if f.filename.lower().endswith('.pdf') and not f.isDirectory]
     
     if not pdf_files:
-        logging.error(f"No PDF files found in {share_name}/{NAS_INPUT_PATH}")
+        logging.error(f"No PDF files found in {share_name}/{nas_input_path}")
         return
     
-    if len(pdf_files) > 1:
-        logging.error(f"Error: Multiple PDF files found ({len(pdf_files)}). IASB prep expects exactly one PDF file.")
-        logging.error(f"Files found: {[f.filename for f in pdf_files]}")
-        return
+    logging.info(f"Found {len(pdf_files)} merged PDFs to process")
     
-    logging.info(f"Found 1 PDF file to process: {pdf_files[0].filename}")
+    # Sort PDFs and assign chapter numbers
+    sorted_chapters = sort_merged_pdfs(pdf_files)
+    
+    if not sorted_chapters:
+        logging.error("No valid PDFs to process after sorting")
+        return
     
     # Initialize Azure DI client
     logging.info("Initializing Azure Document Intelligence client...")
@@ -629,63 +598,140 @@ def run_iasb_prep():
         logging.error(f"Failed to initialize Azure DI client: {e}")
         return
     
-    # Create temporary directory for downloads and processing
+    # Create temporary directory for processing
     with tempfile.TemporaryDirectory() as temp_dir:
         logging.info(f"Using temporary directory: {temp_dir}")
         
-        # Create temp output file
-        temp_output_path = os.path.join(temp_dir, OUTPUT_FILENAME)
+        # Create output subdirectory with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_folder = f"chapters_{timestamp}"
+        output_dir_relative = os.path.join(nas_output_path, output_folder).replace('\\', '/')
         
-        # Process the single PDF
-        pdf_file_info = pdf_files[0]
-        filename = pdf_file_info.filename
-        nas_file_path = os.path.join(NAS_INPUT_PATH, filename).replace('\\', '/')
+        # Collect all JSON records
+        all_json_records = []
         
-        logging.info(f"Downloading {filename} from NAS...")
-        
-        # Download PDF from NAS to temp directory
-        local_pdf_path = download_from_nas(share_name, nas_file_path, temp_dir)
-        
-        if not local_pdf_path:
-            logging.error(f"Failed to download {filename} from NAS. Exiting.")
-            return
-        
-        # Process this PDF with incremental writing
-        pdf_result = process_pdf_file_incremental(
-            local_pdf_path, nas_file_path, filename, 
-            di_client, temp_dir, temp_output_path, DOCUMENT_ID
-        )
-        
-        if pdf_result['success']:
-            logging.info(f"Successfully processed {pdf_result['filename']}: "
-                       f"{pdf_result['successful_pages']}/{pdf_result['total_pages']} pages")
+        # Process each chapter
+        for filename, chapter_number, chapter_name in sorted_chapters:
+            logging.info(f"\nProcessing {filename} as Chapter {chapter_number}")
             
-            # Upload the completed JSON file to NAS
-            logging.info(f"Uploading results to NAS: {share_name}/{output_path_relative}")
+            # Download PDF from NAS
+            nas_file_path = os.path.join(nas_input_path, filename).replace('\\', '/')
+            local_pdf_path = download_from_nas(share_name, nas_file_path, temp_dir)
+            
+            if not local_pdf_path:
+                logging.error(f"Failed to download {filename}")
+                continue
+            
+            # Process through Azure DI
+            chapter_results = process_chapter_pdf(
+                di_client, 
+                local_pdf_path, 
+                chapter_number, 
+                chapter_name,
+                temp_dir
+            )
+            
+            if not chapter_results:
+                logging.warning(f"No results for {filename}")
+                continue
+            
+            # Create chapter PDF filename (matching EY format)
+            parsed = parse_merged_filename(filename)
+            if parsed:
+                # Format: 01_ias_2_inventories.pdf
+                chapter_pdf_name = f"{chapter_number:02d}_{parsed['standard']}_{parsed['number']}_{parsed['name']}.pdf"
+            else:
+                chapter_pdf_name = f"{chapter_number:02d}_{filename}"
+            
+            chapter_pdf_path = os.path.join(output_dir_relative, chapter_pdf_name).replace('\\', '/')
+            
+            # Create JSON records for this chapter
+            for page_idx, page_result in enumerate(chapter_results, start=1):
+                record = {
+                    'document_id': document_id,
+                    'filename': chapter_pdf_name,
+                    'filepath': chapter_pdf_path,
+                    'page_number': page_idx,  # Sequential within chapter
+                    'page_reference': page_result.get('page_reference'),
+                    'content': page_result['content'],
+                    'chapter_number': chapter_number,
+                    'chapter_name': chapter_name,
+                    'source_filename': filename,  # Original merged PDF
+                    'source_page_number': page_result['page_number']  # Page in merged PDF
+                }
+                all_json_records.append(record)
+            
+            # Upload chapter PDF to NAS (copy of merged PDF with new name)
             try:
-                with open(temp_output_path, 'rb') as f:
+                with open(local_pdf_path, 'rb') as f:
+                    pdf_bytes = f.read()
+                
+                if write_to_nas(share_name, chapter_pdf_path, pdf_bytes):
+                    logging.info(f"Uploaded chapter PDF: {chapter_pdf_name}")
+                else:
+                    logging.error(f"Failed to upload chapter PDF: {chapter_pdf_name}")
+            except Exception as e:
+                logging.error(f"Error uploading chapter PDF: {e}")
+            
+            # Clean up local PDF
+            try:
+                if os.path.exists(local_pdf_path):
+                    os.remove(local_pdf_path)
+            except OSError:
+                pass
+        
+        # Create and upload stage1_input.json
+        if all_json_records:
+            logging.info(f"\nCreating stage1_input.json with {len(all_json_records)} records")
+            
+            # Create JSON in temp directory
+            temp_json_path = os.path.join(temp_dir, "stage1_input.json")
+            with open(temp_json_path, 'w', encoding='utf-8') as f:
+                json.dump(all_json_records, f, indent=2, ensure_ascii=False)
+            
+            # Upload to NAS
+            json_nas_path = os.path.join(output_dir_relative, "stage1_input.json").replace('\\', '/')
+            
+            try:
+                with open(temp_json_path, 'rb') as f:
                     json_bytes = f.read()
                 
-                if write_to_nas(share_name, output_path_relative, json_bytes):
-                    logging.info(f"Successfully saved output to NAS")
+                if write_to_nas(share_name, json_nas_path, json_bytes):
+                    logging.info(f"Successfully uploaded stage1_input.json")
+                    logging.info(f"Output location: {share_name}/{output_dir_relative}")
                 else:
-                    logging.error(f"Failed to save output to NAS")
+                    logging.error("Failed to upload stage1_input.json")
             except Exception as e:
-                logging.error(f"Failed to upload output JSON to NAS: {e}")
+                logging.error(f"Error uploading JSON: {e}")
         else:
-            logging.error(f"Failed to process {pdf_result['filename']}: {pdf_result.get('error', 'Unknown error')}")
+            logging.error("No records to write to stage1_input.json")
+
+# ==============================================================================
+# Main Execution
+# ==============================================================================
+
+def main():
+    """Main entry point."""
+    # Setup logging
+    temp_log_path = setup_logging(STANDARD_TYPE)
+    
+    logging.info("=" * 80)
+    logging.info(f"Starting IASB Standards Processor for {STANDARD_TYPE.upper()}")
+    logging.info("=" * 80)
+    
+    try:
+        # Process all standards
+        process_all_standards(STANDARD_TYPE)
         
-        # Clean up downloaded PDF
-        try:
-            if os.path.exists(local_pdf_path):
-                os.remove(local_pdf_path)
-        except OSError:
-            pass
+    except Exception as e:
+        logging.error(f"Unexpected error in main processing: {e}", exc_info=True)
     
     # Upload log file to NAS
     try:
-        log_file_name = f"iasb_prep_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        log_path_relative = os.path.join(NAS_LOG_PATH, log_file_name).replace('\\', '/')
+        share_name = NAS_PARAMS["share"]
+        nas_log_path = NAS_LOG_PATH_TEMPLATE.format(standard=STANDARD_TYPE)
+        log_file_name = f"{STANDARD_TYPE}_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_path_relative = os.path.join(nas_log_path, log_file_name).replace('\\', '/')
         
         # Close logging handlers to flush content
         for handler in logging.root.handlers[:]:
@@ -706,21 +752,10 @@ def run_iasb_prep():
     except Exception as e:
         print(f"Error handling log file: {e}")
     
-    # Final summary
-    print("--- IASB Prep Summary ---")
-    print(f"Document ID: {DOCUMENT_ID}")
-    if 'pdf_result' in locals() and pdf_result:
-        print(f"PDF file processed: {filename}")
-        print(f"Total pages: {pdf_result.get('total_pages', 0)}")
-        print(f"Successfully processed: {pdf_result.get('successful_pages', 0)}")
-        if pdf_result.get('failed_pages'):
-            print(f"Failed pages: {len(pdf_result.get('failed_pages', []))}")
-    print(f"Output file: {share_name}/{output_path_relative}")
-    print("--- IASB Prep Completed ---")
-
-# ==============================================================================
-# Main Execution Block
-# ==============================================================================
+    print("=" * 80)
+    print(f"IASB Standards Processor completed for {STANDARD_TYPE.upper()}")
+    print("Check logs for details")
+    print("=" * 80)
 
 if __name__ == "__main__":
-    run_iasb_prep()
+    main()
