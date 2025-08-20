@@ -461,10 +461,16 @@ def process_single_page(di_client: DocumentIntelligenceClient,
                 'chapter_name': chapter_info['chapter_name']
             }
         else:
+            # Blank page - still create a record to maintain page alignment
+            logging.info(f"Page {page_num} appears to be blank (no content from Azure DI)")
             return {
-                'success': False,
+                'success': True,  # Mark as success to include in output
                 'page_number': page_num,
-                'error': 'No content returned from Azure DI'
+                'page_reference': None,
+                'content': "",  # Empty content for blank page
+                'chapter_number': chapter_info['chapter_number'],
+                'chapter_name': chapter_info['chapter_name'],
+                'is_blank': True  # Flag to indicate blank page
             }
             
     except Exception as e:
@@ -499,6 +505,7 @@ def process_chapter_pdf(di_client: DocumentIntelligenceClient,
     # Process pages concurrently
     all_results = []
     failed_pages = []
+    blank_pages = []
     
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_PAGES) as executor:
         # Submit all page processing tasks
@@ -517,6 +524,8 @@ def process_chapter_pdf(di_client: DocumentIntelligenceClient,
                 result = future.result()
                 if result['success']:
                     all_results.append(result)
+                    if result.get('is_blank'):
+                        blank_pages.append(page_info['page_number'])
                 else:
                     failed_pages.append(page_info['page_number'])
                     logging.warning(f"Failed page {page_info['page_number']}: {result.get('error')}")
@@ -532,11 +541,16 @@ def process_chapter_pdf(di_client: DocumentIntelligenceClient,
         except OSError:
             pass
     
+    if blank_pages:
+        logging.info(f"Chapter {chapter_number}: {len(blank_pages)} blank pages detected: {blank_pages}")
+    
     if failed_pages:
-        logging.warning(f"Chapter {chapter_number} had {len(failed_pages)} failed pages: {failed_pages}")
+        logging.warning(f"Chapter {chapter_number}: {len(failed_pages)} failed pages: {failed_pages}")
     
     # Sort results by page number
     all_results.sort(key=lambda x: x['page_number'])
+    
+    logging.info(f"Chapter {chapter_number} complete: {len(all_results)} pages ({len(blank_pages)} blank, {len(failed_pages)} failed)")
     
     return all_results
 
@@ -647,7 +661,7 @@ def process_all_standards(standard_type: str):
             
             chapter_pdf_path = os.path.join(output_dir_relative, chapter_pdf_name).replace('\\', '/')
             
-            # Create JSON records for this chapter
+            # Create JSON records for this chapter (including blank pages for alignment)
             for page_idx, page_result in enumerate(chapter_results, start=1):
                 record = {
                     'document_id': document_id,
@@ -655,12 +669,17 @@ def process_all_standards(standard_type: str):
                     'filepath': chapter_pdf_path,
                     'page_number': page_idx,  # Sequential within chapter
                     'page_reference': page_result.get('page_reference'),
-                    'content': page_result['content'],
+                    'content': page_result.get('content', ''),  # Empty string for blank pages
                     'chapter_number': chapter_number,
                     'chapter_name': chapter_name,
                     'source_filename': filename,  # Original merged PDF
                     'source_page_number': page_result['page_number']  # Page in merged PDF
                 }
+                
+                # Optionally include blank page flag
+                if page_result.get('is_blank'):
+                    record['is_blank'] = True
+                    
                 all_json_records.append(record)
             
             # Upload chapter PDF to NAS (copy of merged PDF with new name)
