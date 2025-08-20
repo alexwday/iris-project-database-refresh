@@ -174,63 +174,101 @@ def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, in
         return 0, 0
     
     try:
+        # First, ensure we're starting with a clean transaction
+        conn.rollback()  # Clear any aborted transaction
+        
         with conn.cursor() as cur:
             # Step 1: Create staging table with TEXT embedding column
             log_progress("📋 Creating temporary staging table...")
-            cur.execute("""
-                CREATE TEMP TABLE staging_import (
-                    document_id VARCHAR(255),
-                    filename VARCHAR(255),
-                    filepath TEXT,
-                    source_filename VARCHAR(255),
-                    chapter_number INTEGER,
-                    chapter_name TEXT,
-                    chapter_summary TEXT,
-                    chapter_page_count INTEGER,
-                    section_number INTEGER,
-                    section_summary TEXT,
-                    section_start_page INTEGER,
-                    section_end_page INTEGER,
-                    section_page_count INTEGER,
-                    section_start_reference VARCHAR(50),
-                    section_end_reference VARCHAR(50),
-                    chunk_number INTEGER,
-                    chunk_content TEXT,
-                    chunk_start_page INTEGER,
-                    chunk_end_page INTEGER,
-                    chunk_start_reference VARCHAR(50),
-                    chunk_end_reference VARCHAR(50),
-                    embedding TEXT,  -- TEXT type for staging
-                    extra1 TEXT,
-                    extra2 TEXT,
-                    extra3 TEXT
-                );
-            """)
-            log_progress("✅ Staging table created")
+            
+            # Drop staging table if it exists from a previous failed attempt
+            try:
+                cur.execute("DROP TABLE IF EXISTS staging_import;")
+            except:
+                pass  # Ignore if it doesn't exist
+            
+            try:
+                cur.execute("""
+                    CREATE TEMP TABLE staging_import (
+                        document_id VARCHAR(255),
+                        filename VARCHAR(255),
+                        filepath TEXT,
+                        source_filename VARCHAR(255),
+                        chapter_number INTEGER,
+                        chapter_name TEXT,
+                        chapter_summary TEXT,
+                        chapter_page_count INTEGER,
+                        section_number INTEGER,
+                        section_summary TEXT,
+                        section_start_page INTEGER,
+                        section_end_page INTEGER,
+                        section_page_count INTEGER,
+                        section_start_reference VARCHAR(50),
+                        section_end_reference VARCHAR(50),
+                        chunk_number INTEGER,
+                        chunk_content TEXT,
+                        chunk_start_page INTEGER,
+                        chunk_end_page INTEGER,
+                        chunk_start_reference VARCHAR(50),
+                        chunk_end_reference VARCHAR(50),
+                        embedding TEXT,  -- TEXT type for staging
+                        extra1 TEXT,
+                        extra2 TEXT,
+                        extra3 TEXT
+                    );
+                """)
+                log_progress("✅ Staging table created")
+            except psycopg2.Error as e:
+                log_progress(f"❌ Failed to create staging table: {e}")
+                logging.error(f"Staging table creation error: {e}", exc_info=True)
+                return 0, 0
             
             # Step 2: Process CSV to exclude auto-generated columns
             csv_reader = csv.reader(io.StringIO(csv_content))
             header = next(csv_reader)  # Read header
             
+            log_progress(f"   CSV has {len(header)} columns")
             logging.info(f"Original CSV header columns: {header}")
+            
+            # Log the specific columns we're expecting
+            if len(header) >= 28:
+                log_progress(f"   Column 0 (id): {header[0]}")
+                log_progress(f"   Column 1 (document_id): {header[1]}")
+                log_progress(f"   Column 26 (created_at): {header[26] if len(header) > 26 else 'missing'}")
+                log_progress(f"   Column 27 (last_modified): {header[27] if len(header) > 27 else 'missing'}")
+            else:
+                log_progress(f"   ⚠️ CSV has fewer columns than expected ({len(header)} vs 28)")
             
             # Create modified CSV without id, created_at, last_modified columns
             modified_csv = io.StringIO()
             csv_writer = csv.writer(modified_csv)
             
             # Write header for staging table (columns 1-25 from original, skipping 0, 26, 27)
-            staging_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
+            # But check if we have enough columns first
+            if len(header) >= 26:
+                staging_header = header[1:26]  # Skip id (0) and timestamps (26, 27)
+            else:
+                log_progress(f"   ⚠️ Using all columns except first (CSV has {len(header)} columns)")
+                staging_header = header[1:] if len(header) > 1 else header
+            
+            log_progress(f"   Staging table will have {len(staging_header)} columns")
             csv_writer.writerow(staging_header)
             
             row_count = 0
             for row in csv_reader:
-                modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
+                # Handle variable column counts
+                if len(row) >= 26:
+                    modified_row = row[1:26]  # Skip id (0) and timestamps (26, 27)
+                else:
+                    modified_row = row[1:] if len(row) > 1 else row
+                    
                 csv_writer.writerow(modified_row)
                 row_count += 1
                 
                 # Log first row for debugging
                 if row_count == 1:
-                    logging.info(f"First data row sample: {modified_row[:3]}")
+                    log_progress(f"   First row has {len(row)} columns")
+                    logging.info(f"First data row sample: {modified_row[:3] if len(modified_row) >= 3 else modified_row}")
                     if len(modified_row) > 21:  # Embedding column index
                         emb_preview = modified_row[21][:50] if modified_row[21] else "NULL"
                         logging.info(f"First row embedding preview: {emb_preview}...")
@@ -347,13 +385,30 @@ def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, in
             
     except psycopg2.Error as e:
         logging.error(f"Database error during staging upload: {e}", exc_info=True)
-        log_progress(f"❌ Failed to insert records: {e}")
+        log_progress(f"❌ Database error during staging upload: {e}")
+        
+        # Check for specific transaction abort error
+        if "current transaction is aborted" in str(e):
+            log_progress("   Transaction was aborted - attempting to recover...")
+            try:
+                conn.rollback()
+                log_progress("   Rolled back aborted transaction")
+                # Try one more time with a fresh transaction
+                with conn.cursor() as cur:
+                    log_progress("   Retrying with fresh transaction...")
+                    # Just try a simple query to test the connection
+                    cur.execute("SELECT 1;")
+                    log_progress("   Connection is working, but upload failed")
+            except Exception as retry_error:
+                log_progress(f"   Recovery failed: {retry_error}")
         
         if hasattr(e, 'diag'):
             if e.diag.message_detail:
                 log_progress(f"   Detail: {e.diag.message_detail}")
             if e.diag.message_hint:
                 log_progress(f"   Hint: {e.diag.message_hint}")
+            if e.diag.context:
+                log_progress(f"   Context: {e.diag.context}")
         
         conn.rollback()
         return 0, 0
@@ -651,6 +706,14 @@ def main():
         log_progress("❌ Failed to clear table. Exiting.")
         db_conn.close()
         return 1
+    
+    # Ensure the delete transaction is complete before starting upload
+    try:
+        db_conn.commit()
+        log_progress("   Table clearing transaction committed")
+    except Exception as e:
+        log_progress(f"⚠️ Warning: Could not commit after table clear: {e}")
+        # Try to continue anyway
     
     # Upload new data with staging table approach
     log_progress(f"\n📤 Uploading data to {TARGET_TABLE}...")
