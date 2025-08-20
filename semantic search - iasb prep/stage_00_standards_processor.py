@@ -618,11 +618,6 @@ def process_all_standards(standard_type: str):
     with tempfile.TemporaryDirectory() as temp_dir:
         logging.info(f"Using temporary directory: {temp_dir}")
         
-        # Create output subdirectory with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_folder = f"chapters_{timestamp}"
-        output_dir_relative = os.path.join(nas_output_path, output_folder).replace('\\', '/')
-        
         # Collect all JSON records
         all_json_records = []
         
@@ -651,43 +646,24 @@ def process_all_standards(standard_type: str):
                 logging.warning(f"No results for {filename}")
                 continue
             
-            # Create chapter PDF filename (matching EY format)
-            parsed = parse_merged_filename(filename)
-            if parsed:
-                # Format: 01_ias_2_inventories.pdf
-                chapter_pdf_name = f"{chapter_number:02d}_{parsed['standard']}_{parsed['number']}_{parsed['name']}.pdf"
-            else:
-                chapter_pdf_name = f"{chapter_number:02d}_{filename}"
-            
-            chapter_pdf_path = os.path.join(output_dir_relative, chapter_pdf_name).replace('\\', '/')
+            # Use the original merged PDF path (no need to create duplicates)
+            chapter_pdf_path = os.path.join(nas_input_path, filename).replace('\\', '/')
             
             # Create JSON records for this chapter (including blank pages for alignment)
             for page_idx, page_result in enumerate(chapter_results, start=1):
                 record = {
                     'document_id': document_id,
-                    'filename': chapter_pdf_name,
-                    'filepath': chapter_pdf_path,
+                    'filename': filename,  # Use original merged PDF filename
+                    'filepath': chapter_pdf_path,  # Path to original merged PDF
                     'page_number': page_idx,  # Sequential within chapter
                     'page_reference': page_result.get('page_reference'),
                     'content': page_result['content'],  # Will be "(BLANK PAGE)" for blank pages
                     'chapter_number': chapter_number,
                     'chapter_name': chapter_name,
-                    'source_filename': filename,  # Original merged PDF
+                    'source_filename': filename,  # Same as filename now
                     'source_page_number': page_result['page_number']  # Page in merged PDF
                 }
                 all_json_records.append(record)
-            
-            # Upload chapter PDF to NAS (copy of merged PDF with new name)
-            try:
-                with open(local_pdf_path, 'rb') as f:
-                    pdf_bytes = f.read()
-                
-                if write_to_nas(share_name, chapter_pdf_path, pdf_bytes):
-                    logging.info(f"Uploaded chapter PDF: {chapter_pdf_name}")
-                else:
-                    logging.error(f"Failed to upload chapter PDF: {chapter_pdf_name}")
-            except Exception as e:
-                logging.error(f"Error uploading chapter PDF: {e}")
             
             # Clean up local PDF
             try:
@@ -705,8 +681,8 @@ def process_all_standards(standard_type: str):
             with open(temp_json_path, 'w', encoding='utf-8') as f:
                 json.dump(all_json_records, f, indent=2, ensure_ascii=False)
             
-            # Upload to NAS
-            json_nas_path = os.path.join(output_dir_relative, "stage1_input.json").replace('\\', '/')
+            # Upload to NAS (directly to output path, no subdirectory)
+            json_nas_path = os.path.join(nas_output_path, "stage1_input.json").replace('\\', '/')
             
             try:
                 with open(temp_json_path, 'rb') as f:
@@ -714,7 +690,7 @@ def process_all_standards(standard_type: str):
                 
                 if write_to_nas(share_name, json_nas_path, json_bytes):
                     logging.info(f"Successfully uploaded stage1_input.json")
-                    logging.info(f"Output location: {share_name}/{output_dir_relative}")
+                    logging.info(f"Output location: {share_name}/{json_nas_path}")
                 else:
                     logging.error("Failed to upload stage1_input.json")
             except Exception as e:

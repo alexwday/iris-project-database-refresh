@@ -178,27 +178,29 @@ def create_json_record(page_result, chapter_info, page_idx):
 
 ### Output Directory Structure
 ```
-semantic_search/prep_output/iasb/{standard}/chapters_YYYYMMDD_HHMMSS/
-├── 01_ias_1_presentation_of_financial_statements.pdf
-├── 02_ias_2_inventories.pdf
-├── 03_ias_7_statement_of_cash_flows.pdf
-├── ...
+semantic_search/prep_output/iasb/{standard}/
 └── stage1_input.json
+
+Note: The JSON references the merged PDFs from:
+semantic_search/prep_output/iasb/{standard}/merged/
+├── ias-1-presentation-of-financial-statements.pdf
+├── ias-2-inventories.pdf
+├── ias-7-statement-of-cash-flows.pdf
+└── ...
 ```
 
-### Chapter PDF Naming Convention:
-- **Format**: `{chapter_num:02d}_{standard}_{number}_{name}.pdf`
-- **Example**: `01_ias_1_presentation_of_financial_statements.pdf` (for IAS 1)
-- **Example**: `07_ias_7_statement_of_cash_flows.pdf` (for IAS 7)
-- **Example**: `12_ias_12_income_taxes.pdf` (for IAS 12)
+### PDF References:
+- **No duplicate PDFs created** - JSON points to original merged PDFs
+- **Filename in JSON**: Original merged PDF name (e.g., `ias-2-inventories.pdf`)
+- **Filepath in JSON**: Path to merged PDF directory
 
 ### JSON Output Format (Matching EY Prep):
 ```json
 [
   {
     "document_id": "IAS_2024",
-    "filename": "01_ias_1_presentation_of_financial_statements.pdf",
-    "filepath": "semantic_search/prep_output/iasb/ias/chapters_20240115_100000/01_ias_1_presentation_of_financial_statements.pdf",
+    "filename": "ias-1-presentation-of-financial-statements.pdf",
+    "filepath": "semantic_search/prep_output/iasb/ias/merged/ias-1-presentation-of-financial-statements.pdf",
     "page_number": 1,
     "page_reference": "1",
     "content": "# IAS 1\n## Presentation of Financial Statements\n\n...",
@@ -209,8 +211,8 @@ semantic_search/prep_output/iasb/{standard}/chapters_YYYYMMDD_HHMMSS/
   },
   {
     "document_id": "IAS_2024",
-    "filename": "01_ias_1_presentation_of_financial_statements.pdf",
-    "filepath": "semantic_search/prep_output/iasb/ias/chapters_20240115_100000/01_ias_1_presentation_of_financial_statements.pdf",
+    "filename": "ias-1-presentation-of-financial-statements.pdf",
+    "filepath": "semantic_search/prep_output/iasb/ias/merged/ias-1-presentation-of-financial-statements.pdf",
     "page_number": 2,
     "page_reference": "2",
     "content": "## Objective\n\nThis Standard prescribes...",
