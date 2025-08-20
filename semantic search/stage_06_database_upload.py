@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 6: Database Upload Pipeline (FIXED VERSION)
-Loads CSV file from Stage 5, connects to PostgreSQL database, clears existing data
-for the specified document_id, and inserts new records with proper vector handling.
-
-FIXES:
-- Properly handles pgvector type casting using staging table approach
-- Registers pgvector extension before operations
-- Uses staging table with TEXT embedding column, then casts to vector type
+Stage 6: Database Upload Pipeline - Master Database Version
+Loads the master CSV database file from Stage 5, connects to PostgreSQL database,
+clears the ENTIRE table, and inserts all records with proper vector handling.
 
 Key Features:
-- Reads CSV file from NAS (Stage 5 output)
+- Reads master CSV database file from NAS (master_database.csv)
+- Clears entire PostgreSQL table (not just specific document_id)
+- Uploads all records from master CSV
 - Connects to PostgreSQL using psycopg2 and pgvector
 - Creates temporary staging table for CSV import
 - Uses COPY FROM to load into staging table
 - INSERT from staging with proper vector casting
 - Verifies insertion count
 
-Input: CSV file from Stage 5 output (iris_semantic_search_YYYY-MM-DD_HH-MM-SS.csv)
-Output: Properly populated iris_semantic_search table with working vector embeddings
+Input: Master CSV database file from Stage 5 (master_database.csv)
+Output: Fully replaced iris_semantic_search table with all records from master CSV
 """
 
 import os
@@ -30,6 +27,7 @@ import tempfile
 import socket
 import io
 import sys
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
 from datetime import datetime
@@ -77,8 +75,9 @@ NAS_PARAMS = {
 NAS_INPUT_PATH = "semantic_search/pipeline_output/stage5"
 NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
 
-# --- Document ID ---
-DOCUMENT_ID = "EY_GUIDE_2024"  # TODO: Update with actual document ID
+# --- Master CSV Configuration ---
+MASTER_CSV_FILENAME = "master_database.csv"  # Master database file from Stage 5
+MASTER_CSV_PATH = os.path.join(NAS_INPUT_PATH, MASTER_CSV_FILENAME).replace("\\", "/")
 
 # --- Database Configuration ---
 DB_HOST = os.environ.get("DB_HOST", "localhost")
@@ -103,7 +102,7 @@ VERBOSE_LOGGING = False
 # Logging Setup
 # ==============================================================================
 
-def setup_logging(log_file: Optional[str] = None):
+def setup_logging(log_file: Optional[str] = None, verbose: bool = False):
     """Configure logging to both file and console."""
     log_format = "%(asctime)s - %(levelname)s - %(message)s"
     
@@ -111,7 +110,7 @@ def setup_logging(log_file: Optional[str] = None):
     if log_file:
         handlers.append(logging.FileHandler(log_file))
     
-    level = logging.DEBUG if VERBOSE_LOGGING else logging.INFO
+    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format=log_format,
@@ -303,12 +302,25 @@ def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, in
                 SELECT COUNT(*) as total,
                        COUNT(embedding) as with_embedding,
                        COUNT(CASE WHEN embedding IS NULL THEN 1 END) as null_embedding
-                FROM {table}
-                WHERE document_id = %s;
-            """, (DOCUMENT_ID,))
+                FROM {table};
+            """)
             
             final_stats = cur.fetchone()
             log_progress(f"📊 Final stats in {table} - Total: {final_stats[0]}, With embedding: {final_stats[1]}, Null embedding: {final_stats[2]}")
+            
+            # Get document ID breakdown
+            cur.execute(f"""
+                SELECT document_id, COUNT(*) as count
+                FROM {table}
+                GROUP BY document_id
+                ORDER BY document_id;
+            """)
+            
+            doc_stats = cur.fetchall()
+            if doc_stats:
+                log_progress("\n📚 Document breakdown:")
+                for doc_id, count in doc_stats:
+                    log_progress(f"   {doc_id}: {count} chunks")
             
             # Step 7: Test vector similarity on a sample
             cur.execute(f"""
@@ -320,9 +332,8 @@ def upload_csv_with_staging(conn, table: str, csv_content: str) -> Tuple[int, in
                            ELSE NULL
                        END as dimensions
                 FROM {table}
-                WHERE document_id = %s
                 LIMIT 5;
-            """, (DOCUMENT_ID,))
+            """)
             
             log_progress("🔍 Sample vector verification:")
             for row in cur.fetchall():
@@ -459,21 +470,26 @@ def write_to_nas(share_name, nas_path_relative, content_bytes):
         if conn:
             conn.close()
 
-def delete_existing_data(conn, table: str, doc_id: str) -> bool:
-    """Delete existing data for document_id from table."""
+def clear_entire_table(conn, table: str) -> bool:
+    """Clear ALL records from the database table."""
     if not conn:
         return False
     
     try:
         with conn.cursor() as cur:
-            delete_sql = f"DELETE FROM {table} WHERE document_id = %s;"
-            cur.execute(delete_sql, (doc_id,))
-            deleted_count = cur.rowcount
+            # Get count before deletion
+            cur.execute(f"SELECT COUNT(*) FROM {table};")
+            before_count = cur.fetchone()[0]
+            
+            # TRUNCATE is faster than DELETE for entire table
+            truncate_sql = f"TRUNCATE TABLE {table} RESTART IDENTITY;"
+            cur.execute(truncate_sql)
             conn.commit()
-            log_progress(f"🗑️  Deleted {deleted_count} existing rows for document_id '{doc_id}'")
+            
+            log_progress(f"🗑️  Cleared entire table: {before_count} records removed")
             return True
     except psycopg2.Error as e:
-        logging.error(f"Error deleting data: {e}", exc_info=True)
+        logging.error(f"Error clearing table: {e}", exc_info=True)
         conn.rollback()
         return False
 
@@ -506,56 +522,76 @@ def main():
     """Main execution function."""
     start_time = datetime.now()
     
+    # Use local variables instead of modifying globals
+    master_csv_path_to_use = MASTER_CSV_PATH
+    verbose_logging_to_use = VERBOSE_LOGGING
+    
+    # Parse command-line arguments if running as script
+    try:
+        parser = argparse.ArgumentParser(description="Stage 6: Database Upload - Master Database Version")
+        parser.add_argument("--master-csv", help="Path to master CSV file on NAS (relative to share)")
+        parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+        args = parser.parse_args()
+        
+        if args.master_csv:
+            master_csv_path_to_use = args.master_csv
+            
+        if args.verbose:
+            verbose_logging_to_use = True
+    except:
+        # In notebook environment, argparse will fail - just use defaults
+        pass
+    
+    # Check environment variables as fallback
+    if os.environ.get("STAGE6_MASTER_CSV"):
+        master_csv_path_to_use = os.environ.get("STAGE6_MASTER_CSV")
+    
     # Validate configuration first
     if not validate_configuration():
         return 1
     
     # Setup logging
     log_file = f"stage6_upload_{start_time.strftime('%Y%m%d_%H%M%S')}.log"
-    setup_logging(log_file)
+    setup_logging(log_file, verbose_logging_to_use)
     
     log_progress("="*60)
-    log_progress("🚀 Starting Stage 6: Database Upload Pipeline (FIXED)")
+    log_progress("🚀 Starting Stage 6: Database Upload Pipeline - Master Database Version")
     log_progress(f"   Timestamp: {start_time}")
-    log_progress(f"   Document ID: {DOCUMENT_ID}")
+    log_progress(f"   Master CSV: {os.path.basename(master_csv_path_to_use)}")
     log_progress("="*60)
     
-    # Step 1: Connect to NAS and find latest CSV file
+    # Step 1: Connect to NAS and check for master CSV file
     log_progress("\n📁 Connecting to NAS...")
     log_progress(f"   NAS: {NAS_PARAMS['ip']}:{NAS_PARAMS['port']}")
     log_progress(f"   Share: {NAS_PARAMS['share']}")
-    log_progress(f"   Path: {NAS_INPUT_PATH}")
+    log_progress(f"   Master CSV Path: {master_csv_path_to_use}")
     
-    # List files in the Stage 5 output directory
-    files = list_nas_files(NAS_PARAMS["share"], NAS_INPUT_PATH)
-    if files is None:
-        log_progress("❌ Failed to connect to NAS or list files. Exiting.")
+    # Check if master CSV exists
+    smb_conn = create_nas_connection()
+    if not smb_conn:
+        log_progress("❌ Failed to connect to NAS. Exiting.")
         return 1
     
-    # Find CSV files
-    csv_files = [
-        f for f in files
-        if f.filename.startswith("iris_semantic_search_")
-        and f.filename.endswith(".csv")
-        and not f.isDirectory
-    ]
+    try:
+        # Try to get file attributes to check if it exists
+        try:
+            attributes = smb_conn.getAttributes(NAS_PARAMS["share"], master_csv_path_to_use)
+            if attributes.file_size > 0:
+                log_progress(f"✅ Found master CSV: {os.path.basename(master_csv_path_to_use)}")
+                log_progress(f"   File size: {attributes.file_size:,} bytes")
+            else:
+                log_progress(f"❌ Master CSV file is empty: {master_csv_path_to_use}")
+                return 1
+        except:
+            log_progress(f"❌ Master CSV file not found: {master_csv_path_to_use}")
+            log_progress("   Please run Stage 5 first to create the master database file")
+            return 1
+    finally:
+        smb_conn.close()
     
-    if not csv_files:
-        log_progress(f"❌ No CSV files found in {NAS_INPUT_PATH}")
-        log_progress(f"   Looking for files starting with 'iris_semantic_search_' and ending with '.csv'")
-        return 1
-    
-    # Sort by filename (which includes timestamp) to get the latest
-    csv_files.sort(key=lambda x: x.filename, reverse=True)
-    latest_csv = csv_files[0].filename
-    csv_path = f"{NAS_INPUT_PATH}/{latest_csv}"
-    
-    log_progress(f"✅ Found latest CSV: {latest_csv}")
-    log_progress(f"   Full path: {csv_path}")
-    
-    # Step 2: Read CSV content from NAS
-    log_progress("\n📥 Reading CSV content from NAS...")
-    csv_bytes = read_from_nas(NAS_PARAMS["share"], csv_path)
+    # Step 2: Read master CSV content from NAS
+    log_progress("\n📥 Reading master CSV content from NAS...")
+    csv_bytes = read_from_nas(NAS_PARAMS["share"], master_csv_path_to_use)
     if not csv_bytes:
         log_progress("❌ Failed to read CSV file from NAS. Exiting.")
         return 1
@@ -575,14 +611,14 @@ def main():
     db_conn = connect_to_database()
     if not db_conn:
         log_progress("❌ Failed to connect to database. Exiting.")
-        return
+        return 1
     
-    # Delete existing data
-    log_progress(f"\n🗑️  Clearing existing data for document_id '{DOCUMENT_ID}'...")
-    if not delete_existing_data(db_conn, TARGET_TABLE, DOCUMENT_ID):
-        log_progress("❌ Failed to clear existing data. Exiting.")
+    # Clear entire table
+    log_progress(f"\n🗑️  Clearing entire table {TARGET_TABLE}...")
+    if not clear_entire_table(db_conn, TARGET_TABLE):
+        log_progress("❌ Failed to clear table. Exiting.")
         db_conn.close()
-        return
+        return 1
     
     # Upload new data with staging table approach
     log_progress(f"\n📤 Uploading data to {TARGET_TABLE}...")
@@ -605,7 +641,7 @@ def main():
     
     log_progress("\n" + "="*60)
     log_progress("📊 Stage 6 Processing Summary:")
-    log_progress(f"   Document ID: {DOCUMENT_ID}")
+    log_progress(f"   Master CSV: {os.path.basename(master_csv_path_to_use)}")
     log_progress(f"   Records inserted: {inserted_count}")
     log_progress(f"   Duration: {duration}")
     log_progress(f"   End time: {end_time}")
