@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 5: CSV Export Pipeline
-Reads Stage 4 output, validates it matches PostgreSQL schema, and exports to CSV.
+Stage 5: CSV Export Pipeline with Master Database Management
+Reads Stage 4 output, validates it, and manages a master CSV database on NAS.
 
 Key Features:
-- Loads embedded chunks from Stage 4 output
+- Maintains a master CSV database file on NAS
+- Automatically updates/replaces data for specific document_ids
+- Creates the master CSV if it doesn't exist
+- Filters and replaces existing document data when updating
+- Creates timestamped backup copies
 - Validates data against PostgreSQL schema requirements
-- Exports to CSV with all database fields in correct order
 - Handles NULL values appropriately for auto-generated fields
-- Uses NAS for input/output operations
 
 Input: JSON file from Stage 4 output (stage4_embedded_chunks.json)
-Output: CSV file named iris_semantic_search_YYYY-MM-DD_HH-MM-SS.csv
+Output: 
+  - Master CSV database at configured path (master_database.csv)
+  - Timestamped backup copies in backups/ subdirectory
+
+Usage:
+  python stage_05_csv_export.py [options]
+  
+Options:
+  --document-id ID    Document ID to update in master CSV
+  --master-csv PATH   Path to master CSV file on NAS (relative to share)
+  --verbose          Enable verbose logging
+  
+Environment Variables:
+  STAGE5_DOCUMENT_ID  Document ID (if not provided via CLI)
+  STAGE5_MASTER_CSV   Master CSV path (if not provided via CLI)
 """
 
 import os
@@ -23,6 +39,7 @@ import tempfile
 import socket
 import io
 import sys
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime
@@ -56,6 +73,10 @@ NAS_PARAMS = {
 NAS_INPUT_PATH = "semantic_search/pipeline_output/stage4/stage4_embedded_chunks.json"
 NAS_OUTPUT_PATH = "semantic_search/pipeline_output/stage5"
 NAS_LOG_PATH = "semantic_search/pipeline_output/logs"
+
+# --- Master CSV Configuration ---
+MASTER_CSV_PATH = "semantic_search/pipeline_output/stage5/master_database.csv"  # Master CSV on NAS
+DOCUMENT_ID = None  # Will be extracted from input data or set via config
 
 # --- pysmb Configuration ---
 smb_structs.SUPPORT_SMB2 = True
@@ -250,6 +271,64 @@ def read_from_nas(share_name, nas_path_relative):
         if conn:
             conn.close()
 
+def file_exists_on_nas(share_name, nas_path_relative):
+    """Check if a file exists on the NAS."""
+    conn = None
+    try:
+        conn = create_nas_connection()
+        if not conn:
+            return False
+        
+        # Try to get file attributes
+        try:
+            attributes = conn.getAttributes(share_name, nas_path_relative)
+            return attributes.file_size > 0  # File exists and has content
+        except:
+            return False
+    except Exception as e:
+        logging.error(f"Error checking file existence on NAS: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def load_master_csv_from_nas(share_name, master_path):
+    """Load the master CSV from NAS and return as list of dictionaries."""
+    try:
+        csv_bytes = read_from_nas(share_name, master_path)
+        if csv_bytes is None:
+            return None
+        
+        csv_content = csv_bytes.decode('utf-8')
+        csv_reader = csv.DictReader(io.StringIO(csv_content))
+        
+        # Convert to list of dictionaries
+        rows = []
+        for row in csv_reader:
+            rows.append(dict(row))
+        
+        return rows
+    except Exception as e:
+        logging.error(f"Error loading master CSV: {e}")
+        return None
+
+def filter_rows_by_document_id(rows, document_id):
+    """Filter out rows with matching document_id."""
+    if not document_id:
+        return rows
+    
+    filtered = []
+    removed_count = 0
+    
+    for row in rows:
+        if row.get('document_id') != document_id:
+            filtered.append(row)
+        else:
+            removed_count += 1
+    
+    log_progress(f"  Removed {removed_count} existing rows for document_id: {document_id}")
+    return filtered
+
 # ==============================================================================
 # Logging Setup
 # ==============================================================================
@@ -411,17 +490,23 @@ def chunk_to_csv_row(chunk: Dict) -> List[Any]:
 # Main Processing
 # ==============================================================================
 
-def process_chunks_to_csv(chunks: List[Dict]) -> tuple[List[List[Any]], List[str]]:
+def process_chunks_to_csv(chunks: List[Dict]) -> tuple[List[List[Any]], List[str], Optional[str]]:
     """
     Process chunks and convert to CSV rows.
     
     Returns:
-        Tuple of (csv_rows, validation_errors)
+        Tuple of (csv_rows, validation_errors, document_id)
     """
     csv_rows = []
     all_errors = []
+    document_id = None
     
     log_progress(f"\n📊 Processing {len(chunks)} chunks for CSV export...")
+    
+    # Extract document_id from first chunk
+    if chunks and chunks[0].get('document_id'):
+        document_id = chunks[0]['document_id']
+        log_progress(f"  Document ID: {document_id}")
     
     for i, chunk in enumerate(tqdm(chunks, desc="Validating and converting chunks")):
         # Validate chunk
@@ -434,10 +519,83 @@ def process_chunks_to_csv(chunks: List[Dict]) -> tuple[List[List[Any]], List[str
         csv_row = chunk_to_csv_row(chunk)
         csv_rows.append(csv_row)
     
-    return csv_rows, all_errors
+    return csv_rows, all_errors, document_id
+
+def merge_with_master_csv(new_rows: List[List[Any]], document_id: Optional[str]) -> List[List[Any]]:
+    """
+    Merge new rows with existing master CSV, replacing rows with matching document_id.
+    
+    Returns:
+        Combined list of CSV rows
+    """
+    log_progress(f"\n🔄 Managing master CSV database...")
+    
+    # Check if master CSV exists
+    if file_exists_on_nas(NAS_PARAMS["share"], MASTER_CSV_PATH):
+        log_progress(f"  Master CSV exists, loading from: {MASTER_CSV_PATH}")
+        
+        # Load existing master CSV
+        existing_rows = load_master_csv_from_nas(NAS_PARAMS["share"], MASTER_CSV_PATH)
+        
+        if existing_rows is None:
+            log_progress("  ⚠️ Failed to load master CSV, treating as new")
+            return new_rows
+        
+        log_progress(f"  Loaded {len(existing_rows)} existing rows")
+        
+        # Filter out rows with matching document_id
+        if document_id:
+            filtered_rows = filter_rows_by_document_id(existing_rows, document_id)
+        else:
+            filtered_rows = existing_rows
+            log_progress("  ⚠️ No document_id found, appending all new rows")
+        
+        # Convert filtered dictionary rows back to list format
+        merged_rows = []
+        for row_dict in filtered_rows:
+            row_list = []
+            for column in DATABASE_COLUMNS:
+                row_list.append(row_dict.get(column, ""))
+            merged_rows.append(row_list)
+        
+        # Add new rows
+        merged_rows.extend(new_rows)
+        
+        log_progress(f"  Total rows in updated master: {len(merged_rows)}")
+        return merged_rows
+    
+    else:
+        log_progress(f"  Master CSV does not exist, creating new at: {MASTER_CSV_PATH}")
+        return new_rows
 
 def main():
     """Main processing function for Stage 5"""
+    
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Stage 5: CSV Export Pipeline with Master Database Management")
+    parser.add_argument("--document-id", help="Document ID to update in master CSV")
+    parser.add_argument("--master-csv", help="Path to master CSV file on NAS (relative to share)")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    args = parser.parse_args()
+    
+    # Apply command-line arguments
+    global DOCUMENT_ID, MASTER_CSV_PATH, VERBOSE_LOGGING
+    if args.document_id:
+        DOCUMENT_ID = args.document_id
+        log_progress(f"Using document ID from CLI: {DOCUMENT_ID}")
+    if args.master_csv:
+        MASTER_CSV_PATH = args.master_csv
+        log_progress(f"Using master CSV path from CLI: {MASTER_CSV_PATH}")
+    if args.verbose:
+        VERBOSE_LOGGING = True
+    
+    # Check environment variables as fallback
+    if not DOCUMENT_ID and os.environ.get("STAGE5_DOCUMENT_ID"):
+        DOCUMENT_ID = os.environ.get("STAGE5_DOCUMENT_ID")
+        log_progress(f"Using document ID from environment: {DOCUMENT_ID}")
+    if os.environ.get("STAGE5_MASTER_CSV"):
+        MASTER_CSV_PATH = os.environ.get("STAGE5_MASTER_CSV")
+        log_progress(f"Using master CSV path from environment: {MASTER_CSV_PATH}")
     
     # Validate configuration
     if not validate_configuration():
@@ -469,7 +627,12 @@ def main():
         return 1
     
     # Process chunks to CSV
-    csv_rows, validation_errors = process_chunks_to_csv(chunks)
+    csv_rows, validation_errors, document_id = process_chunks_to_csv(chunks)
+    
+    # Store document_id globally if found
+    if document_id:
+        global DOCUMENT_ID
+        DOCUMENT_ID = document_id
     
     # Report validation errors
     if validation_errors:
@@ -481,13 +644,11 @@ def main():
     else:
         log_progress("\n✅ All chunks passed validation")
     
-    # Generate output filename with timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_filename = f"iris_semantic_search_{timestamp}.csv"
-    output_path = os.path.join(NAS_OUTPUT_PATH, output_filename).replace("\\", "/")
+    # Merge with master CSV
+    all_csv_rows = merge_with_master_csv(csv_rows, document_id)
     
-    # Write CSV to memory buffer
-    log_progress(f"\n💾 Writing CSV with {len(csv_rows)} rows...")
+    # Write merged CSV to memory buffer
+    log_progress(f"\n💾 Writing master CSV with {len(all_csv_rows)} total rows...")
     csv_buffer = io.StringIO()
     csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_MINIMAL)
     
@@ -495,20 +656,31 @@ def main():
     csv_writer.writerow(DATABASE_COLUMNS)
     
     # Write data rows
-    for row in csv_rows:
+    for row in all_csv_rows:
         csv_writer.writerow(row)
     
     # Get CSV content as bytes
     csv_content = csv_buffer.getvalue()
     csv_bytes = csv_content.encode('utf-8')
     
-    # Save to NAS
-    log_progress(f"💾 Saving CSV to NAS: {output_path}")
-    if write_to_nas(NAS_PARAMS["share"], output_path, csv_bytes):
-        log_progress(f"✅ Successfully saved CSV with {len(csv_rows)} rows")
+    # Save master CSV to NAS
+    log_progress(f"💾 Saving master CSV to NAS: {MASTER_CSV_PATH}")
+    if write_to_nas(NAS_PARAMS["share"], MASTER_CSV_PATH, csv_bytes):
+        log_progress(f"✅ Successfully saved master CSV with {len(all_csv_rows)} total rows")
     else:
-        log_progress("❌ Failed to write CSV to NAS")
+        log_progress("❌ Failed to write master CSV to NAS")
         return 1
+    
+    # Also save a timestamped backup copy
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    backup_filename = f"iris_semantic_search_{timestamp}.csv"
+    backup_path = os.path.join(NAS_OUTPUT_PATH, "backups", backup_filename).replace("\\", "/")
+    
+    log_progress(f"\n📦 Creating backup copy: {backup_filename}")
+    if write_to_nas(NAS_PARAMS["share"], backup_path, csv_bytes):
+        log_progress(f"✅ Backup saved successfully")
+    else:
+        log_progress("⚠️ Failed to save backup (master CSV was saved successfully)")
     
     # Upload log file to NAS
     try:
@@ -528,9 +700,10 @@ def main():
     log_progress("\n" + "="*60)
     log_progress("📊 Stage 5 Processing Summary:")
     log_progress(f"  Total chunks processed: {len(chunks)}")
-    log_progress(f"  CSV rows created: {len(csv_rows)}")
-    log_progress(f"  Output file: {output_filename}")
-    log_progress(f"  File size: {len(csv_bytes):,} bytes")
+    log_progress(f"  New CSV rows added: {len(csv_rows)}")
+    log_progress(f"  Total rows in master: {len(all_csv_rows)}")
+    log_progress(f"  Document ID: {document_id if document_id else 'Not specified'}")
+    log_progress(f"  Master file size: {len(csv_bytes):,} bytes")
     
     # Check for embeddings
     chunks_with_embeddings = sum(1 for c in chunks if c.get('embedding') is not None)
@@ -543,7 +716,9 @@ def main():
     
     log_progress("="*60)
     log_progress("✅ Stage 5 processing completed successfully!")
-    log_progress(f"📄 CSV file ready for PostgreSQL import: {output_filename}")
+    log_progress(f"📄 Master CSV updated at: {MASTER_CSV_PATH}")
+    if document_id:
+        log_progress(f"🔄 Document '{document_id}' has been updated in the master database")
     log_progress("="*60 + "\n")
     
     # Clean up temp log file
