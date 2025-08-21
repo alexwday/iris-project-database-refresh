@@ -11,7 +11,7 @@ The IRIS database schema supports document management, content storage, and proc
 
 * **apg_catalog**: Document metadata and catalog information with vector embeddings
 * **apg_content**: Document content storage with section-based organization
-* **iris_textbook_database**: External textbook content with embeddings for semantic search
+* **iris_semantic_search**: External textbook content with embeddings for semantic search
 * **process_monitor_logs**: Comprehensive process monitoring and execution tracking
 
 ## Core Functions/Classes
@@ -39,17 +39,18 @@ Stores actual document content organized by sections for efficient retrieval and
 * **Content Organization**: Section-based content storage with summaries
 * **Navigation Fields**: Page numbers and section ordering for content location
 
-### External Textbook Table (iris_textbook_database)
+### External Textbook Table (iris_semantic_search)
 
 #### Purpose
-Stores external finance guidance content from providers like EY, PwC, KPMG, and IASB with detailed structural metadata and vector embeddings for semantic search.
+Stores external finance guidance content from providers like EY, PwC, KPMG, and IASB with semantic search capabilities, organizing content by chapters, sections, and chunks with vector embeddings.
 
 #### Key Fields
-* **System Fields**: Unique identifiers and creation timestamps
-* **Structural Positioning**: Document hierarchy with chapter, section, part, and sequence numbering
-* **Chapter Metadata**: Names, tags, summaries, and token counts for chapter-level organization
-* **Section Metadata**: Pagination, importance scoring, hierarchy, titles, and standards references
-* **Content & Embeddings**: Actual textbook content with vector embeddings and full-text search support
+* **System Fields**: Unique identifiers and creation/modification timestamps
+* **Document Fields**: Document ID, filename, filepath, and source information
+* **Chapter Fields**: Chapter number, name, summary, and page count for document organization
+* **Section Fields**: Section numbering, summaries, page ranges, and hierarchical references
+* **Chunk Fields**: Chunked content (400-500 tokens), numbering, and page references
+* **Embedding Fields**: Vector embeddings (2000 dimensions) for semantic search
 
 ### Process Monitoring Table (process_monitor_logs)
 
@@ -91,10 +92,10 @@ VALUES ('internal_capm', 'policy', 'Revenue Recognition Policy', 'Comprehensive 
 
 ### External Textbook Query
 ```sql
-SELECT document_id, chapter_name, section_title, content 
-FROM iris_textbook_database 
-WHERE section_standard_codes && ARRAY['IFRS 16'] 
-ORDER BY chapter_number, section_number, sequence_number;
+SELECT document_id, chapter_name, section_summary, chunk_content 
+FROM iris_semantic_search 
+WHERE chunk_content ILIKE '%IFRS 16%' 
+ORDER BY chapter_number, section_number, chunk_number;
 ```
 
 ### Process Monitoring Query
@@ -109,8 +110,8 @@ ORDER BY stage_start_time DESC;
 
 The database schema integrates with multiple IRIS system components:
 
-* **Database Subagents**: Query apg_catalog, apg_content, and iris_textbook_database for document retrieval
-* **External Subagents**: PwC, EY, KPMG, and IASB subagents use iris_textbook_database for textbook searches
+* **Database Subagents**: Query apg_catalog, apg_content, and iris_semantic_search for document retrieval
+* **External Subagents**: PwC, EY, KPMG, and IASB subagents use iris_semantic_search for textbook searches
 * **Vector Search**: Embedding fields support semantic similarity searches across all content tables
 * **Process Monitoring**: All system components log execution details to process_monitor_logs
 * **Content Management**: Document upload and refresh processes update catalog and content tables
@@ -206,42 +207,51 @@ CREATE TABLE apg_content (
     page_number INTEGER                           -- Page number for content breakdown
 );
 
--- 3. iris_textbook_database Table
-CREATE TABLE iris_textbook_database (
-  -- SYSTEM FIELDS
-  id SERIAL PRIMARY KEY,  -- Unique identifier for each chunk
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),  -- Record creation timestamp
-
-  -- STRUCTURAL POSITIONING FIELDS
-  document_id TEXT,              -- E.g., "IFRS_Handbook_2023" or "EY_GAAP_Guide_2024"
-  chapter_number INT,           -- E.g., 4
-  section_number INT,           -- E.g., 2
-  part_number INT,              -- E.g., 1
-  sequence_number INT,          -- E.g., 14 (position in chunk order)
-
-  -- CHAPTER-LEVEL METADATA
-  chapter_name TEXT,            -- E.g., "Leases" or "Revenue Recognition"
-  chapter_tags TEXT[],          -- E.g., {"Financial_Instruments", "Disclosure_Requirements"}
-  chapter_summary TEXT,         -- E.g., "This chapter explains revenue recognition..."
-  chapter_token_count INT,      -- Total token count across the full chapter
-
-  -- SECTION-LEVEL PAGINATION & IMPORTANCE
-  section_start_page INT,       -- E.g., 142 (start page of section)
-  section_end_page INT,         -- E.g., 143 (end page of section)
-  section_importance_score FLOAT,  -- E.g., 0.85 (importance of this section)
-  section_token_count INT,      -- Total token count for this section
-
-  -- SECTION-LEVEL METADATA
-  section_hierarchy TEXT,       -- E.g., "Chapter 4 > Section 4.2 > Subsection 4.2.3"
-  section_title TEXT,           -- E.g., "Identification of Separate Performance Obligations"
-  section_standard TEXT,        -- E.g., "IFRS", "US_GAAP", "AASB"
-  section_standard_codes TEXT[], -- E.g., {"IFRS 16", "IAS 17", "IFRS 9"}
-  section_references TEXT[],    -- E.g., {"Section 3.4", "IAS 36 Para 12-15"}
-
-  -- CONTENT & EMBEDDING
-  content TEXT NOT NULL,        -- The actual textbook content in this chunk
-  embedding VECTOR(2000),       -- OpenAI's text-embedding-3-large model vector
-  text_search_vector TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+-- 3. iris_semantic_search Table
+CREATE TABLE iris_semantic_search (
+    -- Primary Key
+    id SERIAL PRIMARY KEY, -- Auto-incrementing unique identifier for each record
+    
+    -- Document Fields
+    document_id VARCHAR(255) NOT NULL, -- Unique identifier for the document (e.g., "EY_GUIDE_2024")
+    filename VARCHAR(255) NOT NULL, -- Chapter-specific PDF filename (e.g., "03_Lease_Accounting.pdf")
+    filepath TEXT, -- Full path to the chapter PDF file
+    source_filename VARCHAR(255), -- Original source PDF filename before splitting into chapters
+    
+    -- Chapter Fields
+    chapter_number INTEGER, -- Chapter number within the document
+    chapter_name VARCHAR(500), -- Name/title of the chapter
+    chapter_summary TEXT, -- GPT-generated summary of the entire chapter (2-3 sentences)
+    chapter_page_count INTEGER, -- Total number of pages in the chapter
+    
+    -- Section Fields  
+    section_number INTEGER, -- Sequential section number within the chapter
+    section_summary TEXT, -- Hierarchical section summary with breadcrumb format (Chapter > Section: Summary)
+    section_start_page INTEGER, -- First page number where this section begins
+    section_end_page INTEGER, -- Last page number where this section ends
+    section_page_count INTEGER, -- Total number of pages in the section
+    section_start_reference VARCHAR(50), -- Page reference for section start (e.g., "1-5")
+    section_end_reference VARCHAR(50), -- Page reference for section end (e.g., "1-8")
+    
+    -- Chunk Fields
+    chunk_number INTEGER NOT NULL, -- Sequential chunk number within each section (starts at 1 for each section)
+    chunk_content TEXT NOT NULL, -- The actual text content of this chunk (400-500 tokens)
+    chunk_start_page INTEGER, -- First page number this chunk spans
+    chunk_end_page INTEGER, -- Last page number this chunk spans
+    chunk_start_reference VARCHAR(50), -- Page reference for chunk start (e.g., "1-5")
+    chunk_end_reference VARCHAR(50), -- Page reference for chunk end (e.g., "1-7")
+    
+    -- Embedding Field
+    embedding VECTOR(2000), -- 2000-dimensional embedding vector (uses 4 bytes per dimension)
+    
+    -- Extra Fields
+    extra1 TEXT, -- Flexible field for future use (can store any text data)
+    extra2 TEXT, -- Flexible field for future use (can store any text data)
+    extra3 TEXT, -- Flexible field for future use (can store any text data)
+    
+    -- System Fields
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, -- Timestamp when the record was created
+    last_modified TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP -- Timestamp when the record was last modified
 );
 
 -- 4. process_monitor_logs Table
