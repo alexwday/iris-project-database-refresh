@@ -594,6 +594,9 @@ if __name__ == "__main__":
                     updated_files_nas = pd.DataFrame(columns=['file_name', 'file_path', 'file_size', 'date_last_modified', 'date_created', 'reason'])
                     files_to_delete = pd.DataFrame(columns=['id', 'file_name', 'file_path', 'document_source', 'document_type', 'document_name'])
                     comparison_df = pd.DataFrame(columns=['_merge'])  # Empty comparison_df with _merge column
+                    
+                    # Combine new and updated files for processing (in this case, just new files)
+                    files_to_process = new_files.copy()
                 else:
                     # --- Perform the Comparison using Merge ---
                     print("   Performing comparison based on 'file_name'...")
