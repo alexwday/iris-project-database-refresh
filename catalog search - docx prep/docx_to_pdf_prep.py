@@ -222,19 +222,30 @@ def copy_pdf_to_output(conn, share_name, source_path, dest_path):
         print(f"[ERROR] Failed to copy PDF from '{source_path}' to '{dest_path}': {e}")
         return False
 
-def convert_docx_to_pdf(docx_content, filename):
+def convert_docx_to_pdf(docx_content, filename, use_batch_dir=None):
     """
     Convert DOCX content to PDF format preserving all original formatting.
     
     Tries multiple methods in order of quality:
-    1. docx2pdf (excellent quality, requires MS Word on Windows/Mac)
-    2. Aspose.Words (excellent quality, commercial, pure Python)
-    3. LibreOffice (excellent quality, free, cross-platform)
-    4. pypandoc (poor formatting, last resort only)
+    1. LibreOffice (excellent quality, free, cross-platform) - PRIORITIZED on Mac
+    2. docx2pdf (excellent quality, requires MS Word on Windows/Mac) - only if batch mode
+    3. Aspose.Words (excellent quality, commercial, pure Python)
+    4. Pure Python fallback (basic formatting)
+    5. pypandoc (poor formatting, last resort only)
+    
+    Args:
+        docx_content: The DOCX file content as bytes
+        filename: The original filename
+        use_batch_dir: Optional directory for batch conversion (avoids permission popups)
     """
     
-    # Create a temporary directory for file operations
-    temp_dir = tempfile.mkdtemp()
+    # Use provided batch directory or create a temporary one
+    if use_batch_dir:
+        temp_dir = use_batch_dir
+        cleanup_temp = False
+    else:
+        temp_dir = tempfile.mkdtemp()
+        cleanup_temp = True
     
     try:
         # Write DOCX content to temporary file
@@ -244,49 +255,23 @@ def convert_docx_to_pdf(docx_content, filename):
         with open(temp_docx_path, 'wb') as f:
             f.write(docx_content)
         
-        # Method 1: Try docx2pdf (excellent quality, MS Word required)
-        if HAS_DOCX2PDF:
-            try:
-                print(f"  Using docx2pdf for conversion (excellent quality)...")
-                convert(temp_docx_path, temp_pdf_path)
-                
-                # Read the converted PDF
-                with open(temp_pdf_path, 'rb') as f:
-                    pdf_content = f.read()
-                return pdf_content
-            except Exception as e:
-                print(f"  docx2pdf failed: {e}")
-                print(f"  Trying fallback methods...")
+        # Check if we're on macOS
+        is_macos = platform.system() == "Darwin"
         
-        # Method 2: Try Aspose.Words (excellent quality, commercial)
-        if HAS_ASPOSE:
-            try:
-                print(f"  Using Aspose.Words for conversion (excellent quality, pure Python)...")
-                doc = aw.Document(temp_docx_path)
-                doc.save(temp_pdf_path)
-                
-                # Read the converted PDF
-                with open(temp_pdf_path, 'rb') as f:
-                    pdf_content = f.read()
-                return pdf_content
-            except Exception as e:
-                print(f"  Aspose.Words failed: {e}")
-                print(f"  Trying next fallback method...")
-        
-        # Method 3: Try LibreOffice via command line (best free option)
+        # Method 1: Try LibreOffice FIRST (especially on Mac to avoid permission issues)
         if HAS_SUBPROCESS:
             try:
-                print(f"  Using LibreOffice for conversion...")
+                print(f"  Checking for LibreOffice...")
                 
                 # Try to find LibreOffice executable
                 libreoffice_paths = [
+                    '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # Mac - check first
                     'libreoffice',  # Linux standard
                     'soffice',  # Alternative name
                     '/usr/bin/libreoffice',  # Linux full path
                     '/usr/bin/soffice',  # Linux alternative full path
                     '/usr/lib/libreoffice/program/soffice',  # Some Linux distros
                     '/opt/libreoffice/program/soffice',  # Manual Linux installation
-                    '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # Mac
                     'C:\\Program Files\\LibreOffice\\program\\soffice.exe',  # Windows
                 ]
                 
@@ -295,11 +280,13 @@ def convert_docx_to_pdf(docx_content, filename):
                     try:
                         subprocess.run([path, '--version'], capture_output=True, timeout=5)
                         libreoffice_cmd = path
+                        print(f"  Found LibreOffice at: {path}")
                         break
                     except:
                         continue
                 
                 if libreoffice_cmd:
+                    print(f"  Using LibreOffice for conversion (no permission popups!)...")
                     # Convert using LibreOffice
                     cmd = [
                         libreoffice_cmd,
@@ -318,10 +305,42 @@ def convert_docx_to_pdf(docx_content, filename):
                         return pdf_content
                     else:
                         print(f"  LibreOffice conversion failed with return code {result.returncode}")
-                else:
-                    print(f"  LibreOffice not found on system")
+                        if result.stderr:
+                            print(f"  Error: {result.stderr}")
             except Exception as e:
                 print(f"  LibreOffice conversion failed: {e}")
+        
+        # Method 2: Try docx2pdf (only if not on Mac, or if batch directory provided)
+        if HAS_DOCX2PDF and (not is_macos or use_batch_dir):
+            try:
+                if is_macos and use_batch_dir:
+                    print(f"  Using docx2pdf in batch mode (should avoid permission popups)...")
+                else:
+                    print(f"  Using docx2pdf for conversion...")
+                convert(temp_docx_path, temp_pdf_path)
+                
+                # Read the converted PDF
+                with open(temp_pdf_path, 'rb') as f:
+                    pdf_content = f.read()
+                return pdf_content
+            except Exception as e:
+                print(f"  docx2pdf failed: {e}")
+                print(f"  Trying fallback methods...")
+        
+        # Method 3: Try Aspose.Words (excellent quality, commercial)
+        if HAS_ASPOSE:
+            try:
+                print(f"  Using Aspose.Words for conversion (excellent quality, pure Python)...")
+                doc = aw.Document(temp_docx_path)
+                doc.save(temp_pdf_path)
+                
+                # Read the converted PDF
+                with open(temp_pdf_path, 'rb') as f:
+                    pdf_content = f.read()
+                return pdf_content
+            except Exception as e:
+                print(f"  Aspose.Words failed: {e}")
+                print(f"  Trying next fallback method...")
         
         # Method 4: Pure Python fallback with docx + fpdf2
         if HAS_DOCX_FPDF:
@@ -404,11 +423,12 @@ def convert_docx_to_pdf(docx_content, filename):
         print(f"[ERROR] Failed to convert DOCX to PDF for '{filename}': {e}")
         return None
     finally:
-        # Clean up temporary directory
-        try:
-            shutil.rmtree(temp_dir)
-        except:
-            pass
+        # Clean up temporary directory only if we created it
+        if cleanup_temp:
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
 
 # ==============================================================================
 # --- Main Execution Logic ---
@@ -431,6 +451,10 @@ def main():
         if system_platform == "Linux":
             print("  ✗ docx2pdf installed but NOT usable on Linux (requires MS Word)")
             print("    Note: docx2pdf only works on Windows/Mac with Microsoft Word")
+        elif system_platform == "Darwin":  # macOS
+            converters_found.append("docx2pdf (MS Word - may show permission popups)")
+            print("  ⚠ docx2pdf available but may trigger permission popups on macOS")
+            print("    LibreOffice will be prioritized to avoid this issue")
         else:
             converters_found.append("docx2pdf (excellent quality, MS Word required)")
             print("  ✓ docx2pdf available (excellent quality, preserves all formatting)")
@@ -522,6 +546,19 @@ def main():
         # Process DOCX files (convert to PDF)
         if docx_files:
             print(f"\n--- Processing {len(docx_files)} DOCX/DOC files ---")
+            
+            # Check if we're on macOS and might need batch processing
+            is_macos = platform.system() == "Darwin"
+            batch_dir = None
+            
+            # If on Mac and we have multiple DOCX files, create a batch directory
+            if is_macos and len(docx_files) > 1 and HAS_DOCX2PDF:
+                print("\n[INFO] macOS detected with multiple DOCX files.")
+                print("Creating batch conversion directory to avoid permission popups...")
+                batch_dir = tempfile.mkdtemp(prefix="docx_batch_")
+                print(f"Batch directory: {batch_dir}")
+                print("Note: LibreOffice will be tried first to avoid permission issues entirely.\n")
+            
             for file_info in docx_files:
                 source_path = file_info['path']
                 filename = file_info['filename']
@@ -542,8 +579,8 @@ def main():
                         error_count += 1
                         continue
                     
-                    # Convert to PDF
-                    pdf_content = convert_docx_to_pdf(docx_content, filename)
+                    # Convert to PDF (pass batch_dir if available)
+                    pdf_content = convert_docx_to_pdf(docx_content, filename, use_batch_dir=batch_dir)
                     if pdf_content is None:
                         print(f"[ERROR] Failed to convert DOCX to PDF: {filename}")
                         error_count += 1
@@ -558,6 +595,14 @@ def main():
                 except Exception as e:
                     print(f"[ERROR] Failed to process DOCX file '{filename}': {e}")
                     error_count += 1
+            
+            # Clean up batch directory if we created one
+            if batch_dir:
+                try:
+                    print(f"\nCleaning up batch directory: {batch_dir}")
+                    shutil.rmtree(batch_dir)
+                except Exception as e:
+                    print(f"[WARNING] Could not clean up batch directory: {e}")
         
         # Summary
         print("\n" + "="*60)
