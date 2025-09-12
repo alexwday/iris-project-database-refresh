@@ -26,20 +26,24 @@ try:
     HAS_DOCX2PDF = True
 except ImportError:
     HAS_DOCX2PDF = False
+
+# LibreOffice via subprocess (best free cross-platform solution)
+import subprocess
+HAS_SUBPROCESS = True
+
+try:
+    # Optional: Aspose.Words for Python (commercial, best pure Python solution)
+    import aspose.words as aw
+    HAS_ASPOSE = True
+except ImportError:
+    HAS_ASPOSE = False
     
 try:
-    # Fallback to pypandoc for Linux or systems without MS Word
+    # Fallback to pypandoc (poor formatting preservation, last resort only)
     import pypandoc
     HAS_PYPANDOC = True
 except ImportError:
     HAS_PYPANDOC = False
-
-try:
-    # Another fallback - unoconv via subprocess (requires LibreOffice)
-    import subprocess
-    HAS_SUBPROCESS = True
-except ImportError:
-    HAS_SUBPROCESS = False
 
 # ==============================================================================
 # --- Configuration ---
@@ -206,10 +210,11 @@ def convert_docx_to_pdf(docx_content, filename):
     """
     Convert DOCX content to PDF format preserving all original formatting.
     
-    Tries multiple methods in order:
-    1. docx2pdf (best quality, requires MS Word on Windows/Mac)
-    2. pypandoc (good quality, cross-platform)
-    3. LibreOffice via command line (good quality, requires LibreOffice)
+    Tries multiple methods in order of quality:
+    1. docx2pdf (excellent quality, requires MS Word on Windows/Mac)
+    2. Aspose.Words (excellent quality, commercial, pure Python)
+    3. LibreOffice (excellent quality, free, cross-platform)
+    4. pypandoc (poor formatting, last resort only)
     """
     
     # Create a temporary directory for file operations
@@ -223,10 +228,10 @@ def convert_docx_to_pdf(docx_content, filename):
         with open(temp_docx_path, 'wb') as f:
             f.write(docx_content)
         
-        # Method 1: Try docx2pdf (best quality, preserves all formatting)
+        # Method 1: Try docx2pdf (excellent quality, MS Word required)
         if HAS_DOCX2PDF:
             try:
-                print(f"  Using docx2pdf for conversion (best quality)...")
+                print(f"  Using docx2pdf for conversion (excellent quality)...")
                 convert(temp_docx_path, temp_pdf_path)
                 
                 # Read the converted PDF
@@ -237,26 +242,22 @@ def convert_docx_to_pdf(docx_content, filename):
                 print(f"  docx2pdf failed: {e}")
                 print(f"  Trying fallback methods...")
         
-        # Method 2: Try pypandoc (good quality, cross-platform)
-        if HAS_PYPANDOC:
+        # Method 2: Try Aspose.Words (excellent quality, commercial)
+        if HAS_ASPOSE:
             try:
-                print(f"  Using pypandoc for conversion...")
-                pypandoc.convert_file(
-                    temp_docx_path,
-                    'pdf',
-                    outputfile=temp_pdf_path,
-                    extra_args=['--pdf-engine=xelatex']  # Better Unicode support
-                )
+                print(f"  Using Aspose.Words for conversion (excellent quality, pure Python)...")
+                doc = aw.Document(temp_docx_path)
+                doc.save(temp_pdf_path)
                 
                 # Read the converted PDF
                 with open(temp_pdf_path, 'rb') as f:
                     pdf_content = f.read()
                 return pdf_content
             except Exception as e:
-                print(f"  pypandoc failed: {e}")
+                print(f"  Aspose.Words failed: {e}")
                 print(f"  Trying next fallback method...")
         
-        # Method 3: Try LibreOffice via command line
+        # Method 3: Try LibreOffice via command line (best free option)
         if HAS_SUBPROCESS:
             try:
                 print(f"  Using LibreOffice for conversion...")
@@ -302,13 +303,33 @@ def convert_docx_to_pdf(docx_content, filename):
             except Exception as e:
                 print(f"  LibreOffice conversion failed: {e}")
         
+        # Method 4: Try pypandoc as last resort (poor formatting preservation)
+        if HAS_PYPANDOC:
+            try:
+                print(f"  WARNING: Using pypandoc (formatting may not be preserved)...")
+                pypandoc.convert_file(
+                    temp_docx_path,
+                    'pdf',
+                    outputfile=temp_pdf_path,
+                    extra_args=['--pdf-engine=xelatex']  # Better Unicode support
+                )
+                
+                # Read the converted PDF
+                with open(temp_pdf_path, 'rb') as f:
+                    pdf_content = f.read()
+                print(f"  Note: pypandoc conversion completed but formatting may differ from original")
+                return pdf_content
+            except Exception as e:
+                print(f"  pypandoc failed: {e}")
+        
         # If all methods fail, inform user about installation options
         print(f"\n[ERROR] No suitable DOCX to PDF converter found!")
-        print(f"Please install one of the following:")
-        print(f"  1. For Windows/Mac: pip install docx2pdf (requires MS Word)")
-        print(f"  2. For all platforms: pip install pypandoc (and pandoc system package)")
-        print(f"  3. For all platforms: Install LibreOffice from https://www.libreoffice.org/")
-        print(f"\nNote: For best quality preservation of formatting, docx2pdf is recommended.")
+        print(f"Please install one of the following (in order of recommendation):")
+        print(f"  1. LibreOffice from https://www.libreoffice.org/ (best free option)")
+        print(f"  2. For Windows/Mac: pip install docx2pdf (requires MS Word)")
+        print(f"  3. For commercial use: pip install aspose-words (excellent quality, pure Python)")
+        print(f"  4. Last resort: pip install pypandoc (poor formatting preservation)")
+        print(f"\nNote: LibreOffice provides the best balance of quality and compatibility.")
         return None
         
     except Exception as e:
@@ -332,18 +353,28 @@ def main():
     
     # Check available conversion methods
     print("[0] Checking available DOCX to PDF conversion methods...")
+    converters_found = []
+    
     if HAS_DOCX2PDF:
-        print("  ✓ docx2pdf available (best quality, preserves all formatting)")
-    elif HAS_PYPANDOC:
-        print("  ✓ pypandoc available (good quality, cross-platform)")
-    elif HAS_SUBPROCESS:
+        converters_found.append("docx2pdf (excellent quality, MS Word required)")
+        print("  ✓ docx2pdf available (excellent quality, preserves all formatting)")
+    if HAS_ASPOSE:
+        converters_found.append("Aspose.Words (excellent quality, pure Python)")
+        print("  ✓ Aspose.Words available (excellent quality, commercial)")
+    if HAS_SUBPROCESS:
+        converters_found.append("LibreOffice (will check at runtime)")
         print("  ✓ LibreOffice command line available (checking at runtime)")
-    else:
+    if HAS_PYPANDOC:
+        converters_found.append("pypandoc (poor formatting preservation)")
+        print("  ⚠ pypandoc available (WARNING: poor formatting preservation)")
+    
+    if not converters_found:
         print("  ✗ No DOCX to PDF converter found!")
-        print("\nPlease install one of the following:")
-        print("  1. For Windows/Mac: pip install docx2pdf (requires MS Word)")
-        print("  2. For all platforms: pip install pypandoc (and pandoc system package)")
-        print("  3. For all platforms: Install LibreOffice from https://www.libreoffice.org/")
+        print("\nRecommended installation (in order of preference):")
+        print("  1. LibreOffice from https://www.libreoffice.org/ (best free option)")
+        print("  2. For Windows/Mac: pip install docx2pdf (requires MS Word)")
+        print("  3. For commercial use: pip install aspose-words (pure Python)")
+        print("  4. Last resort: pip install pypandoc (poor formatting)")
         print("\nNote: The script will still copy PDF files even without a converter.")
     print("-" * 60)
     
