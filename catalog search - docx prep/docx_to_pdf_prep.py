@@ -13,6 +13,7 @@ PDF files are copied directly to the output folder without modification.
 
 import sys
 import os
+import platform
 from smb.SMBConnection import SMBConnection
 from smb import smb_structs
 import io
@@ -44,6 +45,21 @@ try:
     HAS_PYPANDOC = True
 except ImportError:
     HAS_PYPANDOC = False
+
+try:
+    # Pure Python fallback - docx + fpdf2 for basic conversion
+    from docx import Document
+    from fpdf import FPDF
+    HAS_DOCX_FPDF = True
+except ImportError:
+    HAS_DOCX_FPDF = False
+
+try:
+    # Alternative pure Python - python-docx + pdfkit (requires wkhtmltopdf)
+    import pdfkit
+    HAS_PDFKIT = True
+except ImportError:
+    HAS_PDFKIT = False
 
 # ==============================================================================
 # --- Configuration ---
@@ -264,8 +280,12 @@ def convert_docx_to_pdf(docx_content, filename):
                 
                 # Try to find LibreOffice executable
                 libreoffice_paths = [
-                    'libreoffice',  # Linux
+                    'libreoffice',  # Linux standard
                     'soffice',  # Alternative name
+                    '/usr/bin/libreoffice',  # Linux full path
+                    '/usr/bin/soffice',  # Linux alternative full path
+                    '/usr/lib/libreoffice/program/soffice',  # Some Linux distros
+                    '/opt/libreoffice/program/soffice',  # Manual Linux installation
                     '/Applications/LibreOffice.app/Contents/MacOS/soffice',  # Mac
                     'C:\\Program Files\\LibreOffice\\program\\soffice.exe',  # Windows
                 ]
@@ -303,7 +323,54 @@ def convert_docx_to_pdf(docx_content, filename):
             except Exception as e:
                 print(f"  LibreOffice conversion failed: {e}")
         
-        # Method 4: Try pypandoc as last resort (poor formatting preservation)
+        # Method 4: Pure Python fallback with docx + fpdf2
+        if HAS_DOCX_FPDF:
+            try:
+                print(f"  Using pure Python conversion (docx + fpdf2)...")
+                print(f"  Note: This preserves text content but not complex formatting")
+                
+                # Read DOCX document
+                doc = Document(temp_docx_path)
+                
+                # Create PDF
+                pdf = FPDF()
+                pdf.set_auto_page_break(auto=True, margin=15)
+                pdf.add_page()
+                pdf.set_font("Arial", size=11)
+                
+                # Add content from DOCX
+                for paragraph in doc.paragraphs:
+                    text = paragraph.text.strip()
+                    if text:
+                        # Check if it looks like a heading
+                        if paragraph.style and paragraph.style.name and 'Heading' in paragraph.style.name:
+                            pdf.set_font("Arial", 'B', 14)
+                            pdf.multi_cell(0, 10, text)
+                            pdf.set_font("Arial", size=11)
+                        else:
+                            # Regular paragraph
+                            pdf.multi_cell(0, 6, text)
+                        pdf.ln(2)
+                
+                # Add tables as text
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_text = " | ".join([cell.text.strip() for cell in row.cells])
+                        if row_text.strip():
+                            pdf.multi_cell(0, 6, row_text)
+                    pdf.ln(2)
+                
+                # Save PDF
+                pdf.output(temp_pdf_path)
+                
+                # Read the converted PDF
+                with open(temp_pdf_path, 'rb') as f:
+                    pdf_content = f.read()
+                return pdf_content
+            except Exception as e:
+                print(f"  Pure Python conversion failed: {e}")
+        
+        # Method 5: Try pypandoc as last resort (poor formatting preservation)
         if HAS_PYPANDOC:
             try:
                 print(f"  WARNING: Using pypandoc (formatting may not be preserved)...")
@@ -324,12 +391,13 @@ def convert_docx_to_pdf(docx_content, filename):
         
         # If all methods fail, inform user about installation options
         print(f"\n[ERROR] No suitable DOCX to PDF converter found!")
-        print(f"Please install one of the following (in order of recommendation):")
+        print(f"Please install one of the following:")
+        print(f"\nFor Dataiku/restricted environments (Python packages only):")
+        print(f"  pip install python-docx fpdf2  # Basic but pure Python solution")
+        print(f"  pip install aspose-words       # Commercial, excellent quality")
+        print(f"\nFor full system access:")
         print(f"  1. LibreOffice from https://www.libreoffice.org/ (best free option)")
         print(f"  2. For Windows/Mac: pip install docx2pdf (requires MS Word)")
-        print(f"  3. For commercial use: pip install aspose-words (excellent quality, pure Python)")
-        print(f"  4. Last resort: pip install pypandoc (poor formatting preservation)")
-        print(f"\nNote: LibreOffice provides the best balance of quality and compatibility.")
         return None
         
     except Exception as e:
@@ -353,29 +421,55 @@ def main():
     
     # Check available conversion methods
     print("[0] Checking available DOCX to PDF conversion methods...")
+    system_platform = platform.system()
+    print(f"  Platform detected: {system_platform}")
+    
     converters_found = []
     
+    # Check docx2pdf (not for Linux)
     if HAS_DOCX2PDF:
-        converters_found.append("docx2pdf (excellent quality, MS Word required)")
-        print("  ✓ docx2pdf available (excellent quality, preserves all formatting)")
+        if system_platform == "Linux":
+            print("  ✗ docx2pdf installed but NOT usable on Linux (requires MS Word)")
+            print("    Note: docx2pdf only works on Windows/Mac with Microsoft Word")
+        else:
+            converters_found.append("docx2pdf (excellent quality, MS Word required)")
+            print("  ✓ docx2pdf available (excellent quality, preserves all formatting)")
+    
     if HAS_ASPOSE:
         converters_found.append("Aspose.Words (excellent quality, pure Python)")
         print("  ✓ Aspose.Words available (excellent quality, commercial)")
+    
     if HAS_SUBPROCESS:
         converters_found.append("LibreOffice (will check at runtime)")
         print("  ✓ LibreOffice command line available (checking at runtime)")
+    
+    if HAS_DOCX_FPDF:
+        converters_found.append("docx + fpdf2 (pure Python, basic formatting)")
+        print("  ✓ Pure Python conversion available (python-docx + fpdf2)")
+        print("    Note: Preserves text content but not complex formatting")
+    
     if HAS_PYPANDOC:
         converters_found.append("pypandoc (poor formatting preservation)")
-        print("  ⚠ pypandoc available (WARNING: poor formatting preservation)")
+        print("  ⚠ pypandoc Python package found but needs pandoc system package")
+        print("    Install pandoc: sudo apt-get install pandoc (Ubuntu/Debian)")
+        print("    Or: pypandoc.download_pandoc() in Python")
     
-    if not converters_found:
-        print("  ✗ No DOCX to PDF converter found!")
-        print("\nRecommended installation (in order of preference):")
-        print("  1. LibreOffice from https://www.libreoffice.org/ (best free option)")
-        print("  2. For Windows/Mac: pip install docx2pdf (requires MS Word)")
-        print("  3. For commercial use: pip install aspose-words (pure Python)")
-        print("  4. Last resort: pip install pypandoc (poor formatting)")
-        print("\nNote: The script will still copy PDF files even without a converter.")
+    if not converters_found or (system_platform == "Linux" and len(converters_found) == 1 and "LibreOffice" in converters_found[0]):
+        print("\n" + "="*60)
+        if system_platform == "Linux":
+            print("IMPORTANT FOR LINUX USERS:")
+            print("You need to install LibreOffice for DOCX conversion:")
+            print("  sudo apt-get install libreoffice  (Ubuntu/Debian)")
+            print("  sudo yum install libreoffice      (RHEL/CentOS)")
+            print("  sudo dnf install libreoffice      (Fedora)")
+            print("\nOptionally, if you want to use pypandoc:")
+            print("  sudo apt-get install pandoc")
+        else:
+            print("Recommended installation (in order of preference):")
+            print("  1. LibreOffice from https://www.libreoffice.org/ (best free option)")
+            print("  2. For Windows/Mac: pip install docx2pdf (requires MS Word)")
+            print("  3. For commercial use: pip install aspose-words (pure Python)")
+        print("="*60)
     print("-" * 60)
     
     # Connect to NAS
