@@ -225,16 +225,18 @@ PHASE 3 - DESCRIPTION FIELD GENERATION:
     - Include percentages for materiality thresholds
 
 PHASE 4 - USAGE FIELD GENERATION:
-4.  Generate the `usage` field as a single integrated paragraph optimized for both embedding similarity and LLM selection:
+4.  Generate the `usage` field as a comprehensive paragraph containing ALL critical SAB99 details for LLM selection (since the LLM only sees this field during document selection):
 
-    "SAB99 analysis for [Segment] operations in [Region] addressing [specific issue type]. Root cause identified as [root cause] resulting in $[amount] [impact type] adjustment affecting [specific period]. SOX impact: [Y/N with SII details if Y]. ICFR assessment: [assessment]. Document covers [segment] [specific process] issues, [region] regulatory compliance, [root cause type] remediation, [accounting standards mentioned], [systems/applications affected], materiality assessments [if over thresholds], EUDA controls [if Y], and addresses queries about [specific technical keywords and concepts from the document]."
+    "SAB99 document [ID if available] for [Segment] segment in [Region] region. Title: [title]. Status: [issue status]. Internal/External impact: [value]. Issue description: [full description of issues from bullet points]. Root cause: [root cause]. Financial impacts: [list all amounts and types]. Total impact: $[primary amount]. Impact type: [type] affecting [specific period/quarters]. SOX impact: [Y/N with full SII details if Y]. ICFR assessment: [assessment]. Materiality: P&L $[amount] ([%] of $120mm threshold), BS $[amount] ([%] of $1.2bn threshold). EUDA-related: [Y/N]. Remediation status: [status] with target resolution [date if specified]. Summary analysis: [full analysis text]. Business contact: [name/role]. SOX allocation: [personnel]. This document addresses queries about [segment] operations, [region] compliance, [root cause type] issues, [impact type] adjustments, materiality assessments [if over thresholds], SOX investigations [if applicable], EUDA controls [if Y], [accounting standards mentioned], [systems/applications affected], and [all specific technical keywords and concepts from the document]."
 
     Integration rules:
-    - Create natural language flow (avoid lists)
-    - Include specific technical terms from document
-    - Mention accounting standards if referenced (ASC, IFRS, etc.)
-    - Include system/application names if mentioned
-    - Add business process keywords naturally
+    - Include EVERY field from the description's structured extract
+    - Maintain natural language flow while being comprehensive
+    - Include full descriptions, not abbreviated versions
+    - Ensure all bullet points are expanded into the narrative
+    - Include all financial amounts explicitly
+    - Add all technical terms, systems, and standards mentioned
+    - This field must be self-sufficient for the LLM to make selection decisions
 
 PHASE 5 - EDGE CASE HANDLING:
 5.  **EDGE CASE RULES:**
@@ -261,8 +263,8 @@ You MUST call the `generate_catalog_fields` tool. Provide the generated `usage` 
 
 Example JSON for the tool call arguments:
 {{
-  "usage": "SAB99 analysis for segment operations in region addressing specific issue...",
-  "description": "Natural language summary followed by structured extract with all fields..."
+  "usage": "SAB99 document [full comprehensive details including all fields, amounts, status, contacts, etc.]...",
+  "description": "This SAB99 document details... [natural language summary]. **IDENTIFICATION:** **SAB99 ID:** [structured extract follows]..."
 }}
 </RESPONSE_FORMAT>
 """
@@ -279,7 +281,7 @@ GPT_TOOL_DEFINITION = {
             "properties": {
                 "usage": {
                     "type": "string",
-                    "description": "An integrated paragraph optimized for both embedding similarity and LLM selection, combining SAB99 facts with contextual keywords for retrieval."
+                    "description": "A comprehensive paragraph containing ALL SAB99 structured details from the description field, optimized for LLM document selection. Must include every field since the LLM only sees this during selection."
                 },
                 "description": {
                     "type": "string",
